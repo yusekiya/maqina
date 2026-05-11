@@ -1,0 +1,72 @@
+[package]
+name = "kryanneal"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "_rust"
+# `cdylib`: maturin が wheel に同梱する Python 拡張用の動的ライブラリ.
+# `rlib`: `cargo test` の test target が `_rust` クレートをライブラリとして
+#         リンクできるようにする. 純 cdylib のみだと Cargo が test binary を
+#         ビルドできない.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# `blas`: link a system BLAS so `lanczos_propagate` の Level-1 / Level-2 ops を
+# CBLAS 経由で実行する. target ごとに backend を自動選択する:
+#
+# * macOS: Apple Accelerate (`accelerate-src` 経由, 追加 install 不要).
+# * Linux: system OpenBLAS (`openblas-src/system`). 本番ビルドでは
+#   `libopenblas-dev` (Debian/Ubuntu) などのパッケージを事前にインストール
+#   しておくこと.
+#
+# BLAS が利用できない環境向けのフォールバックとして
+# `cargo build --no-default-features` (maturin/uv では
+# `MATURIN_PEP517_ARGS="--no-default-features"`) で純 Rust の scalar ループ
+# 経路をビルドできる. 数値結果は両経路で 1e-13 相対精度以内で一致する.
+#
+# `extension-module`: pyo3 を Python 拡張モード (libpython を静的にリンク
+# せず, ホスト Python 側でシンボルを供給する) でビルドする. wheel ビルドでは
+# 必須だが `cargo test` の test binary は自前で実行されるため有効にすると
+# `_PyObject_*` 等が未解決になる. このため default features には含めず,
+# wheel ビルドでは pyproject.toml の `[tool.maturin] features` から明示的に
+# 有効化する. 普通の `cargo test` / `cargo build` では無効のまま.
+default = ["blas"]
+blas = ["dep:cblas", "dep:blas-src"]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pyo3 = "0.28"
+numpy = "0.28"
+num-complex = "0.4"
+ndarray = "0.16"
+# ndarray-linalg は LAPACK backend を feature で選ぶ必要がある
+# (`openblas-system` / `netlib-system` / `intel-mkl-system` 等).
+# macOS Accelerate には native 対応がないので, Lanczos 内の三重対角
+# 固有分解では (a) Linux のように openblas-system を使う / (b) 別途
+# hand-rolled な対称三重対角 QR を src/krylov.rs に書く / (c) 該当用途
+# 限定で nalgebra を併用する, のいずれかを Phase 1 で決める.
+# 詳細は docs/design.md §7.1 の "ndarray-linalg backend 注記" を参照.
+ndarray-linalg = "0.17"
+cblas = { version = "0.5", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+blas-src = { version = "0.12", features = ["accelerate"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+blas-src = { version = "0.12", features = ["openblas"], optional = true }
+# `blas-src/openblas` が optional dep として openblas-src を pull するが,
+# Linux 本番では system OpenBLAS をリンクしたいので明示的に `system` feature
+# を付けて features を unify させる.
+openblas-src = { version = "0.10", default-features = false, features = ["system"], optional = true }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.production]
+inherits = "release"
+codegen-units = 1
+lto = "fat"
+panic = "abort"

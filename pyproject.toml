@@ -1,0 +1,41 @@
+[project]
+name = "kryanneal"
+version = "0.0.0"
+description = "Krylov + Magnus quantum annealing simulator for the transverse-field Ising model"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.4.2",
+    "threadpoolctl>=3.0",
+]
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+# maturin 公式 docs 推奨の mixed Rust/Python project レイアウト.
+# Python ソースを python/kryanneal/ に置き、Cargo.toml + src/lib.rs は
+# プロジェクトルート直下. PyO3/maturin#490 で報告されている
+# ModuleNotFoundError pitfall を回避するため "python" を明示する.
+python-source = "python"
+module-name = "kryanneal._rust"
+features = ["extension-module"]
+profile = "production"
+strip = true
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.0",
+    "pytest>=8.3.0",
+    "qutip>=5.2.3",
+    "ruff>=0.15.1",
+    "ty>=0.0.17",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+markers = [
+    "slow: 重い統合テスト (Solver.run / 大規模ベンチ等). pytest -m 'not slow' で除外可",
+]
