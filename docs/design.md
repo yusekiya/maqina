@@ -318,6 +318,16 @@ class PauliTerm:
 builders は **Z のみ**を許容 (off-diagonal Pauli を渡されたら ValueError)。
 これは「H_problem は必ず Z 基底で対角」という設計契約を API 表面で守るため。
 
+実装ステータス: `IsingProblem` 本体 (フィールド + `__post_init__` 検証) は
+Phase 1 C6 で実装済み。`from_pauli_terms` / `from_J_h` classmethod は
+`builders` モジュールの実装 (別 issue) 待ちで, Phase 1 内 (C6 以降) で
+追加予定。それまでは `builders.diag_from_pauli_terms` /
+`builders.diag_from_J_h` を直接呼んで `H_p_diag` を構築し,
+`IsingProblem(n=..., H_p_diag=..., h_x=...)` に渡す経路を使う。なお
+実装上は `numpy.ndarray` のフィールドを持つため `@dataclass(frozen=True,
+eq=False)` を採用している (既定の `__eq__` は array の真偽値変換で
+`ValueError` になるため)。
+
 ### 4.3 `Schedule`
 
 ```python
@@ -419,6 +429,35 @@ class QuantumResult:
     n_steps_actual: int                   # adaptive 経路では実 step 数
     n_matvec: int                         # 累積 matvec 呼出
 ```
+
+Phase 1 subset: 本リリース (C6) では fixed-step M2 driver のみが
+提供されるため, 以下の最小フィールドのみを実装する:
+
+```python
+@dataclass(frozen=True, eq=False)
+class QuantumResult:
+    psi_final: np.ndarray                 # shape (2**n,) complex128
+    t_history: np.ndarray | None          # 観測量を記録した時刻列
+    observables_history: dict[str, np.ndarray]  # name -> shape (K,) 実数
+    n_steps: int                          # 実行 step 数
+    n_matvec: int                         # 累積 matvec 呼出
+
+@dataclass(frozen=True, eq=False)
+class Trajectory:
+    t_history: np.ndarray
+    observables_history: dict[str, np.ndarray]
+```
+
+追加予定のフィールド:
+
+- `times` / `states` (`store_states` / `store_times` 用) → `AnnealingSimulator`
+  と一緒に Phase 5 で追加 (parent issue #1 の Out of scope 表)
+- `success` / `method` / `n_steps_actual` (adaptive driver 用) → Phase 4 で
+  Richardson / M2 embedded 経路と一緒に追加
+- `probabilities` (`|psi_final|^2` の caching) → 必要性が出た時点で追加可能
+
+`eq=False` は `IsingProblem` と同じ理由 (ndarray フィールドの既定 `__eq__`
+が `ValueError` になる)。
 
 ### 4.5 `AnnealingSimulator`
 
