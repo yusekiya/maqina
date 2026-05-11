@@ -1,0 +1,72 @@
+# pre-commit hooks for kryanneal.
+#
+# 全フックは `local` で uv-managed venv の各ツールを呼ぶ (cv_ising と同方針).
+# pre-commit 自身が isolated env を作らないので, uv sync 後の dev 依存
+# (ruff / ty) と Rust toolchain (cargo / clippy / rustfmt) があれば動く.
+#
+# 初回セットアップ:
+#     uv run pre-commit install
+#
+# 全ファイルに対して手動実行:
+#     uv run pre-commit run --all-files
+
+repos:
+  - repo: local
+    hooks:
+      # ---------------------------------------------------------------
+      # Python (ruff + ty)
+      # ---------------------------------------------------------------
+      - id: ruff-check
+        name: Ruff lint
+        entry: uv run --quiet ruff check --force-exclude
+        language: system
+        types_or: [python]
+        # 自動生成 stub (.pyi) は対象外. それ以外の Python ソースは
+        # default location 配下の全てを lint 対象に含める.
+        files: ^(python/kryanneal/.*\.py|tools/.*\.py|tests/.*\.py|benchmarks/.*\.py)$
+
+      - id: ruff-format
+        name: Ruff format
+        entry: uv run --quiet ruff format --force-exclude
+        language: system
+        types_or: [python]
+        files: ^(python/kryanneal/.*\.py|tools/.*\.py|tests/.*\.py|benchmarks/.*\.py)$
+
+      - id: ty-check
+        name: ty type check (project mode)
+        # project mode: ファイル単位ではなくパッケージディレクトリを丸ごと
+        # チェックする. pass_filenames=false で常にこの単位で起動する.
+        entry: uv run --quiet ty check python/kryanneal
+        language: system
+        files: ^(python/kryanneal/.*\.pyi?|tools/.*\.py)$
+        pass_filenames: false
+
+      # ---------------------------------------------------------------
+      # Rust (rustfmt + clippy)
+      # ---------------------------------------------------------------
+      - id: cargo-fmt
+        name: cargo fmt --check
+        entry: cargo fmt --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy (deny warnings)
+        # default features (blas) の経路を厳しめに通す. fallback build
+        # (--no-default-features) は CI で別途網羅する.
+        entry: cargo clippy --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      # ---------------------------------------------------------------
+      # 自動生成 .pyi スタブの drift 検出
+      # ---------------------------------------------------------------
+      - id: gen-api-stubs
+        name: Regenerate per-module .pyi stubs
+        entry: uv run --quiet python tools/gen_api_stubs.py
+        language: system
+        files: ^(python/kryanneal/.*\.py|tools/gen_api_stubs\.py)$
+        # スクリプトは MODULES を一括処理するので filename を渡さない.
+        pass_filenames: false
