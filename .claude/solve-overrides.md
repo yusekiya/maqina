@@ -35,7 +35,8 @@
 
 ### Rust 変更時の必須手順
 
-- `src/*.rs` 変更後は `uv run pytest` を回す前に **`uv run maturin develop` を必ず 1 回回す**。忘れると古い `_rust.so` が読まれて Rust 変更がテストに反映されない (`docs/testing.md` の「既知の落とし穴」参照)。
+- `src/*.rs` 変更後は `uv run pytest` を回す前に **`uv run maturin develop --uv` を必ず 1 回回す**。忘れると古い `_rust.so` が読まれて Rust 変更がテストに反映されない (`docs/testing.md` の「既知の落とし穴」参照)。
+- **`--uv` フラグは必須**。`uv` 製の venv には pip が同梱されないため、`--uv` なしの `uv run maturin develop` は `No module named pip` で失敗する。`--uv` を渡すと maturin が `pip install` ではなく `uv pip install` を使う (詳細は `docs/testing.md` §ビルド前提)。
 
 ## 自動化モード stop conditions
 

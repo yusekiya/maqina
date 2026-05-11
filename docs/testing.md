@@ -149,8 +149,24 @@ uv run pre-commit run --all-files  # 全ファイルに対して手動実行
 
 - **`maturin develop` 忘れ**: Rust 変更後に `uv run pytest` だけ走らせると
   古い `_rust.so` が読まれる。Rust 変更を伴うコミットの前は必ず再ビルド。
+- **`maturin develop` の `--uv` フラグ忘れ**: `uv run maturin develop` を
+  `--uv` 無しで叩くと `No module named pip` で失敗する。`uv` 製 venv には
+  pip が同梱されておらず, maturin の default 経路 (`pip install` で wheel を
+  入れる) がそのままでは使えないため。**必ず `uv run maturin develop --uv`**
+  と書く (§ビルド前提のコマンド例参照)。
 - **`uv` 経由でない Python**: システム Python で `pytest` を直接叩くと
   ABI 不整合で `_rust.so` ロード失敗する。常に `uv run`。
 - **BLAS feature 切替**: `cargo test` と `cargo test --no-default-features`
   で結果が `rel > 1e-13` ずれる場合は要調査 (本来両経路で 1e-13 以内に
   一致するはず、cv_ising と同じ契約)。
+- **clippy `needless_range_loop`**: `for i in 0..n { ... arr[i] ... }` の
+  ような「インデックス変数で別スライスを引く」形式は clippy が reject
+  する (`-D warnings` 運用のため即 build fail)。`docs/design.md` の擬似
+  コードはインデックス記法で書かれているが, 実装では
+  `for (i, &x) in arr.iter().enumerate()` に書き換える。bit-flip 系のように
+  `i` を `1 << i` などビット演算でも使う場合, `enumerate()` 経由の `i` を
+  そのまま使えば一石二鳥。
+- **pre-commit auto-fix と再 stage**: `ruff format` と `cargo fmt` の hook
+  はファイルを **自動修正してから commit を止める** 挙動。`git commit` が
+  hook で落ちたら、修正されたファイルを `git add` し直してから再 commit
+  する。`gen-api-stubs` も同じ運用 (`.pyi` 再生成節参照)。
