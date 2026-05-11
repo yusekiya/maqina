@@ -673,18 +673,19 @@ pub fn trotter_step(
 }
 ```
 
-**設計判断 (cv-ising 流の reshape + GEMM を採用しない理由)**:
+**設計判断 (一般的な reshape + GEMM パターンを採用しない理由)**:
 
-cv-ising-solver では `apply_single_mode(M, psi_t, axis)` (`src/cv_ising/
-krylov.py:224`) として「`psi` を `(N_fock,) * m` に reshape → 単一 BLAS
-GEMM」 パターンを取っているが、本パッケージでは以下の理由で **N_fock=2
-特化の自前 bit-flip pass** を選ぶ:
+連続変数 / 一般 bosonic 系では `apply_single_mode(M, psi, axis)` を
+「`psi` を `(N_fock,) * m` に reshape → 単一 BLAS GEMM」 パターンで書くのが
+定石だが、本パッケージでは以下の理由で **N_fock=2 特化の自前 bit-flip pass**
+を選ぶ:
 
 1. **GEMM 呼び出しオーバヘッド**: N_fock=2 では右オペランドが (2, dim/2) の
-   非常に細長い行列で、cv-ising の N_fock=20-40 と比べて BLAS の per-call
-   overhead が相対的に重い (推定で dim < 2^12 程度で自前ループが優位)。
-2. **中間軸 moveaxis のコピー**: cv-ising の中間軸 fast path は
-   `np.moveaxis` + workspace への物理コピーが必要 (`krylov.py:237-`)。
+   非常に細長い行列となり、N_fock が大きい (~20-40) ケースと比べて BLAS の
+   per-call overhead が dim に対して相対的に重い (推定で dim < 2^12 程度で
+   自前ループが優位)。
+2. **中間軸 moveaxis のコピー**: 一般の reshape + GEMM 経路では中間軸を
+   末尾に持ってくる `np.moveaxis` + workspace への物理コピーが必要。
    N_fock=2 だと「ペアの swap-with-mix」は連続 / 2-stride アクセスで
    コピー不要で済むため、moveaxis を挟むのは逆に損。
 3. **`apply_h_kryanneal` と同じ層に揃える**: Phase 6 の cache
@@ -1356,8 +1357,8 @@ U(dt) ≈ phase_p(dt/2) · (Π_i R_i(dt)) · phase_p(dt/2)
 
 - Rust 側に `apply_single_mode_axis_i` を新規実装 (詳細 §5.1.2):
   - `(psi[k], psi[k ^ (1<<i)])` ペアに 2×2 ユニタリを in-place 適用
-  - N_fock=2 特化、cv-ising 流の reshape + GEMM ではなく自前 bit-flip
-    pass で書く (採用根拠は §5.1.2 末尾)
+  - N_fock=2 特化の自前 bit-flip pass で書く (一般的な reshape + GEMM
+    パターンを採らない根拠は §5.1.2 末尾)
   - Phase 2 ではスカラ単スレッド (SIMD/threading は Phase 6 で乗せる)
 - Rust 側に `trotter_step` (Strang 1 step エントリ) を新規実装
 - 4 次 Suzuki (Trotter-Suzuki S_4) はオプションで追加可
@@ -1442,5 +1443,5 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   (commutator-free Magnus expansion, CFM4:2)
 - Park, Light (1986), *J. Chem. Phys.* 85, 5870
   (Lanczos short-iterative time propagator)
-- Tanaka group, `cv-ising-solver`
+- Shu Tanaka group, `cv-ising-solver`
   (連続変数版の Krylov + CFM4 実装、本パッケージのカーネル設計の参照)
