@@ -25,7 +25,7 @@ step-doubling Richardson 推定子を PI 制御に流す方式 (詳細 §5.3)。
   (M2 / CFM4:2) に加え、**step-doubling Richardson の adaptive dt
   ドライバ** を提供する (Section 5.3)。
 - **Python interface / Rust kernel**: ユーザー向け API は Python、内部の
-  ホットループ (Lanczos / CFM4:2) は Rust (`ndarray` + `ndarray-linalg`)。
+  ホットループ (Lanczos / CFM4:2) は Rust (`ndarray` ベース、LAPACK 非依存)。
 - **QuTiP との比較**: `sesolve` ベースの参照経路を `benchmarks/` および
   `tests/` 配下に同梱し、近似誤差と性能を同一マシン上で評価可能にする。
 
@@ -133,8 +133,8 @@ N=24 で diag 128 MB + ψ 256 MB。
 
 | 層 | 責務 |
 |---|---|
-| Python (`src/kryanneal/`) | 公開 API、`IsingProblem` / `Schedule` / `Annealer` の組み立て、結果オブジェクト、瞬時固有状態への投影、入力検証、QuTiP 比較ヘルパ |
-| Rust (`rust/src/`) | Lanczos ループ (`lanczos_propagate`)、CFM4:2 / M2 / Richardson 推定子の段階指数積、行列分解 (`ndarray-linalg`)、BLAS 経由の Level-1/2 ops |
+| Python (`python/kryanneal/`) | 公開 API、`IsingProblem` / `Schedule` / `Annealer` の組み立て、結果オブジェクト、瞬時固有状態への投影、入力検証、QuTiP 比較ヘルパ |
+| Rust (`src/`) | Lanczos ループ (`lanczos_propagate`)、CFM4:2 / M2 / Richardson 推定子の段階指数積、三重対角固有分解 (hand-rolled QL)、BLAS 経由の Level-1/2 ops |
 | Rust matvec (`apply_h_kryanneal`) | bit-flip + 対角積を組み合わせた matvec。Python callback を介さず Rust 内で完結 |
 
 #### matvec を Rust 側に置く理由
@@ -189,8 +189,9 @@ kryanneal/
 ├── src/                        # ← Rust ソース (maturin 標準位置)
 │   ├── lib.rs                  # PyO3 エントリポイント (#[pymodule] fn _rust)
 │   ├── matvec.rs               # apply_h_kryanneal (bit-flip + diag)
-│   ├── krylov.rs               # lanczos_propagate (ndarray + ndarray-linalg)
+│   ├── krylov.rs               # lanczos_propagate (ndarray ベース)
 │   ├── cfm4.rs                 # CFM4:2 / M2 / Richardson
+│   ├── tridiag.rs              # 実対称三重対角の implicit QL (hand-rolled)
 │   └── blas.rs                 # 内積 / axpy / nrm2 / scal ラッパ
 ├── python/                     # ← Python ソース (python-source = "python")
 │   └── kryanneal/
@@ -286,6 +287,8 @@ class IsingProblem:
 
     def __post_init__(self) -> None:
         # shape / dtype / 非NaN チェック。h_x の長さが n か確認。
+        # n の上限ガードは入れない (numpy が allocate 段階で MemoryError を
+        # 出すのに任せる)。
         ...
 
     @classmethod
@@ -336,13 +339,34 @@ class Schedule:
         cls, T: float, A: Callable, B: Callable, s: Callable | None = None
     ) -> "Schedule": ...
 
+    @classmethod
+    def reverse(cls, T: float, s_init: float = 1.0, s_target: float = 0.5) -> "Schedule":
+        """Reverse annealing schedule preset.
+
+        s(t) を s_init から s_target まで半分の時間で下げ, 残り半分で
+        s_init に戻す V 字形 (Crosson-Harrow 2016 流)。
+        A(s) = 1 - s, B(s) = s は linear と同じ。
+        """
+        ...
+
+    @classmethod
+    def pause(cls, T: float, t_pause: float, duration: float) -> "Schedule":
+        """Pause schedule preset.
+
+        通常の linear ramp 中で `t \\in [t_pause, t_pause + duration]` の
+        区間だけ s(t) を一定に保つ (King-Carrasquilla 2018 流の pause)。
+        """
+        ...
+
     def coeffs_at(self, t: float) -> tuple[float, float]:
         """(A(s(t)), B(s(t))) を返す。Annealer / Rust 側に渡すスカラー."""
         ...
 ```
 
-実装注: `s(t)` を内部で grid 評価し配列で持つキャッシュを用意するかは
-adaptive 経路で重要 (Section 5.3)。MVP では callable のまま per-step 評価。
+実装注: 全フェーズで callable のまま per-step 評価する。Schedule 評価
+コストは Lanczos 1 step の <1% (1 step あたり 3〜6 回、各 ~1 μs) なので
+grid cache 化の ROI が薄く、将来必要になっても内部実装の差し替えで
+破壊変更なしで導入可能。
 
 ### 4.4 `QuantumAnnealer`
 
@@ -466,12 +490,41 @@ def instantaneous_eigenstates(
 
 実装方針:
 
-- `method="lanczos"` (default): `ndarray-linalg` の Lanczos / Arnoldi 互換
-  ルートで下位 k 固有値を反復。matvec は本体と共有 (`apply_h_kryanneal`)。
-- `method="exact"`: 小規模問題 (`n <= 12`) 向け、dense `eigh` (検証用)。
+- `method="lanczos"` (default): `lanczos_propagate` と同じ Lanczos 反復で
+  下位 k 固有値を取得 (`apply_h_kryanneal` を再利用、§5.2 の三重対角化を
+  そのまま使い、最終的に hand-rolled QL で固有値・固有ベクトルを得る)。
+- `method="exact"`: 小規模問題 (`n <= 12`) 向け、Python 側で
+  `numpy.linalg.eigh` を使った dense 検証経路 (Rust 経由で LAPACK を
+  呼ばない)。
 
 ユーザーは `ψ(t)` を `eigvecs` に内積して amplitude を出す:
 `amps = eigvecs.conj().T @ psi(t)`。
+
+### 4.8 例外型ポリシー
+
+v0.1 では **Python 標準例外のみ** を使う:
+
+| 状況 | 例外型 |
+|---|---|
+| 入力検証失敗 (shape / dtype / NaN / 非正規化 psi0 / `n != len(h_x)` 等) | `ValueError` |
+| パラメタ範囲外 (`T <= 0`, `dt0 <= 0`, `n_steps < 1` 等) | `ValueError` |
+| adaptive dt 連続 reject 超過 (`max_rejects` 到達) | `RuntimeError` |
+| Lanczos 部分空間構築での数値破綻 | `RuntimeError` |
+| 三重対角 QL の収束失敗 (`30·m` iter 到達) | `RuntimeError` |
+| Rust 拡張のロード失敗 (`_rust` 未ビルド) | `ImportError` + `RuntimeWarning` |
+
+Rust 側からは PyO3 の `PyValueError::new_err(...)` / `PyRuntimeError::new_err(...)`
+で raise する。custom exception hierarchy (`KryannealError` ベース等) は
+**v0.1 では定義しない**。必要性が出てきた場合は、v0.2 以降で
+
+```python
+class KryannealError(Exception): ...
+class KrySchemaError(KryannealError, ValueError): ...
+class KryConvergenceError(KryannealError, RuntimeError): ...
+```
+
+のような多重継承で **既存の `except ValueError:` / `except RuntimeError:` を
+壊さずに**段階的に導入可能 (後方互換性を保ったまま追加できる)。
 
 ---
 
@@ -529,8 +582,9 @@ fn apply_h(
 `exp(-i dt H) ψ` を `m` 次元 Lanczos + 三重対角固有分解で計算する
 matrix-free 短時間プロパゲータ (Park-Light 1986)。実装方針:
 
-- 行列演算は **ndarray + ndarray-linalg** に統一 (ユーザー要件)。
-- 三重対角の対称固有分解は `ndarray_linalg::Eigh` (LAPACK `*syevd` 経由) を使用。
+- 配列型は **ndarray** に統一。
+- 三重対角の対称固有分解は **hand-rolled な implicit QL with Wilkinson shift**
+  を `src/tridiag.rs` に持つ (LAPACK 依存を切る; 詳細 §7.1)。
 - ベクトル長 dim 依存 ops は `cblas` クレート経由のラッパで書く
   (BLAS feature on/off を Cargo features で切替; §7.1, §7.4)。
 - Full re-orthogonalization (Gram-Schmidt 2-pass) を採用。
@@ -546,7 +600,7 @@ pub(crate) fn lanczos_propagate<F>(
     dt: f64,
     m: usize,
     tol: f64,
-) -> Result<Vec<Complex64>, KryError>
+) -> PyResult<Vec<Complex64>>
 where
     F: FnMut(&[Complex64], &mut [Complex64]),  // y = H · v
 ```
@@ -778,41 +832,51 @@ def diag_from_J_h(
 
 - `pyo3 = "0.28"`
 - `numpy = "0.28"`
-- `ndarray = "0.16"` ←
-- `ndarray-linalg = "0.17"` ← LAPACK 経由の三重対角固有分解 / 行列指数 (必要なら)
+- `ndarray = "0.16"`
 - `num-complex = "0.4"`
 - `cblas = "0.5"` (optional, BLAS feature)
 - `blas-src = "0.12"`:
   - macOS: `accelerate` feature
   - Linux: `openblas` feature (system OpenBLAS)
 
-**ndarray-linalg backend 注記** (Phase 1 で決定する設計判断):
+**三重対角固有分解の実装方針** (確定):
 
-`ndarray-linalg 0.17` は LAPACK backend を Cargo feature で 1 つ選ぶ必要
-がある (`openblas-system` / `openblas-static` / `netlib-system` /
-`netlib-static` / `intel-mkl-system` / `intel-mkl-static`)。**macOS Accelerate
-への native 対応はない**ため、CFM4:2 / Lanczos 内で必要となる
-**m × m (m ~ 24) の対称三重対角固有分解**の処理経路として 3 案が考えられる:
+Lanczos 1 step で必要な唯一の LAPACK 相当の処理は **m × m (m ~ 24) の
+実対称三重対角固有分解**。これは hot path ではない (step 全体の <0.5%) ので、
+LAPACK を引っ張ってくる ROI が低い。本パッケージは **`ndarray-linalg`
+を依存に入れず**、`src/tridiag.rs` に **implicit QL with Wilkinson shift**
+を hand-roll する。
 
-| 案 | macOS | Linux | 備考 |
-|---|---|---|---|
-| A. `ndarray-linalg` + `openblas-system` 統一 | `brew install openblas` 必要 | `libopenblas-dev` 必要 | `blas-src` の方も全プラットフォーム OpenBLAS に揃えるか、Accelerate を残すなら backend が分裂する |
-| B. `ndarray` のみ + hand-rolled 三重対角 QR | Accelerate 維持 | OpenBLAS 維持 | m ≤ 24 なので scalar Rust で十分速い; LAPACK 依存を切れる |
-| C. `ndarray-linalg` を捨て、当該用途のみ `nalgebra::SymmetricEigen` | Accelerate 維持 | OpenBLAS 維持 | ユーザー要件の "ndarray-linalg 使用" には反するため非推奨 |
+選定理由:
 
-ユーザー要件は **ndarray + ndarray-linalg** なので 案 A を第一候補とする。
-ただし macOS Accelerate を失うと Level-1/2 BLAS の性能が大きく下がる可能性
-があるため、**Phase 1 で実機ベンチを取って判断する** (`blas-src` 側は
-Accelerate、`ndarray-linalg` 側は openblas-system という混在も技術的には
-可能だが、複数 BLAS pool 同居の `set_blas_threads` 制御が複雑化する)。
+- m=24 の三重対角固有分解は ~1.4 × 10⁴ FP ops で <10 μs。Lanczos 1 step
+  全体は dim 依存 ops (`cblas` 経由) が支配的 (dim=2^20 で ~500 μs)
+- LAPACK 依存を切ることで以下が解消される:
+  - macOS で `brew install openblas` 等の追加 install 不要
+  - Apple Accelerate を Level-1/2 BLAS でフル活用できる (AMX 経路)
+  - `blas-src` と LAPACK backend の二重管理を避けられる
+  - wheel の static 同梱が単純化する
 
-Phase 1 の意思決定基準:
+実装規模:
 
-- 案 A (`openblas-system` 統一) を試し、macOS で Apple Accelerate に対する
-  性能ペナルティが `bench_per_step.py` 比で 2x 以内なら採用
-- それを超える劣化が出るなら 案 B (hand-rolled tridiag QR) にフォールバック
-  し、`ndarray-linalg` 依存自体を `[dev-dependencies]` (テスト検証用) に
-  落とす
+- `src/tridiag.rs` は ~100〜150 行 (Wilkinson shift, Givens rotation,
+  deflation 閾値, max-iter cap 含む)
+- 出力 (固有値 λ_p の昇順、固有ベクトル行列 Q) は `dsteqr` 互換のシグネチャ
+- Givens rotation は `f64::hypot` を使い overflow/underflow を回避
+- Deflation 閾値は `|β_k| ≤ ε · (|α_{k-1}| + |α_k|)` (ε = `f64::EPSILON`)
+- Max iter cap: 30·m (LAPACK `dsteqr` と同じ)
+- 収束失敗時は `Err(PyRuntimeError::new_err("tridiag QL did not converge ..."))`
+  を返し、Python 側で `RuntimeError` として伝播 (例外型方針は §4.8 を参照)
+
+テスト戦略:
+
+- `cargo test`: ランダム m×m tridiag (m ∈ {2, 8, 16, 24, 48}) を生成し、
+  hand-rolled の出力と **`nalgebra::SymmetricTridiagonal`** (dev-dep のみ)
+  の固有値/固有ベクトルを比較。`rel < 1e-13` で一致を要求
+- `pytest`: 同じテストを Rust の公開 `_rust._tridiag_eigh_py` 経由で呼び、
+  `scipy.linalg.eigh_tridiagonal` と `rel < 1e-13` で一致を確認
+- Fuzzing: ランダムシード sweep でクラスタ・退化ケースを smoke test
+- 収束失敗は明示的にハンドル (max_iter 超過 → `RuntimeError`)
 
 ### 7.2 BLAS 経由のホットパス
 
@@ -1094,7 +1158,11 @@ cargo test --no-default-features # scalar fallback
 ### Phase 1: MVP (~v0.1)
 
 - `IsingProblem`, `Schedule`, `QuantumAnnealer.run(method="m2")` のみ
-- Rust 拡張: `apply_h_kryanneal`, `lanczos_propagate`, `m2_midpoint_step`
+- `Schedule` プリセット: `linear` / `from_callable` / `reverse` / `pause`
+  (reverse annealing と pause schedule は研究用途で頻出するため Phase 1
+  時点で同梱)
+- Rust 拡張: `apply_h_kryanneal`, `lanczos_propagate`, `m2_midpoint_step`,
+  `tridiag_eigh` (hand-rolled QL)
 - Python リファレンス (`_python_*`) との等価性テスト
 - 小規模 QuTiP 比較テスト
 
@@ -1116,30 +1184,35 @@ cargo test --no-default-features # scalar fallback
 - `Observable` クラス、観測量時系列記録
 - `instantaneous_eigenstates`
 
-### Phase 5: 仕上げ
+### Phase 5: 仕上げ + Trotter 経路 (~v0.5)
 
 - ベンチマーク完備、QuTiP 大規模比較
 - BLAS feature on/off 数値検証 CI
 - ドキュメント、Quick start サンプル
+- **Trotter 分解版経路** (`method="trotter"`, 2 次 Trotter / 4 次 Suzuki)
+  の薄い実装。Krylov+Magnus との数値一致クロスチェック用途で、Phase 1-4
+  の主力経路を補完する位置付け (回路シミュレータとしての完成度より、
+  検証用途を優先)
 
 ---
 
-## 13. 未確定事項 / Future work
+## 13. Future work (v0.5 までは対応しない範囲)
 
-- **Reverse annealing / pause schedule** の専用ヘルパ: `Schedule.reverse(...)`
-  等のプリセットを追加するか。MVP では callable で十分。
-- **複数の driver 形** (XX 等の k-local X): v0.1 では `-Σ h_x_i X_i` のみ。
-  XX driver は別 matvec パスが必要 (bit-flip 2 ビット同時) のため Future work。
-- **dim ≥ 2^25 級** の分散 / GPU 対応: 単機シェアードメモリで設計し、
-  v1 範囲では扱わない。
-- **GPU 対応**: `ndarray-linalg` は CPU LAPACK 専用。CuPy / Vulkan / Metal
-  経由の matvec は別 backend として `kryanneal._gpu` 拡張モジュールを
-  切る形が自然 (Future work)。
-- **Trotter 分解版 (回路シミュレータ)** との比較: Trotter-Suzuki 分解で
-  量子回路ベースのアニーリングシミュレーションを行う経路を載せるかは未定。
-  MVP には不要。
+以下の項目は **v0.5 までのリリース計画には含めない** ことが確定済み
+(Phase 計画は §12 参照)。リクエストが出てきた時点で v0.6+ として再評価する。
+
+- **複数の driver 形 (XX 等の k-local X)**: v0.1〜v0.5 では driver を
+  `-Σ h_x_i X_i` (サイト依存の単一 X) に限定する。XX 等の k-local X 項を
+  入れるには matvec.rs に bit-flip 2 ビット同時パスの新規実装 (~200 行)
+  と Schedule API の拡張が必要なため後送り。
+- **dim ≥ 2^25 級の分散実行**: 単機シェアードメモリで設計する。MPI /
+  NCCL / dask 等の分散層は別プロジェクト級の作業量になるため範囲外。
+- **GPU 対応**: CuPy / Vulkan / Metal 経由の matvec は別 backend として
+  `kryanneal._gpu` 拡張モジュールを切る形を想定。1 リリース分相当の
+  作業量なので v0.5 までには含めない。
 - **シンボリックスケジュール**: SymPy で A(s), B(s) を書いて自動微分から
-  CFM4 係数を引く API。Future work。
+  CFM4 高次係数を生成する API。ニッチかつ既存 callable で代替可能なため
+  優先度低。
 
 ---
 

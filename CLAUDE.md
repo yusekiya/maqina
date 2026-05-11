@@ -19,8 +19,9 @@ Hamiltonian の時間発展演算子を近似する。adaptive dt ドライバ
 - 型チェック: `ty`
 - 主要依存: `numpy`, `threadpoolctl`
 - dev 依存: `pytest`, `qutip` (参照実装比較用), `pre-commit`, `ruff`, `ty`
-- Rust: `pyo3 0.28`, `numpy 0.28`, `ndarray 0.16`, `ndarray-linalg 0.17`,
-  `num-complex 0.4`, `cblas 0.5` (optional)
+- Rust: `pyo3 0.28`, `numpy 0.28`, `ndarray 0.16`, `num-complex 0.4`,
+  `cblas 0.5` (optional)。LAPACK 非依存 (三重対角固有分解は
+  `src/tridiag.rs` に hand-rolled 実装、§7.1 参照)
 
 ## 設計書
 
@@ -46,8 +47,9 @@ kryanneal/
 ├── src/                        # Rust ソース
 │   ├── lib.rs                  # PyO3 #[pymodule] fn _rust エントリポイント
 │   ├── matvec.rs               # apply_h_kryanneal (bit-flip + diag)
-│   ├── krylov.rs               # lanczos_propagate (ndarray + ndarray-linalg)
+│   ├── krylov.rs               # lanczos_propagate (ndarray ベース)
 │   ├── cfm4.rs                 # CFM4:2 / M2 / Richardson 推定子
+│   ├── tridiag.rs              # 実対称三重対角の implicit QL (hand-rolled)
 │   └── blas.rs                 # 内積 / axpy / nrm2 / scal ラッパ
 ├── python/kryanneal/           # Python ソース (python-source = "python")
 │   ├── __init__.py             # 公開 API

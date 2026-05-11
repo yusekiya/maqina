@@ -29,6 +29,7 @@ use pyo3::prelude::*;
 // mod matvec;
 // mod krylov;
 // mod cfm4;
+// mod tridiag;
 // mod blas;
 
 /// 本拡張が `blas` feature 有効でビルドされたかを示す compile-time フラグ.
