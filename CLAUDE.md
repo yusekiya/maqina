@@ -36,7 +36,8 @@ Hamiltonian の時間発展演算子を近似する。adaptive dt ドライバ
 - §5 数値カーネル (Lanczos, M2, CFM4:2, Trotter, Richardson adaptive 含む)
 - §7 Rust 拡張 (BLAS feature, maturin 標準レイアウト準拠の根拠)
 - §8 QuTiP 比較
-- §12 段階リリース計画 (Phase 1-6)
+- §12 段階リリース計画 (Phase 1-6) / §12.0 バージョニングポリシー
+  (Phase N 完了で `0.N.0` へ bump)
 
 ## レイアウト
 

@@ -1369,6 +1369,34 @@ cargo test --no-default-features # scalar fallback
 
 ## 12. 段階リリース計画
 
+### 12.0 バージョニングポリシー
+
+`pyproject.toml` / `Cargo.toml` の `version` は **Phase 完了時に
+`0.N.0` へ bump** する (Phase N → v0.N の一対一マッピング)。
+
+| 時点 | `version` |
+|---|---|
+| 初期状態 / Phase 1 進行中 | `0.0.0` |
+| Phase 1 完了 (umbrella #1 close 時) | `0.1.0` |
+| Phase 2 完了 | `0.2.0` |
+| ... | ... |
+| Phase 6 完了 | `0.6.0` |
+| Phase 6 後 | §13 Future work を再評価して `0.7.0+` のロードマップを引く |
+
+bump 操作は **Phase の最後の child issue を解決する PR に同梱する**
+(別 release commit を作る運用も可だが, ヒストリ簡潔化のため同梱を
+基本とする). bump コミットに含めるファイル:
+
+- `pyproject.toml` の `version`
+- `Cargo.toml` (workspace なら `[package].version`) の `version`
+- 本ドキュメント L1 の "設計書 (v0.X draft)" / "(v0.X)" 表記
+  (Phase 1 完了時は "draft" を外し "v0.1" に確定)
+- (任意) `CHANGELOG.md` に Phase 単位の差分を追記
+
+破壊変更がない限り MAJOR (`1.0.0`) は v1.0 ロードマップを別途引いてから.
+v0.x の範囲では SemVer の通常規約に従い MINOR (`0.N.0` → `0.N+1.0`) で
+互換性のない変更を吸収可能とする (v0 段階のため).
+
 ### Phase 1: MVP / scalar baseline (~v0.1)
 
 - `IsingProblem`, `Schedule`, `QuantumAnnealer.run(method="m2")` のみ
