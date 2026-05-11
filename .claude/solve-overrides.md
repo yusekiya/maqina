@@ -15,6 +15,18 @@
 
 詳細手順は `docs/testing.md` を一次資料とする。下記は要点のみ。
 
+### 実行経路 (default: test-runner subagent 経由)
+
+長い `passed` 列や verbose 出力でメイン context を圧迫しないよう, **テスト・lint・maturin develop の実行は原則 `test-runner` subagent (`.claude/agents/test-runner.md`) に委譲する**。本 agent は `Bash` / `Read` のみ持つ read-only ランナーで, pass/fail サマリと失敗時の末尾 stdout 抜粋だけを返す.
+
+並列実行の方針:
+
+- `cargo test` (BLAS on) と `uv run pytest` は **独立** (前者は `target/`, 後者は既存 `_rust.so` を読むだけ) のため, メイン側から 2 つの test-runner agent を **同時起動** して並列化してよい.
+- `cargo test` (BLAS on) と `cargo test --no-default-features` は **同じ `target/` のロックを争うため実質シリアル化** する. 並列起動するメリットは無いので順次実行する.
+- `uv run maturin develop --uv` と `uv run pytest` は **serialize 必須**. `_rust.so` 上書き中に pytest がロードすると ABI 不整合になる. maturin が完了してから pytest を起動する.
+
+直接 Bash で `cargo test` 等を叩くのは, **agent 起動オーバヘッドのほうが重い極小タスク** (単一テストの再実行など) や, **失敗の生 stdout を逐次見たいデバッグ局面** に限定する.
+
 ### Python (uv + pytest)
 
 - 通常実行: `uv run pytest`
