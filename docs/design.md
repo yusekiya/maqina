@@ -122,7 +122,9 @@ N=24 で diag 128 MB + ψ 256 MB。
 │  │    cfm4_step          (CFM4:2 1 step)                  │  │
 │  │    m2_midpoint_step   (M2 中点則 1 step)               │  │
 │  │    cfm4_step_with_*_estimate (embedded error 推定子)   │  │
-│  │    apply_h_kryanneal  (matvec 本体; bit-flip + 対角積) │  │
+│  │    trotter_step       (Strang / Suzuki 1 step, Phase 2)│  │
+│  │    apply_h_kryanneal  (matvec; bit-flip + 対角積)      │  │
+│  │    apply_single_mode_axis_i (2×2 ユニタリ in-place適用)│  │
 │  └────────────────────────────────────────────────────────┘  │
 │         ▼                                                    │
 │  QuantumResult / Trajectory dataclass                        │
@@ -134,8 +136,8 @@ N=24 で diag 128 MB + ψ 256 MB。
 | 層 | 責務 |
 |---|---|
 | Python (`python/kryanneal/`) | 公開 API、`IsingProblem` / `Schedule` / `Annealer` の組み立て、結果オブジェクト、瞬時固有状態への投影、入力検証、QuTiP 比較ヘルパ |
-| Rust (`src/`) | Lanczos ループ (`lanczos_propagate`)、CFM4:2 / M2 / Richardson 推定子の段階指数積、三重対角固有分解 (hand-rolled QL)、BLAS 経由の Level-1/2 ops |
-| Rust matvec (`apply_h_kryanneal`) | bit-flip + 対角積を組み合わせた matvec。Python callback を介さず Rust 内で完結 |
+| Rust (`src/`) | Lanczos ループ (`lanczos_propagate`)、CFM4:2 / M2 / Richardson 推定子の段階指数積、Trotter step (Phase 2 以降)、三重対角固有分解 (hand-rolled QL)、BLAS 経由の Level-1/2 ops |
+| Rust matvec / primitives | `apply_h_kryanneal` (matvec, bit-flip + 対角積) と `apply_single_mode_axis_i` (Trotter 用 2×2 ユニタリ axis i 作用) を Python callback を介さず Rust 内で完結 |
 
 #### matvec を Rust 側に置く理由
 
@@ -188,9 +190,10 @@ kryanneal/
 │   └── benchmarks.md
 ├── src/                        # ← Rust ソース (maturin 標準位置)
 │   ├── lib.rs                  # PyO3 エントリポイント (#[pymodule] fn _rust)
-│   ├── matvec.rs               # apply_h_kryanneal (bit-flip + diag)
+│   ├── matvec.rs               # apply_h_kryanneal, apply_single_mode_axis_i
 │   ├── krylov.rs               # lanczos_propagate (ndarray ベース)
 │   ├── cfm4.rs                 # CFM4:2 / M2 / Richardson
+│   ├── trotter.rs              # trotter_step (Phase 2 で追加)
 │   ├── tridiag.rs              # 実対称三重対角の implicit QL (hand-rolled)
 │   └── blas.rs                 # 内積 / axpy / nrm2 / scal ラッパ
 ├── python/                     # ← Python ソース (python-source = "python")
@@ -530,7 +533,21 @@ class KryConvergenceError(KryannealError, RuntimeError): ...
 
 ## 5. 数値カーネル
 
-### 5.1 matvec: `apply_h_kryanneal`
+### 5.1 matvec / per-axis primitives
+
+Rust 側に持つ低レベル配列演算プリミティブは 2 種類:
+
+| プリミティブ | 用途 | 導入 phase | 動作モード |
+|---|---|---|---|
+| `apply_h_kryanneal` | Lanczos / CFM4:2 (Magnus 系) の matvec | Phase 1 | additive: `y += c·H·v` 系 |
+| `apply_single_mode_axis_i` | Trotter 系の 2×2 ユニタリ適用 | Phase 2 | in-place rotation |
+
+両者とも bit-flip 構造 (`(psi[k], psi[k ^ (1<<i)])` のペア処理) を共有するが、
+matvec は **複数 i の寄与を 1 つの y に足し込む** のに対し、Trotter は
+**1 つの i ごとに in-place で psi を回転する** という違いがあり、メモリ
+アクセスパターンと最適化の余地が異なるため別関数として書く。
+
+#### 5.1.1 `apply_h_kryanneal` (Phase 1)
 
 時間依存スカラー `(A_t, B_t)` を渡し、Rust 内で `(A_t · h_x, B_t · H_p_diag)`
 を組み合わせた matvec を 1 回適用する。Python 越境は **Lanczos の 1 step
@@ -560,7 +577,7 @@ fn apply_h(
     for i in 0..n {
         let coeff = -a_t * h_x[i];
         let mask = 1usize << i;
-        // ※ inner loop は cache-blocking + SIMD 余地あり (Section 7.2 参照)
+        // ※ inner loop は cache-blocking + SIMD 余地あり (Phase 6 で対応)
         for k in 0..dim {
             y[k] += Complex64::new(coeff, 0.0) * v[k ^ mask];
         }
@@ -568,14 +585,116 @@ fn apply_h(
 }
 ```
 
-性能考慮 (Section 7 で詳述):
+性能考慮:
 
-- diagonal 部分は cblas `zdscal` + 要素積を unrolled inner loop で。
+- diagonal 部分は cblas `zdscal` + 要素積を unrolled inner loop で
 - bit-flip 部分は `i` 外側 / `k` 内側で連続アクセスにできる: ビット i に
   ついて k と k^mask のペアを `mask=1<<i` で 2 元ストライドにより列挙。
   i=0 で stride 1、i=1 で stride 2、... と level-by-level に走査することで
   TLB / L2 ヒット率を上げる古典的テクニック (state-vector simulator の
-  X-gate pass と同一)。
+  X-gate pass と同一)。**Phase 1 ではスカラ単スレッド実装、Phase 6 で
+  rayon + SIMD + cache block-fusion を載せる** (§12 Phase 6)
+
+#### 5.1.2 `apply_single_mode_axis_i` (Phase 2)
+
+Trotter 経路で `R_i(θ) = cos(θ)·I + i·sin(θ)·X_i` を psi に in-place で
+適用する関数。X_i が bit-flip 演算子であることを活用し、`(psi[k],
+psi[k ^ (1<<i)])` のペアごとに 2×2 ユニタリ U を直接乗じる:
+
+```rust
+/// psi を axis i で 2 元化したペアに 2×2 ユニタリ U を in-place 適用.
+///
+/// U は `[[u00, u01], [u10, u11]]` の row-major 2x2 行列。
+/// Trotter で R_i(θ) を渡す場合は u00=u11=cos θ, u01=u10=i·sin θ.
+fn apply_single_mode_axis_i(
+    psi: &mut [Complex64],
+    u: &[Complex64; 4],   // row-major 2x2
+    i: usize,
+    n: usize,
+) {
+    let dim = 1usize << n;
+    let mask = 1usize << i;
+    // bit i = 0 の k だけを enumerate (重複適用を避ける)
+    let mut k = 0usize;
+    while k < dim {
+        if k & mask != 0 {
+            k += 1;
+            continue;
+        }
+        let a = psi[k];
+        let b = psi[k | mask];
+        psi[k]        = u[0] * a + u[1] * b;
+        psi[k | mask] = u[2] * a + u[3] * b;
+        k += 1;
+    }
+}
+```
+
+(実装は `i` ごとに stride を変える 2 重ループ形に整える: 外側で長さ
+`1<<i` のブロックを走り、内側で連続 dim/2 ペアを処理する。`k & mask != 0`
+のスキップを実行せずに済む形にする。詳細は実装時に決める。)
+
+呼び出し側 (`trotter_step`):
+
+```rust
+pub fn trotter_step(
+    psi: &mut [Complex64],
+    h_x: &[f64],          // length n, サイトごとの横磁場振幅
+    h_p_diag: &[f64],     // length 2^n
+    a_t: f64,             // A(s(t + dt/2)) などの schedule 値 (中点)
+    b_t: f64,
+    dt: f64,
+    n: usize,
+) {
+    let dim = 1usize << n;
+
+    // Strang: phase_p(dt/2) -> Π_i R_i(dt) -> phase_p(dt/2)
+    let half = 0.5 * dt;
+    for k in 0..dim {
+        let phi = -b_t * h_p_diag[k] * half;
+        psi[k] *= Complex64::new(phi.cos(), phi.sin());
+    }
+    for i in 0..n {
+        let theta = -a_t * h_x[i] * dt;   // 符号は H_drv = -Σ h_x_i X_i から
+        let c = theta.cos();
+        let s = theta.sin();
+        let u = [
+            Complex64::new(c, 0.0),
+            Complex64::new(0.0, s),
+            Complex64::new(0.0, s),
+            Complex64::new(c, 0.0),
+        ];
+        apply_single_mode_axis_i(psi, &u, i, n);
+    }
+    for k in 0..dim {
+        let phi = -b_t * h_p_diag[k] * half;
+        psi[k] *= Complex64::new(phi.cos(), phi.sin());
+    }
+}
+```
+
+**設計判断 (cv-ising 流の reshape + GEMM を採用しない理由)**:
+
+cv-ising-solver では `apply_single_mode(M, psi_t, axis)` (`src/cv_ising/
+krylov.py:224`) として「`psi` を `(N_fock,) * m` に reshape → 単一 BLAS
+GEMM」 パターンを取っているが、本パッケージでは以下の理由で **N_fock=2
+特化の自前 bit-flip pass** を選ぶ:
+
+1. **GEMM 呼び出しオーバヘッド**: N_fock=2 では右オペランドが (2, dim/2) の
+   非常に細長い行列で、cv-ising の N_fock=20-40 と比べて BLAS の per-call
+   overhead が相対的に重い (推定で dim < 2^12 程度で自前ループが優位)。
+2. **中間軸 moveaxis のコピー**: cv-ising の中間軸 fast path は
+   `np.moveaxis` + workspace への物理コピーが必要 (`krylov.py:237-`)。
+   N_fock=2 だと「ペアの swap-with-mix」は連続 / 2-stride アクセスで
+   コピー不要で済むため、moveaxis を挟むのは逆に損。
+3. **`apply_h_kryanneal` と同じ層に揃える**: Phase 6 の cache
+   block-fusion 最適化は両者で共通の bit-flip pass パターンに対して効くため、
+   matvec と Trotter を同じ Rust モジュール (`src/matvec.rs`) 上で同型に
+   書いておく方が後段の最適化が両者に均等に効く。
+
+Trotter primitive は `src/trotter.rs` に置く想定だが、`apply_single_mode_axis_i`
+自体は matvec primitive の隣 (`src/matvec.rs`) でも構わない (Phase 2 で
+実装する際に判断する)。
 
 ### 5.2 Lanczos: `lanczos_propagate`
 
@@ -610,9 +729,11 @@ where
 を 1 つの線形結合 matvec として表現する経路)。これにより CFM4:2 の各
 ステージで matvec 呼出は m 回のみ。
 
-### 5.3 Magnus / プロパゲータ
+### 5.3 プロパゲータ
 
-以下 3 種のプロパゲータを提供する:
+以下 4 種のプロパゲータを提供する (M2 / CFM4:2 は Magnus 系、Trotter は
+operator splitting 系)。Adaptive dt 経路は CFM4:2 系の embedded / Richardson
+推定子から構成する (Trotter は固定 dt のみ; embedded estimator を持たない):
 
 #### M2 (中点則 1 step) — `m2_midpoint_step`
 
@@ -683,6 +804,59 @@ smooth schedule では許容 dt を 1〜2 桁伸ばせる。
 
 オプション `extrapolate=True` で Richardson 外挿:
 `ψ_acc = (16 · ψ_h2 - ψ_full) / 15` (実効 6 次精度)。
+
+#### Trotter (Strang 2 次 / Suzuki 4 次) — `trotter_step`
+
+横磁場 driver の `[X_i, X_j] = 0` を活用し、`exp(-i dt H_drv)` を
+`Π_i R_i(dt)` の閉形式 (Lanczos 不要) で書く operator splitting 経路。
+Strang 2 次:
+
+```
+U(dt) ≈ exp(-i dt H_p / 2) · exp(-i dt H_drv) · exp(-i dt H_p / 2)
+      = phase_p(dt/2) · (Π_i R_i(dt)) · phase_p(dt/2)
+```
+
+各 `R_i(dt) = cos(-A·h_x_i·dt)·I + i·sin(-A·h_x_i·dt)·X_i` は §5.1.2 の
+`apply_single_mode_axis_i` で 1 軸 in-place 適用。
+
+per-step コスト: `(N + 1) · dim` 要素アクセス (matvec の 1 pass 相当が
+N+1 回)。CFM4:2 の `2m·dim` (m=24 で ~48·dim) と比較すると N=20 で
+~2.3× 軽量だが、LTE は O(dt^3) なので精度要求次第で総時間の優劣は変わる
+(クロスオーバ実測は Phase 2 でベンチに含める、§12)。
+
+API:
+
+```rust
+pub fn trotter_step(
+    psi: &mut [Complex64],
+    h_x: &[f64],
+    h_p_diag: &[f64],
+    a_t: f64,            // 中点 schedule 値 A(s(t + dt/2))
+    b_t: f64,            // 同 B(s(t + dt/2))
+    dt: f64,
+    n: usize,
+);
+```
+
+`(a_t, b_t)` は schedule の **中点で評価** することで Strang 2 次の対称性を
+保つ (時間依存 H の Strang は中点採取で局所 O(dt^3) を維持する)。
+固定 dt ドライバから直接呼ぶ。
+
+**4 次 Suzuki (`trotter_suzuki4_step`)**: Trotter-Suzuki S_4 公式
+
+```
+S_4(dt) = S_2(p·dt) · S_2(p·dt) · S_2((1-4p)·dt) · S_2(p·dt) · S_2(p·dt)
+p = 1 / (4 - 4^{1/3}) ≈ 0.4145
+```
+
+で Strang 5 回適用に分解。per-step は ~5·(N+1)·dim、LTE O(dt^5)。CFM4:2 と
+同じ局所オーダだが、Lanczos の m 回 matvec を完全に排した経路としての
+比較・検証用に Phase 2 末で追加 (`method="trotter_suzuki4"`)。
+
+**embedded error estimator は持たない**: Strang↔Suzuki4 の差を embedded
+推定子に使う案も理論上はあるが、Phase 4 の `cfm4_step_with_*_estimate`
+体系と統合せず、Trotter 経路は **固定 dt 専用** とする。adaptive 経路は
+CFM4:2 を使う。
 
 #### PI controller / adaptive ドライバ
 
@@ -1155,7 +1329,7 @@ cargo test --no-default-features # scalar fallback
 
 ## 12. 段階リリース計画
 
-### Phase 1: MVP (~v0.1)
+### Phase 1: MVP / scalar baseline (~v0.1)
 
 - `IsingProblem`, `Schedule`, `QuantumAnnealer.run(method="m2")` のみ
 - `Schedule` プリセット: `linear` / `from_callable` / `reverse` / `pause`
@@ -1165,51 +1339,97 @@ cargo test --no-default-features # scalar fallback
   `tridiag_eigh` (hand-rolled QL)
 - Python リファレンス (`_python_*`) との等価性テスト
 - 小規模 QuTiP 比較テスト
+- **スカラ単スレッド・SIMD 明示利用なし** で実装。以降 (Phase 2 以降) の
+  高速化施策の baseline として `bench_per_step.py` の数値を確定させる
+- BLAS feature ON/OFF は両方ビルド可能だが、Level-1/2 ops が呼ばれるのは
+  Lanczos 内部のみで、matvec / bit-flip pass は自前のスカラループ
 
-### Phase 2: CFM4:2 (~v0.2)
+### Phase 2: Trotter 経路 (~v0.2)
+
+横磁場演算子 X_i の bit-flip 性と可換性 (`[X_i, X_j] = 0`) を活用し、
+`exp(-i dt H_drv) = Π_i R_i(dt)` を **Lanczos を経由しない閉形式の
+2×2 rotation で逐次適用** する経路。Strang 2 次 Trotter:
+
+```
+U(dt) ≈ phase_p(dt/2) · (Π_i R_i(dt)) · phase_p(dt/2)
+```
+
+- Rust 側に `apply_single_mode_axis_i` を新規実装 (詳細 §5.1.2):
+  - `(psi[k], psi[k ^ (1<<i)])` ペアに 2×2 ユニタリを in-place 適用
+  - N_fock=2 特化、cv-ising 流の reshape + GEMM ではなく自前 bit-flip
+    pass で書く (採用根拠は §5.1.2 末尾)
+  - Phase 2 ではスカラ単スレッド (SIMD/threading は Phase 6 で乗せる)
+- Rust 側に `trotter_step` (Strang 1 step エントリ) を新規実装
+- 4 次 Suzuki (Trotter-Suzuki S_4) はオプションで追加可
+- `method="trotter"`, `method="trotter_suzuki4"`
+- Phase 1 の M2 と精度・速度を同一マシンで比較 (`bench_per_step.py` 拡張)。
+  Trotter は per-step が ~(N+1)·dim flops と軽い反面 2 次精度なので
+  「短時間 / 緩やかな schedule」で M2 / CFM4:2 比優位、「長時間 / 高精度」では
+  CFM4:2 が勝つ、というクロスオーバを実測で示す
+
+### Phase 3: CFM4:2 (~v0.3)
 
 - `cfm4_step`, `method="cfm4"` 経路
 - 線形結合 callback 形式 (§5.2 末尾) で per-step matvec を 4m → 2m に削減
 
-### Phase 3: Adaptive (~v0.3)
+### Phase 4: Adaptive (~v0.4)
 
 - `cfm4_step_with_m2_estimate` (embedded M2 error)
 - `cfm4_step_with_richardson_estimate` (step-doubling Richardson)
 - Python 側 PI controller driver
 - `method="cfm4_adaptive_richardson"`
 
-### Phase 4: Simulator & Observables (~v0.4)
+### Phase 5: Simulator & Observables (~v0.5)
 
 - `AnnealingSimulator`
 - `Observable` クラス、観測量時系列記録
 - `instantaneous_eigenstates`
 
-### Phase 5: 仕上げ + Trotter 経路 (~v0.5)
+### Phase 6: 並列化 + 仕上げ (~v0.6)
 
-- ベンチマーク完備、QuTiP 大規模比較
-- BLAS feature on/off 数値検証 CI
-- ドキュメント、Quick start サンプル
-- **Trotter 分解版経路** (`method="trotter"`, 2 次 Trotter / 4 次 Suzuki)
-  の薄い実装。Krylov+Magnus との数値一致クロスチェック用途で、Phase 1-4
-  の主力経路を補完する位置付け (回路シミュレータとしての完成度より、
-  検証用途を優先)
+Phase 1-5 でアルゴリズム面の機能が出揃った時点で実装面の並列化に着手する。
+Phase 1 の baseline と比較できることが本 phase の前提。
+
+- **L2 並列化**: matvec / Trotter primitives の bit-flip pass を rayon
+  `par_chunks_mut` で並列化。`apply_h_kryanneal` と `apply_single_mode_axis_i`
+  の両方が対象 (CFM4:2 / Trotter どちらの経路でも効く)
+- **SIMD**: `std::simd` または `wide` クレートで AVX2 / AVX-512 / NEON
+  ターゲット。i=0,1,2 (stride 1/2/4) の連続アクセス領域に集中して適用
+- **cache block-fusion**: 大 N (≥20) で高 i の bit-flip pass が DRAM 律速
+  になるのを防ぐため、高 i 群を fuse して L2 cache に収まるブロック単位で
+  低 i pass と一緒に走らせる古典テクニック (qsim の X-gate pass 同様、§5.1.1
+  末尾の TODO で referenced)
+- 物理コア数 vs スループットの sweep をベンチに含め、メモリ帯域律速点を
+  明示する
+- BLAS feature ON/OFF の数値一致 CI (両ビルドで rel < 1e-13)
+- 大規模 QuTiP 比較 (n=12-16 程度まで)
+- ドキュメント整備、Quick start サンプル
 
 ---
 
-## 13. Future work (v0.5 までは対応しない範囲)
+## 13. Future work (v0.6 までは対応しない範囲)
 
-以下の項目は **v0.5 までのリリース計画には含めない** ことが確定済み
-(Phase 計画は §12 参照)。リクエストが出てきた時点で v0.6+ として再評価する。
+以下の項目は **v0.6 までのリリース計画には含めない** ことが確定済み
+(Phase 計画は §12 参照)。リクエストが出てきた時点で v0.7+ として再評価する。
 
-- **複数の driver 形 (XX 等の k-local X)**: v0.1〜v0.5 では driver を
+- **複数の driver 形 (XX 等の k-local X)**: v0.1〜v0.6 では driver を
   `-Σ h_x_i X_i` (サイト依存の単一 X) に限定する。XX 等の k-local X 項を
   入れるには matvec.rs に bit-flip 2 ビット同時パスの新規実装 (~200 行)
   と Schedule API の拡張が必要なため後送り。
+- **Z_2 (global spin-flip) 対称性によるセクタ分割**: `Π = Π_i X_i` は
+  H_drv と常に交換するが、H_p との交換は H_p の Z-string がすべて偶数重み
+  (= 縦磁場 / 奇数 k-local Z 項がない) の場合に限る。`H_p_diag[k] ==
+  H_p_diag[k ^ (2^N - 1)]` で全 k チェックして対称性を判定し、対称な場合
+  に `(psi[k] ± psi[k_flip])/√2` 基底でセクタ分割すれば計算・メモリが半分
+  になる。実装は「Phase 1-6 の汎用経路は対称性に依らず動く + ユーザが
+  hint (`IsingProblem(..., symmetry='z2')` など) を渡したときに後段で
+  fast path に切替える」構成が綺麗。利得は最大 2× で条件付きのため、
+  汎用経路の安定化後 (= Phase 6 完了後) に検討する。
 - **dim ≥ 2^25 級の分散実行**: 単機シェアードメモリで設計する。MPI /
   NCCL / dask 等の分散層は別プロジェクト級の作業量になるため範囲外。
 - **GPU 対応**: CuPy / Vulkan / Metal 経由の matvec は別 backend として
   `kryanneal._gpu` 拡張モジュールを切る形を想定。1 リリース分相当の
-  作業量なので v0.5 までには含めない。
+  作業量なので v0.6 までには含めない。
 - **シンボリックスケジュール**: SymPy で A(s), B(s) を書いて自動微分から
   CFM4 高次係数を生成する API。ニッチかつ既存 callable で代替可能なため
   優先度低。
