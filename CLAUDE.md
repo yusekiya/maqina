@@ -81,14 +81,17 @@ kryanneal/
 
 ## テスト
 
-`docs/testing.md` 参照。要点だけ:
+詳細は project skill `.claude/skills/test-runner/SKILL.md` を一次資料とする
+(slash command `/test-runner` で発火可能, `test-runner` subagent もここを
+読んで実行する). 要点だけ:
 
 ```bash
 uv run pytest                               # 全 Python テスト
 uv run pytest -m "not slow"                 # slow を除外
 uv run pytest tests/test_krylov.py          # 個別ファイル
-cd src && cargo test                        # Rust 単体 (BLAS feature ON)
-cd src && cargo test --no-default-features  # scalar fallback
+cargo test                                  # Rust 単体 (BLAS feature ON)
+cargo test --no-default-features            # scalar fallback
+uv run maturin develop --uv                 # Rust 変更後に必須 (--uv は pip 非同梱回避)
 ```
 
 `uv run` を必ず使う (PyO3 の `extension-module` feature とローカル Python の

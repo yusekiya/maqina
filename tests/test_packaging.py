@@ -11,7 +11,7 @@ BLAS feature on/off の **両ブランチ網羅** はテスト 1 回では行わ
 * 同じ pytest を BLAS on と off の両 build で再実行することで両ブランチを
   網羅する (CI ジョブで ``maturin develop`` と
   ``maturin develop --no-default-features`` を別ステップで切替えて
-  ``uv run pytest`` を 2 回回す運用. ``docs/testing.md`` §CI 参照).
+  ``uv run pytest`` を 2 回回す運用. ``.claude/skills/test-runner/SKILL.md`` §CI 参照).
 """
 
 from __future__ import annotations
