@@ -33,7 +33,7 @@ use pyo3::prelude::*;
 // mod matvec;
 // mod krylov;
 // mod cfm4;
-// mod tridiag;
+mod tridiag;
 // mod blas;
 // TODO(phase2): Trotter 経路
 // mod trotter;
