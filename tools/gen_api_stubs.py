@@ -26,15 +26,12 @@
 
 本スクリプトは cv_ising の ``tools/gen_api_stubs.py`` を kryanneal の
 maturin 標準レイアウト (``python-source = "python"``) に合わせて移植した
-もの. 実装の本体 (stub_function / stub_class / generate_stub 等) は
-cv_ising 側を参照してそのまま流用すること.
-
-NOTE: 本ファイルは Phase 1 で cv_ising から実装本体を移植して埋める.
-現状は MODULES リストとパス定数のみが正しい値.
+もの.
 """
 
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -61,15 +58,334 @@ HEADER = (
 )
 
 
-def main() -> int:
-    # TODO(phase1): cv_ising/tools/gen_api_stubs.py から AST ベースの
-    # スタブ生成ロジック (find_dunder_all, stub_function, stub_class,
-    # generate_stub, _rewrite_import_as_reexport, _ensure_typing_any_import)
-    # を移植する. MODULES と PKG_DIR は kryanneal 用に既に合わせてある.
-    raise NotImplementedError(
-        "Phase 1 で cv_ising/tools/gen_api_stubs.py から実装を移植する. "
-        "MODULES / PKG_DIR / HEADER は既に kryanneal レイアウトに合っている."
+def find_dunder_all(tree: ast.Module) -> set[str] | None:
+    """``__all__ = [...]`` を検出して名前集合を返す. 無ければ None."""
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == "__all__":
+                if isinstance(node.value, (ast.List, ast.Tuple, ast.Set)):
+                    return {
+                        elt.value
+                        for elt in node.value.elts
+                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str)
+                    }
+    return None
+
+
+def is_public(name: str, all_set: set[str] | None) -> bool:
+    """``__all__`` があればその集合, 無ければ全名を public 扱いする.
+
+    モジュールが ``__all__`` を宣言していない場合, underscore-prefix で
+    private と扱うのではなく **全 top-level 名を stub に含める**. これは
+    cross-module で private 名が import されるケース
+    (``from kryanneal.krylov import _cfm4_step_with_m2_estimate`` 等) で
+    型チェッカが member を解決できるようにするため. 公開 API 境界を
+    強制したい場合は ``__all__`` を宣言する側の責務.
+    """
+    if all_set is not None:
+        return name in all_set
+    return True
+
+
+def is_module_level_docstring(node: ast.stmt, idx: int) -> bool:
+    return (
+        idx == 0
+        and isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
     )
+
+
+def is_dunder_all_assign(node: ast.stmt) -> bool:
+    if not isinstance(node, ast.Assign):
+        return False
+    return any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets)
+
+
+def stub_function(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """関数本体を ``[docstring,] ...`` に置き換えたコピーを返す."""
+    body: list[ast.stmt] = []
+    docstring = ast.get_docstring(node, clean=False)
+    if docstring is not None:
+        body.append(ast.Expr(value=ast.Constant(value=docstring)))
+    body.append(ast.Expr(value=ast.Constant(value=...)))
+    cls = type(node)
+    new = cls(
+        name=node.name,
+        args=node.args,
+        body=body,
+        decorator_list=list(node.decorator_list),
+        returns=node.returns,
+        type_comment=node.type_comment,
+    )
+    if hasattr(node, "type_params"):
+        new.type_params = list(node.type_params)
+    return new
+
+
+_KEEP_DUNDER_METHODS = frozenset({"__init__"})
+
+
+def _is_kept_method(name: str) -> bool:
+    if name.startswith("__") and name.endswith("__"):
+        return name in _KEEP_DUNDER_METHODS
+    return not name.startswith("_")
+
+
+def _mangle(class_name: str, attr: str) -> str:
+    """Python の class-private name mangling を再現する.
+
+    ``__X`` (2 個以上の leading ``_``, 末尾 ``__`` でない) は class body 内では
+    ``_<ClassName>__X`` に書き換えられる (CPython のパーサが行う変換).
+    ``ast.unparse`` は元のまま (``__X``) を出力するため, ty 等の型チェッカが
+    consumer 側の mangled 参照 (``obj._ClassName__X``) と一致させられるよう
+    stub 側で **明示的に mangled 名で出力する**.
+    """
+    if attr.startswith("__") and not attr.endswith("__") and len(attr) > 2:
+        prefix = class_name.lstrip("_")
+        if prefix:
+            return f"_{prefix}{attr}"
+    return attr
+
+
+def _collect_self_attrs(node: ast.ClassDef) -> list[str]:
+    """``__init__`` 等のメソッド内 ``self.X = ...`` を走査し, 順序保持で
+    インスタンス属性名を集める. クラスボディに直接書かれた ``X: T`` /
+    ``X = ...`` (dataclass フィールド含む) と重複するものは除外する.
+
+    ``__X`` (private, mangled) は ``_<ClassName>__X`` に変換した形で返す.
+    """
+    declared: set[str] = set()
+    for child in node.body:
+        if isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name):
+            declared.add(child.target.id)
+        elif isinstance(child, ast.Assign):
+            for t in child.targets:
+                if isinstance(t, ast.Name):
+                    declared.add(t.id)
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    def _add(name: str) -> None:
+        mangled = _mangle(node.name, name)
+        if mangled in declared or mangled in seen:
+            return
+        seen.add(mangled)
+        ordered.append(mangled)
+
+    for method in node.body:
+        if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for stmt in ast.walk(method):
+            if isinstance(stmt, ast.Assign):
+                for tgt in stmt.targets:
+                    _walk_target(tgt, _add)
+            elif isinstance(stmt, ast.AugAssign):
+                _walk_target(stmt.target, _add)
+            elif isinstance(stmt, ast.AnnAssign):
+                _walk_target(stmt.target, _add)
+    return ordered
+
+
+def _walk_target(target: ast.expr, add) -> None:
+    if isinstance(target, ast.Attribute):
+        if isinstance(target.value, ast.Name) and target.value.id == "self":
+            add(target.attr)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for elt in target.elts:
+            _walk_target(elt, add)
+    elif isinstance(target, ast.Starred):
+        _walk_target(target.value, add)
+
+
+def stub_class(node: ast.ClassDef) -> ast.ClassDef:
+    new_body: list[ast.stmt] = []
+    docstring = ast.get_docstring(node, clean=False)
+    if docstring is not None:
+        new_body.append(ast.Expr(value=ast.Constant(value=docstring)))
+
+    # 元 docstring node (skip 用)
+    docstring_node: ast.stmt | None = None
+    if (
+        node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+    ):
+        docstring_node = node.body[0]
+
+    # クラスボディ直書きの注釈 / 代入 / メソッド.
+    for child in node.body:
+        if child is docstring_node:
+            continue
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if _is_kept_method(child.name):
+                new_body.append(stub_function(child))
+        elif isinstance(child, ast.AnnAssign):
+            # dataclass フィールドおよびクラス変数アノテーション.
+            new_body.append(child)
+        elif isinstance(child, ast.Assign):
+            # クラス変数 (型注釈なし). 全 target を保持.
+            new_body.append(child)
+
+    # メソッド内の self.X = ... を class-level annotation として補完
+    # (型は ``Any`` にフォールバック; 元ソースに型注釈が無いため正確な
+    # 推論は行わない. 属性の存在のみを宣言する目的).
+    inst_attrs = _collect_self_attrs(node)
+    if inst_attrs:
+        any_node = ast.Name(id="Any", ctx=ast.Load())
+        # ボディ末尾ではなく docstring の直後に挿入してフィールド一覧を
+        # 上部にまとめる.
+        insert_at = 1 if docstring is not None else 0
+        for i, name in enumerate(inst_attrs):
+            ann = ast.AnnAssign(
+                target=ast.Name(id=name, ctx=ast.Store()),
+                annotation=any_node,
+                value=None,
+                simple=1,
+            )
+            new_body.insert(insert_at + i, ann)
+
+    if not new_body:
+        new_body.append(ast.Expr(value=ast.Constant(value=...)))
+
+    new = ast.ClassDef(
+        name=node.name,
+        bases=list(node.bases),
+        keywords=list(node.keywords),
+        body=new_body,
+        decorator_list=list(node.decorator_list),
+    )
+    if hasattr(node, "type_params"):
+        new.type_params = list(node.type_params)
+    return new
+
+
+def _process_top_level(
+    nodes: list[ast.stmt], all_set: set[str] | None, out: list[ast.stmt]
+) -> None:
+    """top-level 文を走査して stub 用に整形した node を ``out`` に追加する.
+
+    ``Try`` 文は body / orelse を再帰的に展開して上位 namespace に flatten する
+    (``try: from ... import _rs / except: _rs = None`` など runtime fallback の
+    取り込み目的). ネストされた ``Try`` も同様に flatten される.
+
+    モジュールに ``__all__`` が宣言されていない場合 (``all_set is None``) は
+    underscore-prefix フィルタを適用しない. これは他モジュールから
+    private 名 (``_cfm4_step_with_m2_estimate`` 等) が cross-import される
+    ケースで, 型チェッカが member を見つけられるようにするため.
+    """
+    for i, node in enumerate(nodes):
+        if is_module_level_docstring(node, i):
+            continue
+        if isinstance(node, ast.ImportFrom):
+            out.append(_rewrite_import_as_reexport(node))
+        elif isinstance(node, ast.Import):
+            out.append(node)
+        elif is_dunder_all_assign(node):
+            out.append(node)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if is_public(node.name, all_set):
+                out.append(stub_function(node))
+        elif isinstance(node, ast.ClassDef):
+            if is_public(node.name, all_set):
+                out.append(stub_class(node))
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and is_public(node.target.id, all_set):
+                out.append(node)
+        elif isinstance(node, ast.Assign):
+            targets = [t for t in node.targets if isinstance(t, ast.Name)]
+            if targets and any(is_public(t.id, all_set) for t in targets):
+                out.append(node)
+        elif isinstance(node, ast.Try):
+            _process_top_level(node.body, all_set, out)
+            _process_top_level(node.orelse, all_set, out)
+        elif isinstance(node, ast.If):
+            # ``if TYPE_CHECKING:`` / ``if sys.version_info >= ...:`` 等の
+            # 条件付き定義を展開. 両 branch を順に flatten する.
+            _process_top_level(node.body, all_set, out)
+            _process_top_level(node.orelse, all_set, out)
+
+
+def generate_stub(source_path: Path) -> str:
+    source = source_path.read_text()
+    tree = ast.parse(source)
+    all_set = find_dunder_all(tree)
+
+    out_nodes: list[ast.stmt] = []
+
+    docstring = ast.get_docstring(tree, clean=False)
+    if docstring is not None:
+        out_nodes.append(ast.Expr(value=ast.Constant(value=docstring)))
+
+    _process_top_level(tree.body, all_set, out_nodes)
+
+    # ``Any`` を class-level instance attribute の annotation に使うため,
+    # ソースに ``from typing import Any`` が無ければ補う.
+    _ensure_typing_any_import(out_nodes)
+
+    module = ast.Module(body=out_nodes, type_ignores=[])
+    ast.fix_missing_locations(module)
+    return ast.unparse(module)
+
+
+def _rewrite_import_as_reexport(node: ast.ImportFrom) -> ast.ImportFrom:
+    """``from X import Y`` を ``from X import Y as Y`` に書き換える.
+
+    PEP 484 の stub 仕様では import された名前は **明示的に
+    ``as Y`` 付きの場合のみ re-export** とみなされる. 元 ``.py`` では
+    ``from kryanneal.krylov import DENSE_GROUNDSTATE_THRESHOLD`` のように
+    re-export を意図せずに internal use のために import している箇所が
+    あるが, runtime ではいずれも ``module.Y`` として attribute access 可能
+    なので, stub では一律 explicit re-export 形に揃えて consumer 側
+    (テスト等) の ``module.Y`` 参照を type checker でも resolve させる.
+    """
+    new_names = []
+    for alias in node.names:
+        if alias.asname is None and alias.name != "*":
+            new_names.append(ast.alias(name=alias.name, asname=alias.name))
+        else:
+            new_names.append(alias)
+    return ast.ImportFrom(module=node.module, names=new_names, level=node.level)
+
+
+def _ensure_typing_any_import(nodes: list[ast.stmt]) -> None:
+    """生成済み stub が ``Any`` を class 内 annotation に使うため,
+    ``from typing import Any`` を確実に top-level に置く."""
+    has_any = False
+    last_import_idx = -1
+    for i, n in enumerate(nodes):
+        if isinstance(n, ast.ImportFrom) and n.module == "typing":
+            for alias in n.names:
+                if alias.name == "Any":
+                    has_any = True
+            last_import_idx = i
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            last_import_idx = i
+    if has_any:
+        return
+    new_import = ast.ImportFrom(
+        module="typing",
+        names=[ast.alias(name="Any", asname=None)],
+        level=0,
+    )
+    insert_pos = last_import_idx + 1 if last_import_idx >= 0 else 0
+    nodes.insert(insert_pos, new_import)
+
+
+def main() -> int:
+    for mod in MODULES:
+        src_path = PKG_DIR / f"{mod}.py"
+        out_path = PKG_DIR / f"{mod}.pyi"
+        body = generate_stub(src_path)
+        out_path.write_text(HEADER + "\n" + body.rstrip() + "\n")
+        print(f"wrote {out_path.relative_to(REPO_ROOT)}")
+    return 0
 
 
 if __name__ == "__main__":

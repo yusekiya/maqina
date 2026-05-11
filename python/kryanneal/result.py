@@ -1,0 +1,13 @@
+"""時間発展の出力データ構造.
+
+* ``QuantumResult``: ``QuantumAnnealer.run`` の戻り値. 最終波動関数,
+  最終確率, 採用された method 名や step 統計などのメタデータを保持.
+* ``Trajectory``: schedule に沿って sample 時刻群での観測量 (確率系列,
+  瞬時エネルギー期待値等) を保持する補助コンテナ.
+
+Phase 1 で実装予定 (現状は API スケルトン).
+"""
+
+from __future__ import annotations
+
+__all__: list[str] = []

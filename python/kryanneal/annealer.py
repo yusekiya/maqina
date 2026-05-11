@@ -1,0 +1,17 @@
+"""高レベル公開 API (``QuantumAnnealer`` / ``AnnealingSimulator``).
+
+``QuantumAnnealer`` は ``IsingProblem`` + ``Schedule`` + 初期状態 ``psi0``
+を受け取り, ``run(method=...)`` で時間発展を実行して ``QuantumResult`` を
+返す one-shot 用途のファサード. ``AnnealingSimulator`` は同じ問題に対する
+複数 schedule / 複数初期状態のバッチ実行を意識した API.
+
+実装は ``kryanneal.krylov`` の adaptive ドライバ群をディスパッチする
+薄いラッパに留める方針. method 文字列の許容値と既定値は
+``docs/design.md`` §4 / §5 を参照.
+
+Phase 1 で実装予定 (現状は API スケルトン).
+"""
+
+from __future__ import annotations
+
+__all__: list[str] = []
