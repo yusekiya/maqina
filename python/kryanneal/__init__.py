@@ -40,19 +40,20 @@ Usage
 推奨する.
 """
 
-# TODO(phase1): 実装に合わせて以下を埋める
-# from kryanneal.problem import IsingProblem
-# from kryanneal.schedule import Schedule
+from kryanneal.problem import IsingProblem
+from kryanneal.result import QuantumResult, Trajectory
+from kryanneal.schedule import Schedule
+
+# QuantumAnnealer / AnnealingSimulator は C7 (Phase 1) / Phase 5 で実装予定.
 # from kryanneal.annealer import QuantumAnnealer, AnnealingSimulator
-# from kryanneal.result import QuantumResult, Trajectory
 
 __all__ = [
-    # "IsingProblem",
-    # "Schedule",
+    "IsingProblem",
+    "QuantumResult",
+    "Schedule",
+    "Trajectory",
     # "QuantumAnnealer",
     # "AnnealingSimulator",
-    # "QuantumResult",
-    # "Trajectory",
     "set_blas_threads",
     "available_blas_threads",
 ]
