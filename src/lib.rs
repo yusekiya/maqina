@@ -28,9 +28,10 @@
 //! 実装で動作する.
 
 use pyo3::prelude::*;
+use pyo3::wrap_pyfunction;
 
+mod matvec;
 // TODO(phase1): 以下を実装に合わせて有効化
-// mod matvec;
 // mod krylov;
 // mod cfm4;
 mod tridiag;
@@ -45,8 +46,8 @@ const HAS_BLAS: bool = cfg!(feature = "blas");
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__has_blas__", HAS_BLAS)?;
+    m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_py, m)?)?;
     // TODO(phase1): 以下を実装に合わせて wrap
-    // m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_py, m)?)?;
     // m.add_function(wrap_pyfunction!(krylov::krylov_step, m)?)?;
     // m.add_function(wrap_pyfunction!(cfm4::m2_midpoint_step, m)?)?;
     // TODO(phase2): Trotter
