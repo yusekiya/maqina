@@ -38,6 +38,15 @@ Hamiltonian の時間発展演算子を近似する。adaptive dt ドライバ
 - §8 QuTiP 比較
 - §12 段階リリース計画 (Phase 1-6)
 
+## 開発規約
+
+`docs/conventions.md` が一次資料。開発プロセス / ビルド基盤 / バージョ
+ニングはここを参照する:
+
+- §1 開発・ビルド基盤 (uv / maturin / ruff / ty / pre-commit / API stub 二段運用)
+- §2 バージョニングポリシー (Phase N 完了で `0.N.0` へ bump,
+  umbrella issue Definition of Done 必須項目)
+
 ## レイアウト
 
 [maturin 公式ドキュメント](https://www.maturin.rs/project_layout) 推奨の
@@ -75,6 +84,7 @@ kryanneal/
 ├── benchmarks/
 └── docs/
     ├── design.md               # 一次設計書
+    ├── conventions.md          # 開発規約 (ビルド基盤 / バージョニング)
     ├── testing.md              # /test skill 用
     └── benchmarks.md
 ```

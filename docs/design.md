@@ -1352,22 +1352,15 @@ cargo test --no-default-features # scalar fallback
 
 ## 11. 開発・ビルド基盤
 
-- パッケージマネージャ: `uv`、Python `>=3.13`
-- ビルド: `maturin` (Rust 拡張 `kryanneal._rust` を PyO3 経由でビルド)
-- Lint: `ruff` / 型: `ty`
-- 主要依存: `numpy>=2.4.2`, `threadpoolctl>=3.0`
-- dev 依存: `pytest>=8.3`, `qutip>=5.2.3`, `pre-commit>=4.0`, `ruff`, `ty`
-- API stubs: `tools/gen_api_stubs.py` で `.py` から PEP 484 stub 自動生成。
-  pre-commit hook と `.claude/rules/api-stubs-sync.md` で drift 防止する
-  二段運用 (人間編集も hook が拾う)。
-- BLAS 多プロセス制御: `set_blas_threads(n)` /
-  `available_blas_threads()` を `__init__.py` に export
-  (`threadpoolctl.threadpool_limits` を BLAS API 単位で呼び出す
-  ラッパで、numpy/scipy bundled + system の OpenBLAS pool 同居問題に対処)。
+→ `docs/conventions.md` §1 参照. (uv / maturin / ruff / ty / pre-commit /
+gen_api_stubs ドリフト二段運用 / BLAS 多プロセス制御の export.)
 
 ---
 
 ## 12. 段階リリース計画
+
+バージョニングポリシー (Phase N → v0.N bump, umbrella issue DoD 必須項目)
+は `docs/conventions.md` §2 を一次資料とする.
 
 ### Phase 1: MVP / scalar baseline (~v0.1)
 
