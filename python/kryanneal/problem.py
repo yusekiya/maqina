@@ -1,0 +1,22 @@
+"""TFIM 問題定義 (``IsingProblem``).
+
+``IsingProblem`` は Hamiltonian の構造的・数値的入力を 1 箇所に集約する
+データクラス. ユーザは以下を渡す:
+
+* ``n``: スピン数
+* ``H_p_diag``: shape ``(2^N,)`` float64. Z 基底における problem
+  Hamiltonian の対角ベクトル (k-local 多項式は ``builders`` モジュールで
+  この形に変換しておく).
+* ``h_x``: shape ``(N,)`` float64. サイト依存横磁場の振幅 (driver
+  Hamiltonian ``H_driver = -Σ_i h_x_i X_i`` の係数).
+
+shape / dtype / NaN-free / `n` と各次元の整合性は本コンストラクタで検証
+する. 物理的取り決め (bit 規約等) は ``docs/design.md`` および
+``CLAUDE.md`` 「物理的取り決め」節を参照.
+
+Phase 1 で実装予定 (現状は API スケルトン).
+"""
+
+from __future__ import annotations
+
+__all__: list[str] = []

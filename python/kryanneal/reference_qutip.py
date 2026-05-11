@@ -1,0 +1,15 @@
+"""QuTiP ``sesolve`` を参照実装としたバリデーション用エントリポイント.
+
+``kryanneal`` の Krylov / CFM4:2 / M2 propagator の数値結果を QuTiP の
+高精度 ODE ソルバ (``sesolve``) と比較するための薄いラッパ. テスト
+(``tests/test_reference_qutip.py``) と ad-hoc な手動検証で利用する.
+
+QuTiP 自体は dev 依存に入っているが, 本番 (wheel) では import を必須に
+しない. import 失敗時はテスト側を skip する (``pytest.importorskip``).
+
+Phase 1 で実装予定 (現状は API スケルトン).
+"""
+
+from __future__ import annotations
+
+__all__: list[str] = []
