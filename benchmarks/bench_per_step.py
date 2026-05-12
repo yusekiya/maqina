@@ -38,11 +38,22 @@ CLI 例::
 
     uv run python benchmarks/bench_per_step.py --n-values 4,8,12 --n-steps 50
     uv run python benchmarks/bench_per_step.py --methods m2,trotter
+    # BLAS thread を 1 に固定して machine-independent baseline を取る
+    uv run python benchmarks/bench_per_step.py --blas-threads 1
 
 ベンチは原則 ``--release`` build (``maturin develop --uv --release``) で
 取る. debug build (``maturin develop --uv`` のみ) の値はベースラインに
 ふさわしくないため,本スクリプトは実行時に ``_rust.__has_blas__`` を含む
 build フラグを記録するに留め, build profile 自体は呼び出し側の責任とする.
+
+BLAS thread 数の固定 (``--blas-threads N``) は Linux + numpy bundled
+OpenBLAS 環境で特に重要. default では numpy bundled OpenBLAS が物理
+コア数までスレッドを張り, dim が小さい (n=4..12) cell で thread-launch
+overhead が支配して per-step 値がノイジーになる. machine-independent
+な scalar single-thread baseline を取りたい場合は ``--blas-threads 1``
+を必ず付ける. macOS Apple Accelerate は default で挙動が異なる
+(自動 tuning) ので, 機種間比較を主張するときも明示的に thread 数を
+合わせる.
 
 CFM4 / Richardson 経路の追加は Phase 3 / Phase 4 で本ファイルに sweep を
 増やす予定 (``method="cfm4" / "cfm4_adaptive_richardson"`` を追加).
@@ -63,7 +74,7 @@ from pathlib import Path
 
 import numpy as np
 
-from kryanneal import IsingProblem, QuantumAnnealer, Schedule
+from kryanneal import IsingProblem, QuantumAnnealer, Schedule, set_blas_threads
 from kryanneal.initial_states import uniform_superposition
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -156,6 +167,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=1.0,
         help="total anneal time T (default: 1.0)",
+    )
+    parser.add_argument(
+        "--blas-threads",
+        type=int,
+        default=None,
+        help=(
+            "if specified, call kryanneal.set_blas_threads(N) at startup to "
+            "lock all loaded BLAS pools (numpy bundled + system OpenBLAS that "
+            "the Rust extension links against) to N threads. Use "
+            "`--blas-threads 1` to take a machine-independent single-thread "
+            "baseline; on Linux + numpy-bundled OpenBLAS the default is the "
+            "physical core count, which makes per-step measurements at small "
+            "dim noisy due to thread-launch overhead. Default: None "
+            "(leave BLAS thread counts untouched)."
+        ),
     )
     parser.add_argument(
         "--results-dir",
@@ -365,6 +391,16 @@ def write_outputs(
 def main(argv: list[str] | None = None) -> int:
     """エントリポイント. 各 ``n`` について warmup → 計測を回し, CSV + md を書く."""
     args = parse_args(argv)
+
+    # ``--blas-threads`` 指定時は BLAS pool スレッド数を統一する.
+    # numpy bundled / scipy bundled / system OpenBLAS の最大 3 pool が同居
+    # しうるが, threadpoolctl 経由で全 BLAS pool を一括設定するため,
+    # `set_blas_threads` が ``threadpool_info`` 後の load も含めて拾う.
+    # `OPENBLAS_NUM_THREADS` 等の env var は pool 初期化時にしか効かないが,
+    # こちらは load 済 pool にも反映できるため信頼性が高い.
+    # default ``None`` 時は何もしない (Phase 1 baseline と同じ挙動).
+    if args.blas_threads is not None:
+        set_blas_threads(args.blas_threads)
 
     out_dir = args.results_dir
     if out_dir is None:

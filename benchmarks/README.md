@@ -30,6 +30,12 @@ uv run python benchmarks/bench_per_step.py
   markdown には min/median を要約する (default 3).
 - `--warmup W`: 計測前に捨てる試行回数 (cache warm 用, default 1).
 - `--T T`: 総アニーリング時間 (default 1.0).
+- `--blas-threads N`: 指定時に `kryanneal.set_blas_threads(N)` を呼んで
+  全 BLAS pool (numpy bundled + system OpenBLAS の双方を含む) のスレッド数を
+  統一する. Linux + numpy bundled OpenBLAS では default 物理コア数まで張る
+  ため、小 dim で thread-launch overhead が支配し per-step がノイジーになる.
+  **machine-independent baseline には `--blas-threads 1` を推奨**.
+  default は `None` (BLAS thread 数に手を加えない, Phase 1 baseline と同じ).
 - `--results-dir DIR`: 出力先 (default `benchmarks/results/<YYYYMMDD-HHMMSS>/`).
 
 ## 出力
