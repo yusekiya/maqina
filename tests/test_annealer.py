@@ -1,10 +1,12 @@
-"""``QuantumAnnealer.run`` の end-to-end smoke test (Phase 1).
+"""``QuantumAnnealer.run`` の end-to-end smoke test (Phase 1 / Phase 2).
 
-issue #8 の acceptance:
+issue #8 / #21 の acceptance:
 
 * ``QuantumAnnealer(prob, sched).run(psi0, 0, T, method="m2", n_steps=200)``
   の戻り値が ``QuantumResult`` で, 線形 schedule で十分長い ``T`` を取ると
   基底状態到達確率がしきい値以上.
+* ``method="trotter"`` 経路 (Phase 2 C3) でも同じ smoke を満たし,
+  ``n_matvec = n_steps * (N + 1)`` の見積もりが返る.
 * 公開 API (psi0 検証, method/save_tlist の NotImplementedError) が
   仕様どおりに raise する.
 """
@@ -95,8 +97,43 @@ def test_run_reaches_ground_state_for_long_anneal() -> None:
     assert p_gs > 0.95, f"ground state probability too low: {p_gs}"
 
 
+def test_run_trotter_smoke_and_ground_state() -> None:
+    """``method="trotter"`` の smoke + GS 到達確率テスト (Phase 2 C3).
+
+    n=4, T=10 linear schedule の強磁性 chain (縮退基底 ``|0000⟩`` /
+    ``|1111⟩``) で ``n_steps=200`` を取り, 終端波動関数の基底状態
+    合計確率が 0.95 を超えることを確認する. Trotter は M2 と同じ
+    O(dt^3) LTE のため, M2 と同等の精度を実現できる.
+
+    あわせて ``n_matvec = n_steps × (N + 1)`` の Phase 2 規約 (Trotter
+    は dim-walk 見積もり; ``docs/design.md`` §4.4) を検証する.
+    """
+    n = 4
+    prob = IsingProblem(
+        n=n,
+        H_p_diag=_ferromagnetic_chain_h_p_diag(n),
+        h_x=np.ones(n, dtype=np.float64),
+    )
+    sched = Schedule.linear(T=10.0)
+    psi0 = uniform_superposition(n)
+    ann = QuantumAnnealer(prob, sched)
+    res = ann.run(psi0, 0.0, sched.T, method="trotter", n_steps=200)
+
+    assert isinstance(res, QuantumResult)
+    assert res.psi_final.shape == (1 << n,)
+    assert res.psi_final.dtype == np.complex128
+    assert res.n_steps == 200
+    # Trotter 規約: n_matvec = n_steps × (N + 1).
+    assert res.n_matvec == 200 * (n + 1)
+    # propagator は unitary.
+    assert abs(np.linalg.norm(res.psi_final) - 1.0) < 1e-10
+
+    p_gs = _ground_state_probability(res.psi_final, prob.H_p_diag)
+    assert p_gs > 0.95, f"ground state probability too low (trotter): {p_gs}"
+
+
 def test_run_rejects_unsupported_method() -> None:
-    """``method`` が ``"m2"`` 以外なら ``NotImplementedError``."""
+    """``method`` が ``"m2"`` / ``"trotter"`` 以外なら ``NotImplementedError``."""
     n = 3
     prob = IsingProblem(
         n=n,
