@@ -38,11 +38,10 @@ use pyo3::wrap_pyfunction;
 use blas_src as _;
 
 mod blas;
+mod cfm4;
 mod krylov;
 mod matvec;
 mod tridiag;
-// TODO(phase1): cfm4 を実装したら有効化
-// mod cfm4;
 // TODO(phase2): Trotter 経路
 // mod trotter;
 
@@ -54,9 +53,7 @@ const HAS_BLAS: bool = cfg!(feature = "blas");
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__has_blas__", HAS_BLAS)?;
     m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_py, m)?)?;
-    // TODO(phase1): 以下を実装に合わせて wrap
-    // m.add_function(wrap_pyfunction!(krylov::krylov_step, m)?)?;
-    // m.add_function(wrap_pyfunction!(cfm4::m2_midpoint_step, m)?)?;
+    m.add_function(wrap_pyfunction!(cfm4::m2_midpoint_step_py, m)?)?;
     // TODO(phase2): Trotter
     // m.add_function(wrap_pyfunction!(matvec::apply_single_mode_axis_i_py, m)?)?;
     // m.add_function(wrap_pyfunction!(trotter::trotter_step, m)?)?;
