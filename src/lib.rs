@@ -9,7 +9,10 @@
 //!   - `apply_single_mode_axis_i` (2×2 ユニタリを axis i に in-place 適用)
 //!   - `trotter_step` (Strang 2 次 / Suzuki 4 次 1 step)
 //!
-//! Phase 3 で `cfm4_step` (CFM4:2 commutator-free Magnus, Alvermann-Fehske 2011).
+//! Phase 3 で `cfm4_step` を追加:
+//!   - CFM4:2 commutator-free Magnus (Alvermann-Fehske 2011, 2 stage)
+//!   - 線形結合 callback 形式 (各 stage の `(c_drv, c_diag)` を畳み込んで
+//!     既存 `apply_h_kryanneal` を再利用; `docs/design.md` §5.2 末尾)
 //!
 //! Phase 4 で `cfm4_step_with_m2_estimate` (M2 embedded error 推定子) と
 //! `cfm4_step_with_richardson_estimate` (step-doubling Richardson 推定子) を追加.
@@ -55,10 +58,9 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(matvec::apply_single_mode_axis_i_py, m)?)?;
     m.add_function(wrap_pyfunction!(krylov::lanczos_propagate_py, m)?)?;
     m.add_function(wrap_pyfunction!(cfm4::m2_midpoint_step_py, m)?)?;
+    m.add_function(wrap_pyfunction!(cfm4::cfm4_step_py, m)?)?;
     m.add_function(wrap_pyfunction!(trotter::trotter_step_py, m)?)?;
     m.add_function(wrap_pyfunction!(trotter::trotter_suzuki4_step_py, m)?)?;
-    // TODO(phase3): CFM4:2
-    // m.add_function(wrap_pyfunction!(cfm4::cfm4_step, m)?)?;
     // TODO(phase4): adaptive estimators
     // m.add_function(wrap_pyfunction!(cfm4::cfm4_step_with_m2_estimate, m)?)?;
     // m.add_function(wrap_pyfunction!(cfm4::cfm4_step_with_richardson_estimate, m)?)?;
