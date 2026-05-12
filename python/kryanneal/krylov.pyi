@@ -46,7 +46,7 @@ from typing import Callable as Callable
 import numpy as np
 from kryanneal.schedule import Schedule as Schedule
 from typing import Any
-__all__ = ['evolve_schedule_cfm4', 'evolve_schedule_m2', 'evolve_schedule_trotter', 'evolve_schedule_trotter_suzuki4']
+__all__ = ['evolve_schedule_adaptive_m2', 'evolve_schedule_adaptive_richardson', 'evolve_schedule_cfm4', 'evolve_schedule_m2', 'evolve_schedule_trotter', 'evolve_schedule_trotter_suzuki4']
 
 def evolve_schedule_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, m: int=24, krylov_tol: float=1e-12) -> tuple[np.ndarray, int]:
     """固定 dt = (t1 - t0) / n_steps の M2 中点則ドライバ.
@@ -229,5 +229,127 @@ def evolve_schedule_cfm4(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedu
     ------
     ValueError
         ``n_steps < 1`` または ``t1 <= t0`` のとき.
+    """
+    ...
+
+def evolve_schedule_adaptive_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, save_tlist: np.ndarray | None=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """CFM4:2 + M2 embedded 推定子による adaptive dt ドライバ (Phase 4 C3).
+
+    PI controller (``docs/design.md`` §5.3) で local error を ``tol_step``
+    以下に保ちつつ dt を伸縮させて ``[t0, t1]`` 区間を進む. 各 step は
+    CFM4:2 1 step + M2 1 step (同じ入口 ψ) を走らせ
+    ``err = ‖ψ_cfm4 - ψ_m2‖`` を embedded error として PI 制御へ流す.
+    accept 時の ψ は ``ψ_cfm4`` を採用する (``cfm4_step`` 単体呼出と
+    bit-exact 一致). M2 embedded は ``p = 2`` 指数 ``1/3`` で更新する.
+
+    Rust 拡張が import 済なら ``_rust.cfm4_step_with_m2_estimate_py`` を,
+    そうでなければ Python リファレンス ``_python_cfm4_step_with_m2_estimate``
+    を使う (silent fallback).
+
+    Parameters
+    ----------
+    h_x
+        shape ``(n,)`` float64. サイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64. Z 基底 problem 対角.
+    schedule
+        ``Schedule`` インスタンス. ``coeffs_at(t)`` から
+        ``(A(s(t)), B(s(t)))`` を取り出す.
+    psi0
+        shape ``(2**n,)`` complex128. 初期状態 (L2-normalize 済みであること).
+    t0, t1
+        積分区間 ``[t0, t1]``. ``t1 > t0`` を要求.
+    m
+        Krylov 部分空間次元 (既定 ``24``).
+    krylov_tol
+        Lanczos の β 打切り閾値 (既定 ``1e-12``).
+    tol_step
+        accept 判定の局所誤差閾値 (既定 ``1e-8``).
+    dt0
+        初期 dt (既定 ``0.5``).
+    dt_min
+        最小 dt (ここまで縮めると err に関わらず accept; 既定 ``1e-4``).
+    dt_max
+        最大 dt. ``None`` のとき ``10 · dt0`` に解決される.
+    safety
+        PI 安全係数 (既定 ``0.9``).
+    growth_max
+        1 step での dt 拡大率上限 (既定 ``4.0``).
+    max_rejects
+        同一 step での連続 reject 上限. 超過で ``RuntimeError``
+        (既定 ``50``).
+    save_tlist
+        観測時刻列 (Phase 5 で実装予定). 現状は ``None`` 以外を渡すと
+        ``NotImplementedError``.
+
+    Returns
+    -------
+    psi_final : np.ndarray
+        shape ``(2**n,)`` complex128 の終端状態.
+    t_history : np.ndarray
+        shape ``(K,)`` float64. ``t0`` を含み, 各 accept 後の時刻列.
+    dt_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の dt.
+    n_rejects : int
+        累積 reject 回数 (連続超過とは別; 全 step 合算).
+
+    Raises
+    ------
+    ValueError
+        ``t1 <= t0`` または PI controller の数値引数が範囲外のとき.
+    NotImplementedError
+        ``save_tlist`` が ``None`` でないとき (Phase 5).
+    RuntimeError
+        ``max_rejects`` を連続超過したとき.
+    """
+    ...
+
+def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, save_tlist: np.ndarray | None=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """CFM4:2 + step-doubling Richardson 推定子による adaptive dt ドライバ.
+
+    PI controller (``docs/design.md`` §5.3) で local error を ``tol_step``
+    以下に保ちつつ dt を伸縮させて ``[t0, t1]`` 区間を進む. 各 step は
+    full-step CFM4:2 (dt) と half-step×2 CFM4:2 (dt/2 を 2 回) を同入口 ψ
+    から走らせ ``err = ‖ψ_full - ψ_h2‖`` を 4 次推定子として PI 制御へ流す.
+    accept 時の ψ は ``richardson_extrapolate=False`` で ``ψ_h2`` を,
+    ``True`` で外挿後の ``ψ_acc = (16·ψ_h2 - ψ_full)/15`` を採用する.
+    Richardson は ``p = 4`` 指数 ``1/5`` で更新する.
+
+    per-step matvec は **6m** (Lanczos 呼出 6 回; full 2m + half×2 で 4m).
+    smooth schedule では M2 embedded 比 2 オーダ高精度なので許容 dt を
+    1~2 桁伸ばせ, 同精度比較で total コストが M2 を下回るクロスオーバが
+    出る (``docs/design.md`` §5.3 / §12).
+
+    Rust 拡張が import 済なら ``_rust.cfm4_step_with_richardson_estimate_py``
+    を, そうでなければ Python リファレンス
+    ``_python_cfm4_step_with_richardson_estimate`` を使う (silent fallback).
+
+    Parameters
+    ----------
+    h_x, h_p_diag, schedule, psi0, t0, t1
+        ``evolve_schedule_adaptive_m2`` と同じ.
+    m, krylov_tol, tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects
+        PI controller の既定パラメータ (``docs/design.md`` §5.3).
+    richardson_extrapolate
+        ``True`` で外挿後の ``ψ_acc`` を accept 時の状態とする
+        (実効 6 次精度; 既定 ``False``).
+    save_tlist
+        Phase 5 予約 (現状 ``None`` のみ受付け).
+
+    Returns
+    -------
+    psi_final : np.ndarray
+        shape ``(2**n,)`` complex128 の終端状態.
+    t_history : np.ndarray
+        shape ``(K,)`` float64. ``t0`` を含み, 各 accept 後の時刻列.
+    dt_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の dt.
+    n_rejects : int
+        累積 reject 回数.
+
+    Raises
+    ------
+    ValueError, NotImplementedError, RuntimeError
+        ``evolve_schedule_adaptive_m2`` と同様.
     """
     ...

@@ -8,23 +8,27 @@
 * ``Trajectory``: 観測量の時系列のみを切り出した補助コンテナ
   (post-processing 用途).
 
-Phase 1 subset
---------------
+Phase 1–4 subset
+----------------
 ``docs/design.md`` §4.4 の ``QuantumResult`` には ``times`` / ``states``
 (``store_states`` / ``store_times`` 用) や ``success`` / ``method`` /
 ``n_steps_actual`` (adaptive driver 用), ``probabilities`` フィールドが
-含まれるが, Phase 1 では fixed-step M2 driver のみが提供されるため
-本リリースでは以下の最小フィールドのみを実装する:
+含まれる. 本リリースでは以下を実装する:
 
 * ``psi_final``
 * ``t_history``
 * ``observables_history``
 * ``n_steps``
 * ``n_matvec``
+* ``success`` (Phase 4 で追加, adaptive driver 失敗時の指標)
+* ``method`` (Phase 4 で追加, 実行された propagator 名)
+* ``n_steps_actual`` (Phase 4 で追加, adaptive 経路の実 step 数;
+  固定 dt 経路では ``n_steps`` と一致)
 
-Adaptive / store_states / Observable 連動の追加フィールドは
-それぞれ Phase 4 / Phase 5 で導入される (parent issue #1 の Out of scope
-表を参照).
+新フィールドは default 付きで dataclass 末尾に置き backward compatible
+な追加とした (既存呼出側は変更不要). ``store_states`` / Observable 連動
+の ``times`` / ``states`` / ``observables`` 追加は Phase 5 で導入予定
+(parent issue #1 の Out of scope 表).
 
 ``@dataclass(frozen=True, eq=False)`` を使う理由は ``problem.py`` と同様で,
 ``np.ndarray`` を持つため dataclass 既定の ``__eq__`` が
@@ -54,7 +58,7 @@ class Trajectory:
 
 @dataclass(frozen=True, eq=False)
 class QuantumResult:
-    """時間発展実行結果 (Phase 1 subset).
+    """時間発展実行結果 (Phase 1–4 subset).
 
     Parameters
     ----------
@@ -67,17 +71,29 @@ class QuantumResult:
         ``{name: ndarray of shape (K,)}``. 各観測量の時系列値.
         観測量を渡さない場合は空 dict.
     n_steps
-        実行された driver step 数.
+        要求された driver step 数. adaptive 経路では呼出側 (``QuantumAnnealer``)
+        が要求値を別途持たないため, 実 step 数と一致する.
     n_matvec
         累積 matvec 呼出回数 (Lanczos 内部の ``apply_h_kryanneal`` 含む).
+    success
+        Phase 4 追加. 駆動が ``RuntimeError`` を出さずに完走したか.
+        固定 dt 経路では常に ``True``. adaptive 経路で ``max_rejects``
+        連続超過時は ``RuntimeError`` が呼出側に伝播するため, ここまで
+        到達したら ``True`` を返す契約 (将来 ``catch`` 経路を入れる場合
+        ``False`` を返す余地を残すための signal).
+    method
+        Phase 4 追加. 実行された propagator 名 (``"m2"`` / ``"trotter"``
+        / ``"trotter_suzuki4"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson"``).
+    n_steps_actual
+        Phase 4 追加. adaptive 経路で実際に accept された step 数.
+        固定 dt 経路では ``n_steps`` と一致する整数値を返し,
+        Phase 1–3 互換のために default ``None`` も許容する.
 
     Notes
     -----
-    Phase 4 / Phase 5 で以下のフィールドが追加される予定 (本リリース
-    では未提供):
+    Phase 5 で以下のフィールドが追加される予定:
 
     * ``times`` / ``states`` (``store_states`` 用の中間波動関数列)
-    * ``success`` / ``method`` / ``n_steps_actual`` (adaptive driver 用)
     * ``probabilities`` (``|psi_final|^2`` の caching)
     """
     psi_final: np.ndarray
@@ -85,3 +101,6 @@ class QuantumResult:
     observables_history: dict[str, np.ndarray]
     n_steps: int
     n_matvec: int
+    success: bool = True
+    method: str = 'm2'
+    n_steps_actual: int | None = None

@@ -1,4 +1,4 @@
-"""per-step wall time benchmark (M2 / Trotter / Suzuki S_4 / CFM4:2).
+"""per-step wall time benchmark (M2 / Trotter / Suzuki S_4 / CFM4:2 / adaptive Richardson).
 
 ``QuantumAnnealer.run`` の 1 step あたりの実時間を, ``method`` ×
 ``n`` (スピン数 / Hilbert 空間次元 ``2^n``) で sweep して計測する.
@@ -6,16 +6,21 @@ Phase 1 の DoD (issue #1) と Phase 2 の DoD (issue #18), Phase 3 の DoD
 (issue #30) で「``bench_per_step.py`` で M2 / Trotter / Suzuki S_4 / CFM4:2
 の per-step 数値が記録され ``benchmarks/results/`` 配下に置かれている
 (クロスオーバ実測)」を満たすためのベンチエントリポイント.
+Phase 4 C3 (issue #39) で ``method="cfm4_adaptive_richardson"`` を追加.
 
 設計規約は ``docs/design.md`` §10, 実行手順は ``benchmarks/README.md``,
 全体規約は ``CLAUDE.md`` 「ベンチマーク」節を参照する.
 
-サポート ``method`` (Phase 3 末時点):
+サポート ``method`` (Phase 4 末時点):
 
 * ``"m2"``: M2 中点則 + Lanczos (Phase 1).
 * ``"trotter"``: Strang 2 次 Trotter (Phase 2 C3).
 * ``"trotter_suzuki4"``: Suzuki S_4 4 次 Trotter (Phase 2 C4).
 * ``"cfm4"``: CFM4:2 commutator-free Magnus + Lanczos (Phase 3 C2).
+* ``"cfm4_adaptive_richardson"``: CFM4:2 + step-doubling Richardson +
+  PI controller (Phase 4 C3). 固定 dt 経路と違い ``--n-steps`` は
+  「初期 dt 提案 (``dt_init = T / n_steps``)」と「per-step 列の見せ方
+  (実 step は driver が決める)」の補助パラメータ扱い.
 
 ``method`` ごとに per-step コストの内訳が異なる:
 
@@ -23,16 +28,22 @@ Phase 1 の DoD (issue #1) と Phase 2 の DoD (issue #18), Phase 3 の DoD
 * Trotter: per-step ``(N+1)·dim`` flops (phase 1 + bit-flip N).
 * Suzuki S_4: per-step ``5·(N+1)·dim`` flops (Strang 5 回).
 * CFM4:2: per-step ``2m·dim`` flops (Lanczos 2 回, M2 の 2 倍重い).
+* CFM4 adaptive Richardson: per-step ``6m·dim`` flops (full ``2m`` +
+  half×2 ``4m`` = ``6m``, CFM4:2 fixed の 3×). 実 step 数は driver が
+  PI 制御で決めるので, raw wall time に加えて ``n_steps_actual`` と
+  ``final_err_vs_ref`` (高精度 fixed-cfm4 を参照とした state 差) を
+  CSV / md に併記する.
 
-LTE order も異なる (M2 / Strang は ``O(dt^3)``, Suzuki S_4 / CFM4:2 は
-``O(dt^5)``) ので, 同じ ``n_steps`` での生 wall time 比較に加えて, 同じ
-精度を要求したときの required ``n_steps`` のずれを別途見積もる必要がある.
+LTE order も異なる (M2 / Strang は ``O(dt^3)``, Suzuki S_4 / CFM4:2 /
+Richardson は ``O(dt^5)``, Richardson w/ extrapolate は実効 6 次) ので,
+同じ ``n_steps`` での生 wall time 比較に加えて, 同じ精度を要求したときの
+required ``n_steps`` のずれを別途見積もる必要がある.
 
 出力:
 
 * ``benchmarks/results/<YYYYMMDD-HHMMSS>/bench_per_step.csv``: per-trial
   生データ (n, dim, method, trial, n_steps, dt, m, total_wall_sec,
-  per_step_sec, states_per_sec).
+  per_step_sec, states_per_sec, n_steps_actual, final_err_vs_ref).
 * ``benchmarks/results/<YYYYMMDD-HHMMSS>/bench_per_step.md``: 集計表
   (per-method summary + cross-method 比較表) + machine info.
 
@@ -40,6 +51,8 @@ CLI 例::
 
     uv run python benchmarks/bench_per_step.py --n-values 4,8,12 --n-steps 50
     uv run python benchmarks/bench_per_step.py --methods m2,trotter
+    # adaptive Richardson の smoke
+    uv run python benchmarks/bench_per_step.py --methods cfm4_adaptive_richardson --n-values 4
     # BLAS thread を 1 に固定して machine-independent baseline を取る
     uv run python benchmarks/bench_per_step.py --blas-threads 1
 
@@ -56,10 +69,6 @@ overhead が支配して per-step 値がノイジーになる. machine-independe
 を必ず付ける. macOS Apple Accelerate は default で挙動が異なる
 (自動 tuning) ので, 機種間比較を主張するときも明示的に thread 数を
 合わせる.
-
-Phase 3 で ``method="cfm4"`` の sweep を追加済 (issue #32 / #30 の DoD).
-Richardson 経路 (``method="cfm4_adaptive_richardson"``) の追加は Phase 4 で
-本ファイルに sweep を増やす予定.
 """
 
 from __future__ import annotations
@@ -84,8 +93,26 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "benchmarks" / "results"
 
 # サポートする method 一覧. ``QuantumAnnealer.run`` の Literal 型ヒントと
-# 揃える. Richardson 系は Phase 4 で追加予定.
-_VALID_METHODS: tuple[str, ...] = ("m2", "trotter", "trotter_suzuki4", "cfm4")
+# 揃える. Phase 4 C3 で ``cfm4_adaptive_richardson`` 追加.
+_VALID_METHODS: tuple[str, ...] = (
+    "m2",
+    "trotter",
+    "trotter_suzuki4",
+    "cfm4",
+    "cfm4_adaptive_richardson",
+)
+
+# adaptive 経路の集合. n_steps を driver に渡さず, ``atol`` / ``dt_init``
+# を渡す経路を判別するための小ヘルパ.
+_ADAPTIVE_METHODS: frozenset[str] = frozenset({"cfm4_adaptive_richardson"})
+
+# adaptive 経路で final state を比較する参照解の生成パラメータ.
+# 同じ ``T`` / ``schedule`` で fixed CFM4:2 を多 step 走らせた終端 ψ を
+# 「真値の代用」とする (Phase 4 C3 の DoD では QuTiP との end-to-end
+# fidelity は ``tests/test_adaptive.py`` 側で別途検証されているため,
+# ベンチでは「ベンチ自身が再現する高精度経路」と比較すれば十分).
+_REFERENCE_N_STEPS: int = 2000
+_REFERENCE_METHOD: str = "cfm4"
 
 
 def _parse_int_list(text: str) -> list[int]:
@@ -228,28 +255,83 @@ def time_method_run(
     n_steps: int,
     method: str,
     m: int,
-) -> float:
+) -> tuple[float, int, np.ndarray]:
     """``QuantumAnnealer.run`` の wall time (秒) を ``time.perf_counter`` で計る.
 
     壁時計のジッタを最小化するため, 1 試行で run 1 回ぶん計測する.
-    ``n_steps`` 内のループは Python 側に閉じているため step 単位の
-    overhead もそこそこ乗る. ``method`` ごとに :class:`QuantumAnnealer` の
-    コンストラクタ引数 (``m`` を渡すかどうか) が変わる: Trotter 系
-    (``"trotter"`` / ``"trotter_suzuki4"``) は Lanczos を呼ばないため ``m``
-    は無視されるが, デフォルト値で渡しても害は無いので統一的に渡す.
-    ``"m2"`` / ``"cfm4"`` 経路は ``m`` がそのまま Lanczos 部分空間次元として
-    効く.
+    ``method`` ごとに ``QuantumAnnealer.run`` への呼び方が変わる:
+
+    * 固定 dt 経路 (``"m2"`` / ``"trotter"`` / ``"trotter_suzuki4"`` /
+      ``"cfm4"``): ``n_steps`` をそのまま渡す.
+    * adaptive 経路 (``"cfm4_adaptive_richardson"``): ``atol = 1e-8``
+      (driver 既定値と同) + ``dt_init = (t1 - t0) / n_steps`` を渡し,
+      driver が実 step 数を決める.
+
+    Trotter 系は Lanczos を呼ばないため ``m`` は無視されるが, デフォルト値で
+    渡しても害は無いので統一的に渡す. ``"m2"`` / ``"cfm4"`` /
+    ``"cfm4_adaptive_richardson"`` 経路は ``m`` がそのまま Lanczos 部分空間
+    次元として効く.
+
+    Returns
+    -------
+    wall : float
+        測定 wall time (秒).
+    n_steps_actual : int
+        固定 dt 経路では ``n_steps`` をそのまま, adaptive 経路では driver
+        が決めた実 step 数を返す.
+    psi_final : np.ndarray
+        終端波動関数 (final_err_vs_ref の算出に使う). complex128.
     """
     if method not in _VALID_METHODS:
         raise ValueError(f"unsupported method {method!r}; valid: {_VALID_METHODS!r}")
     ann = QuantumAnnealer(problem, schedule, m=m)
-    t_start = time.perf_counter()
-    res = ann.run(psi0, t0, t1, method=method, n_steps=n_steps)  # type: ignore[arg-type]
-    t_end = time.perf_counter()
+    if method in _ADAPTIVE_METHODS:
+        dt_init = (float(t1) - float(t0)) / int(n_steps)
+        t_start = time.perf_counter()
+        res = ann.run(
+            psi0,
+            t0,
+            t1,
+            method=method,  # type: ignore[arg-type]
+            atol=1e-8,
+            dt_init=dt_init,
+        )
+        t_end = time.perf_counter()
+        n_steps_eff = int(res.n_steps_actual) if res.n_steps_actual is not None else 0
+    else:
+        t_start = time.perf_counter()
+        res = ann.run(psi0, t0, t1, method=method, n_steps=n_steps)  # type: ignore[arg-type]
+        t_end = time.perf_counter()
+        n_steps_eff = int(n_steps)
     # res を黒箱に積んでおいて dead code elimination されないようにする.
-    # `n_matvec` を最後に touch するだけで JIT/AOT 関係無しに副作用化する.
     _ = res.n_matvec
-    return t_end - t_start
+    return t_end - t_start, n_steps_eff, np.asarray(res.psi_final)
+
+
+def _compute_reference_psi(
+    problem: IsingProblem,
+    schedule: Schedule,
+    psi0: np.ndarray,
+    t0: float,
+    t1: float,
+    m: int,
+) -> np.ndarray:
+    """adaptive 経路の ``final_err_vs_ref`` 算出のための参照解 ψ を取る.
+
+    fixed CFM4:2 を ``_REFERENCE_N_STEPS`` 多 step で走らせた終端 ψ を
+    「真値の代用」とする. QuTiP との fidelity 検証は
+    ``tests/test_adaptive.py`` で別途行われており, ベンチではコスト次元
+    比較が主目的なので追加依存を避ける.
+    """
+    ann_ref = QuantumAnnealer(problem, schedule, m=m)
+    res = ann_ref.run(
+        psi0,
+        t0,
+        t1,
+        method=_REFERENCE_METHOD,  # type: ignore[arg-type]
+        n_steps=_REFERENCE_N_STEPS,
+    )
+    return np.asarray(res.psi_final)
 
 
 def collect_machine_info() -> dict[str, str]:
@@ -428,7 +510,20 @@ def main(argv: list[str] | None = None) -> int:
             f"warmup={args.warmup}, repeat={args.repeat}"
         )
 
+        # adaptive 経路がある場合のみ高精度参照解を 1 度だけ計算する.
+        needs_reference = any(m in _ADAPTIVE_METHODS for m in args.methods)
+        psi_ref: np.ndarray | None = None
+        if needs_reference:
+            print(
+                f"  computing reference ψ ({_REFERENCE_METHOD},"
+                f" n_steps={_REFERENCE_N_STEPS})..."
+            )
+            psi_ref = _compute_reference_psi(
+                problem, schedule, psi0, 0.0, args.T, args.m
+            )
+
         for method in args.methods:
+            is_adaptive = method in _ADAPTIVE_METHODS
             print(f"  method={method}")
             for _ in range(args.warmup):
                 time_method_run(
@@ -436,8 +531,9 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             trial_times: list[float] = []
+            trial_n_steps_actual: list[int] = []
             for trial in range(args.repeat):
-                wall = time_method_run(
+                wall, n_steps_actual, psi_final = time_method_run(
                     problem,
                     schedule,
                     psi0,
@@ -448,8 +544,15 @@ def main(argv: list[str] | None = None) -> int:
                     args.m,
                 )
                 trial_times.append(wall)
-                per_step = wall / args.n_steps
+                trial_n_steps_actual.append(n_steps_actual)
+                steps_for_per_step = max(n_steps_actual, 1)
+                per_step = wall / steps_for_per_step
                 states_per_sec = dim / per_step if per_step > 0 else float("inf")
+                if is_adaptive and psi_ref is not None:
+                    final_err = float(np.linalg.norm(psi_final - psi_ref))
+                    final_err_field = f"{final_err:.6e}"
+                else:
+                    final_err_field = "n/a"
                 rows.append(
                     {
                         "n": n,
@@ -462,14 +565,25 @@ def main(argv: list[str] | None = None) -> int:
                         "total_wall_sec": f"{wall:.9e}",
                         "per_step_sec": f"{per_step:.9e}",
                         "states_per_sec": f"{states_per_sec:.9e}",
+                        "n_steps_actual": n_steps_actual,
+                        "final_err_vs_ref": final_err_field,
                     }
+                )
+                extra = (
+                    f", n_steps_actual={n_steps_actual}, err={final_err_field}"
+                    if is_adaptive
+                    else ""
                 )
                 print(
                     f"    trial {trial}: wall={wall:.4f}s, "
                     f"per_step={per_step:.4e}s ({states_per_sec:.3e} states/sec)"
+                    f"{extra}"
                 )
 
-            per_step_times = [t / args.n_steps for t in trial_times]
+            per_step_times = [
+                t / max(s, 1)
+                for t, s in zip(trial_times, trial_n_steps_actual, strict=True)
+            ]
             summary.append(
                 {
                     "n": n,

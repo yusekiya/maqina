@@ -66,6 +66,8 @@ def _try_import_rust() -> ModuleType | None:
 _rust_mod: ModuleType | None = _try_import_rust()
 
 __all__ = [
+    "evolve_schedule_adaptive_m2",
+    "evolve_schedule_adaptive_richardson",
     "evolve_schedule_cfm4",
     "evolve_schedule_m2",
     "evolve_schedule_trotter",
@@ -918,3 +920,718 @@ def evolve_schedule_cfm4(
 
     n_matvec = int(n_steps) * 2 * int(m)
     return psi, n_matvec
+
+
+def _python_cfm4_step_with_m2_estimate(
+    psi: np.ndarray,
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    a_s1: float,
+    b_s1: float,
+    a_s2: float,
+    b_s2: float,
+    a_mid: float,
+    b_mid: float,
+    dt: float,
+    m: int,
+    krylov_tol: float,
+) -> tuple[np.ndarray, float]:
+    """CFM4:2 + M2 embedded local error 推定子の Python リファレンス実装.
+
+    Rust 側 ``cfm4_step_with_m2_estimate`` (``src/cfm4.rs``) と同一アルゴリズム:
+    **同じ入口 ψ** に対し CFM4:2 を 1 step (``a_s1, b_s1`` / ``a_s2, b_s2``
+    ノードでの線形結合) と M2 中点則 1 step (``a_mid, b_mid``) を独立に走らせ,
+
+    .. code-block:: text
+
+        err = ‖ψ_cfm4 - ψ_m2‖_2
+
+    を embedded error として返す. M2 LTE が ``O(dt^3)``, CFM4:2 LTE が
+    ``O(dt^5)`` なので小 dt 域では ``err ≈ ‖ψ_m2 - ψ_exact‖ ∝ dt^3``
+    (PI controller の ``p = 2`` 指数で扱える 2 次推定子;
+    ``docs/design.md`` §5.3 PI controller 表).
+
+    返り値 ``psi_new`` は **CFM4:2 の値** (``_python_cfm4_step`` 単体呼出と
+    bit-exact 一致). M2 経路の状態は err 算出にのみ使い破棄される.
+
+    Rust 側 ``_rust.cfm4_step_with_m2_estimate_py`` と ``rel < 1e-13`` で
+    一致するのが契約 (``tests/test_cfm4_m2_embedded.py``).
+
+    Parameters
+    ----------
+    psi
+        shape ``(2**n,)`` complex128 の入力状態.
+    h_x
+        shape ``(n,)`` float64 のサイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64 の Z 基底 problem 対角.
+    a_s1, b_s1
+        ノード ``t + c_1·dt`` でフリーズ済の ``A(s(·))``, ``B(s(·))``
+        (CFM4:2 stage 1).
+    a_s2, b_s2
+        ノード ``t + c_2·dt`` でフリーズ済 (CFM4:2 stage 2).
+    a_mid, b_mid
+        中点 ``t + dt/2`` でフリーズ済 (M2 用).
+    dt
+        時刻刻み幅.
+    m
+        Krylov 部分空間次元.
+    krylov_tol
+        Lanczos の β 打切り閾値.
+
+    Returns
+    -------
+    psi_new : np.ndarray
+        shape ``(2**n,)`` complex128. CFM4:2 1 step 後の新状態.
+    err : float
+        ``‖ψ_cfm4 - ψ_m2‖_2`` (real, non-negative). PI controller が
+        accept/reject 判定に使う.
+    """
+    psi_cfm4 = _python_cfm4_step(
+        psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol
+    )
+    psi_m2 = _python_m2_step(psi, h_x, h_p_diag, a_mid, b_mid, dt, m, krylov_tol)
+    err = float(np.linalg.norm(psi_cfm4 - psi_m2))
+    return psi_cfm4, err
+
+
+def _python_cfm4_step_with_richardson_estimate(
+    psi: np.ndarray,
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    a_s1_full: float,
+    b_s1_full: float,
+    a_s2_full: float,
+    b_s2_full: float,
+    a_s1_h1: float,
+    b_s1_h1: float,
+    a_s2_h1: float,
+    b_s2_h1: float,
+    a_s1_h2: float,
+    b_s1_h2: float,
+    a_s2_h2: float,
+    b_s2_h2: float,
+    dt: float,
+    m: int,
+    krylov_tol: float,
+    extrapolate: bool,
+) -> tuple[np.ndarray, float]:
+    """CFM4:2 + step-doubling Richardson 推定子の Python リファレンス実装.
+
+    Rust 側 ``cfm4_step_with_richardson_estimate`` (``src/cfm4.rs``) と
+    同一アルゴリズム: **同じ入口 ψ** に対し
+
+    1. full-step CFM4:2 (dt) → ``ψ_full``
+    2. 前半 half-step CFM4:2 (dt/2, ``h1`` ノード) → ``ψ_mid``
+    3. 後半 half-step CFM4:2 (dt/2, ``h2`` ノード) を ``ψ_mid`` 入口で適用 → ``ψ_h2``
+
+    を独立に走らせ,
+
+    .. code-block:: text
+
+        err = ‖ψ_full - ψ_h2‖_2 ≈ (15/16) · C_4 · dt^5
+
+    を **CFM4:2 自身の LTE** として返す. PI controller の ``p = 4`` 指数で
+    扱える 4 次推定子 (``docs/design.md`` §5.3 PI controller 表).
+
+    per-step matvec は full CFM4:2 ``2m`` + half×2 CFM4:2 ``4m`` = **6m**
+    (Lanczos 呼出 6 回, 固定 dt CFM4:2 比 3×).
+
+    ``extrapolate=True`` のとき Richardson 外挿
+
+    .. code-block:: text
+
+        ψ_acc = (16 · ψ_h2 - ψ_full) / 15
+
+    を採用 (先頭 ``dt^5`` 誤差が打ち消され実効 6 次精度).
+    ``extrapolate=False`` のときは ``ψ_h2`` (より高精度な方) を返す.
+    ``err`` は ``extrapolate`` フラグに依らず常に ``‖ψ_full - ψ_h2‖``
+    (推定子の意味を保つため).
+
+    Rust 側 ``_rust.cfm4_step_with_richardson_estimate_py`` と
+    ``rel < 1e-13`` で一致するのが契約 (``tests/test_richardson.py``).
+
+    Parameters
+    ----------
+    psi
+        shape ``(2**n,)`` complex128 の入力状態.
+    h_x
+        shape ``(n,)`` float64 のサイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64 の Z 基底 problem 対角.
+    a_s1_full, b_s1_full, a_s2_full, b_s2_full
+        full-step (dt) CFM4:2 用ノード ``(t + c_1·dt, t + c_2·dt)``
+        でのスケジュール係数.
+    a_s1_h1, b_s1_h1, a_s2_h1, b_s2_h1
+        前半 half-step (dt/2) CFM4:2 用ノード ``(t + c_1·dt/2, t + c_2·dt/2)``
+        でのスケジュール係数.
+    a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2
+        後半 half-step (dt/2) CFM4:2 用ノード
+        ``(t + dt/2 + c_1·dt/2, t + dt/2 + c_2·dt/2)`` でのスケジュール係数.
+    dt
+        時刻刻み幅.
+    m
+        Krylov 部分空間次元.
+    krylov_tol
+        Lanczos の β 打切り閾値.
+    extrapolate
+        ``True`` で ``ψ_acc`` (Richardson 外挿後) を返し, ``False`` で
+        ``ψ_h2`` を返す.
+
+    Returns
+    -------
+    psi_new : np.ndarray
+        shape ``(2**n,)`` complex128. ``extrapolate=True`` なら ``ψ_acc``,
+        ``False`` なら ``ψ_h2``.
+    err : float
+        ``‖ψ_full - ψ_h2‖_2`` (real, non-negative). ``extrapolate`` フラグに
+        依らず常に同一の値を返す.
+    """
+    half_dt = 0.5 * float(dt)
+
+    # 1) full-step CFM4:2 (dt)
+    psi_full = _python_cfm4_step(
+        psi,
+        h_x,
+        h_p_diag,
+        a_s1_full,
+        b_s1_full,
+        a_s2_full,
+        b_s2_full,
+        float(dt),
+        m,
+        krylov_tol,
+    )
+
+    # 2) 前半 half-step CFM4:2 (dt/2)
+    psi_mid = _python_cfm4_step(
+        psi,
+        h_x,
+        h_p_diag,
+        a_s1_h1,
+        b_s1_h1,
+        a_s2_h1,
+        b_s2_h1,
+        half_dt,
+        m,
+        krylov_tol,
+    )
+
+    # 3) 後半 half-step CFM4:2 (dt/2), 前半の出口状態を入口に取る.
+    psi_h2 = _python_cfm4_step(
+        psi_mid,
+        h_x,
+        h_p_diag,
+        a_s1_h2,
+        b_s1_h2,
+        a_s2_h2,
+        b_s2_h2,
+        half_dt,
+        m,
+        krylov_tol,
+    )
+
+    err = float(np.linalg.norm(psi_full - psi_h2))
+
+    if extrapolate:
+        # ψ_acc = (16 · ψ_h2 - ψ_full) / 15. Rust 側と同一順序で書き戻す.
+        psi_new = (16.0 * psi_h2 - psi_full) / 15.0
+    else:
+        psi_new = psi_h2
+    return psi_new, err
+
+
+def _adaptive_dispatch_m2_estimate(
+    rust_mod: ModuleType | None,
+    psi: np.ndarray,
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    a_s1: float,
+    b_s1: float,
+    a_s2: float,
+    b_s2: float,
+    a_mid: float,
+    b_mid: float,
+    dt: float,
+    m: int,
+    krylov_tol: float,
+) -> tuple[np.ndarray, float]:
+    """``rust_mod`` 可否に応じて Rust / Python の M2 embedded 推定子を呼ぶ.
+
+    PI controller ループ本体から呼ぶための薄いディスパッチ関数. Rust 経路は
+    ``(psi_new, err)`` を返すので Python リファレンス側と signature を揃える.
+    """
+    if rust_mod is not None:
+        psi_new, err = rust_mod.cfm4_step_with_m2_estimate_py(
+            psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, a_mid, b_mid, dt, m, krylov_tol
+        )
+        return psi_new, float(err)
+    return _python_cfm4_step_with_m2_estimate(
+        psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, a_mid, b_mid, dt, m, krylov_tol
+    )
+
+
+def _adaptive_dispatch_richardson_estimate(
+    rust_mod: ModuleType | None,
+    psi: np.ndarray,
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    a_s1_full: float,
+    b_s1_full: float,
+    a_s2_full: float,
+    b_s2_full: float,
+    a_s1_h1: float,
+    b_s1_h1: float,
+    a_s2_h1: float,
+    b_s2_h1: float,
+    a_s1_h2: float,
+    b_s1_h2: float,
+    a_s2_h2: float,
+    b_s2_h2: float,
+    dt: float,
+    m: int,
+    krylov_tol: float,
+    extrapolate: bool,
+) -> tuple[np.ndarray, float]:
+    """``rust_mod`` 可否に応じて Rust / Python の Richardson 推定子を呼ぶ."""
+    if rust_mod is not None:
+        psi_new, err = rust_mod.cfm4_step_with_richardson_estimate_py(
+            psi,
+            h_x,
+            h_p_diag,
+            a_s1_full,
+            b_s1_full,
+            a_s2_full,
+            b_s2_full,
+            a_s1_h1,
+            b_s1_h1,
+            a_s2_h1,
+            b_s2_h1,
+            a_s1_h2,
+            b_s1_h2,
+            a_s2_h2,
+            b_s2_h2,
+            dt,
+            m,
+            krylov_tol,
+            extrapolate,
+        )
+        return psi_new, float(err)
+    return _python_cfm4_step_with_richardson_estimate(
+        psi,
+        h_x,
+        h_p_diag,
+        a_s1_full,
+        b_s1_full,
+        a_s2_full,
+        b_s2_full,
+        a_s1_h1,
+        b_s1_h1,
+        a_s2_h1,
+        b_s2_h1,
+        a_s1_h2,
+        b_s1_h2,
+        a_s2_h2,
+        b_s2_h2,
+        dt,
+        m,
+        krylov_tol,
+        extrapolate,
+    )
+
+
+def _pi_dt_next(
+    dt_try: float,
+    err: float,
+    *,
+    tol_step: float,
+    safety: float,
+    growth_max: float,
+    dt_max: float,
+    dt_min: float,
+    p: int,
+) -> float:
+    """PI controller の accept 時 ``dt_next`` を計算する.
+
+    .. code-block:: text
+
+        dt_next = dt · safety · (tol_step / err)^{1/(p+1)}
+        dt_next = min(dt_next, dt_try · growth_max, dt_max)
+        dt_next = max(dt_next, dt_min)
+
+    ``err <= 1e-30`` のときは PI 式が発散するので
+    ``dt_next = dt_try · growth_max`` に折り返す (0 近傍ガード).
+    ``p`` は推定子の order (M2 embedded = 2, Richardson = 4).
+    詳細は ``docs/design.md`` §5.3 PI controller サブセクション.
+    """
+    if err <= 1.0e-30:
+        dt_next = dt_try * growth_max
+    else:
+        dt_next = dt_try * safety * (tol_step / err) ** (1.0 / (p + 1))
+    dt_next = min(dt_next, dt_try * growth_max, dt_max)
+    dt_next = max(dt_next, dt_min)
+    return float(dt_next)
+
+
+def evolve_schedule_adaptive_m2(
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    schedule: Schedule,
+    psi0: np.ndarray,
+    t0: float,
+    t1: float,
+    *,
+    m: int = 24,
+    krylov_tol: float = 1e-12,
+    tol_step: float = 1e-8,
+    dt0: float = 0.5,
+    dt_min: float = 1e-4,
+    dt_max: float | None = None,
+    safety: float = 0.9,
+    growth_max: float = 4.0,
+    max_rejects: int = 50,
+    save_tlist: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """CFM4:2 + M2 embedded 推定子による adaptive dt ドライバ (Phase 4 C3).
+
+    PI controller (``docs/design.md`` §5.3) で local error を ``tol_step``
+    以下に保ちつつ dt を伸縮させて ``[t0, t1]`` 区間を進む. 各 step は
+    CFM4:2 1 step + M2 1 step (同じ入口 ψ) を走らせ
+    ``err = ‖ψ_cfm4 - ψ_m2‖`` を embedded error として PI 制御へ流す.
+    accept 時の ψ は ``ψ_cfm4`` を採用する (``cfm4_step`` 単体呼出と
+    bit-exact 一致). M2 embedded は ``p = 2`` 指数 ``1/3`` で更新する.
+
+    Rust 拡張が import 済なら ``_rust.cfm4_step_with_m2_estimate_py`` を,
+    そうでなければ Python リファレンス ``_python_cfm4_step_with_m2_estimate``
+    を使う (silent fallback).
+
+    Parameters
+    ----------
+    h_x
+        shape ``(n,)`` float64. サイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64. Z 基底 problem 対角.
+    schedule
+        ``Schedule`` インスタンス. ``coeffs_at(t)`` から
+        ``(A(s(t)), B(s(t)))`` を取り出す.
+    psi0
+        shape ``(2**n,)`` complex128. 初期状態 (L2-normalize 済みであること).
+    t0, t1
+        積分区間 ``[t0, t1]``. ``t1 > t0`` を要求.
+    m
+        Krylov 部分空間次元 (既定 ``24``).
+    krylov_tol
+        Lanczos の β 打切り閾値 (既定 ``1e-12``).
+    tol_step
+        accept 判定の局所誤差閾値 (既定 ``1e-8``).
+    dt0
+        初期 dt (既定 ``0.5``).
+    dt_min
+        最小 dt (ここまで縮めると err に関わらず accept; 既定 ``1e-4``).
+    dt_max
+        最大 dt. ``None`` のとき ``10 · dt0`` に解決される.
+    safety
+        PI 安全係数 (既定 ``0.9``).
+    growth_max
+        1 step での dt 拡大率上限 (既定 ``4.0``).
+    max_rejects
+        同一 step での連続 reject 上限. 超過で ``RuntimeError``
+        (既定 ``50``).
+    save_tlist
+        観測時刻列 (Phase 5 で実装予定). 現状は ``None`` 以外を渡すと
+        ``NotImplementedError``.
+
+    Returns
+    -------
+    psi_final : np.ndarray
+        shape ``(2**n,)`` complex128 の終端状態.
+    t_history : np.ndarray
+        shape ``(K,)`` float64. ``t0`` を含み, 各 accept 後の時刻列.
+    dt_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の dt.
+    n_rejects : int
+        累積 reject 回数 (連続超過とは別; 全 step 合算).
+
+    Raises
+    ------
+    ValueError
+        ``t1 <= t0`` または PI controller の数値引数が範囲外のとき.
+    NotImplementedError
+        ``save_tlist`` が ``None`` でないとき (Phase 5).
+    RuntimeError
+        ``max_rejects`` を連続超過したとき.
+    """
+    if save_tlist is not None:
+        raise NotImplementedError(
+            "save_tlist is reserved for Phase 5; pass None in Phase 4."
+        )
+    if not (t1 > t0):
+        raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
+    if not (dt0 > 0.0 and dt_min > 0.0 and dt_min <= dt0):
+        raise ValueError(
+            f"require 0 < dt_min <= dt0; got dt0={dt0!r}, dt_min={dt_min!r}"
+        )
+    if not (safety > 0.0):
+        raise ValueError(f"safety must be > 0, got {safety!r}")
+    if not (growth_max > 1.0):
+        raise ValueError(f"growth_max must be > 1, got {growth_max!r}")
+    if max_rejects < 1:
+        raise ValueError(f"max_rejects must be >= 1, got {max_rejects!r}")
+
+    dt_max_eff = float(dt_max) if dt_max is not None else 10.0 * float(dt0)
+    if not (dt_max_eff >= dt0):
+        raise ValueError(
+            f"dt_max must be >= dt0; got dt_max={dt_max_eff!r}, dt0={dt0!r}"
+        )
+
+    psi = np.ascontiguousarray(psi0, dtype=np.complex128)
+    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
+    h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
+
+    rust_mod = _rust_mod
+    t = float(t0)
+    t_end = float(t1)
+    dt = float(dt0)
+    n_rejects = 0
+    n_consecutive_rejects = 0
+    t_hist: list[float] = [t]
+    dt_hist: list[float] = []
+    while t < t_end:
+        dt_try = min(dt, t_end - t)
+        # CFM4:2 ノード + M2 中点ノード. reject 時は新 dt で再評価が必要
+        # なため毎ループで取り直す.
+        t_s1 = t + _CFM4_C1 * dt_try
+        t_s2 = t + _CFM4_C2 * dt_try
+        t_mid = t + 0.5 * dt_try
+        a_s1, b_s1 = schedule.coeffs_at(t_s1)
+        a_s2, b_s2 = schedule.coeffs_at(t_s2)
+        a_mid, b_mid = schedule.coeffs_at(t_mid)
+
+        psi_new, err = _adaptive_dispatch_m2_estimate(
+            rust_mod,
+            psi,
+            h_x_arr,
+            h_p_diag_arr,
+            a_s1,
+            b_s1,
+            a_s2,
+            b_s2,
+            a_mid,
+            b_mid,
+            dt_try,
+            m,
+            krylov_tol,
+        )
+
+        accept = (err <= tol_step) or (dt_try <= dt_min)
+        if accept:
+            psi = psi_new
+            t = t + dt_try
+            t_hist.append(t)
+            dt_hist.append(dt_try)
+            n_consecutive_rejects = 0
+            dt = _pi_dt_next(
+                dt_try,
+                err,
+                tol_step=tol_step,
+                safety=safety,
+                growth_max=growth_max,
+                dt_max=dt_max_eff,
+                dt_min=dt_min,
+                p=2,
+            )
+        else:
+            n_rejects += 1
+            n_consecutive_rejects += 1
+            if n_consecutive_rejects > max_rejects:
+                raise RuntimeError(
+                    f"adaptive driver: exceeded max_rejects={max_rejects} "
+                    f"consecutive rejects at t={t}, dt={dt_try}, err={err}; "
+                    f"consider relaxing tol_step or shrinking dt0."
+                )
+            dt = max(dt_try * 0.5, dt_min)
+
+    return (
+        psi,
+        np.asarray(t_hist, dtype=np.float64),
+        np.asarray(dt_hist, dtype=np.float64),
+        int(n_rejects),
+    )
+
+
+def evolve_schedule_adaptive_richardson(
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    schedule: Schedule,
+    psi0: np.ndarray,
+    t0: float,
+    t1: float,
+    *,
+    m: int = 24,
+    krylov_tol: float = 1e-12,
+    tol_step: float = 1e-8,
+    dt0: float = 0.5,
+    dt_min: float = 1e-4,
+    dt_max: float | None = None,
+    safety: float = 0.9,
+    growth_max: float = 4.0,
+    max_rejects: int = 50,
+    richardson_extrapolate: bool = False,
+    save_tlist: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """CFM4:2 + step-doubling Richardson 推定子による adaptive dt ドライバ.
+
+    PI controller (``docs/design.md`` §5.3) で local error を ``tol_step``
+    以下に保ちつつ dt を伸縮させて ``[t0, t1]`` 区間を進む. 各 step は
+    full-step CFM4:2 (dt) と half-step×2 CFM4:2 (dt/2 を 2 回) を同入口 ψ
+    から走らせ ``err = ‖ψ_full - ψ_h2‖`` を 4 次推定子として PI 制御へ流す.
+    accept 時の ψ は ``richardson_extrapolate=False`` で ``ψ_h2`` を,
+    ``True`` で外挿後の ``ψ_acc = (16·ψ_h2 - ψ_full)/15`` を採用する.
+    Richardson は ``p = 4`` 指数 ``1/5`` で更新する.
+
+    per-step matvec は **6m** (Lanczos 呼出 6 回; full 2m + half×2 で 4m).
+    smooth schedule では M2 embedded 比 2 オーダ高精度なので許容 dt を
+    1~2 桁伸ばせ, 同精度比較で total コストが M2 を下回るクロスオーバが
+    出る (``docs/design.md`` §5.3 / §12).
+
+    Rust 拡張が import 済なら ``_rust.cfm4_step_with_richardson_estimate_py``
+    を, そうでなければ Python リファレンス
+    ``_python_cfm4_step_with_richardson_estimate`` を使う (silent fallback).
+
+    Parameters
+    ----------
+    h_x, h_p_diag, schedule, psi0, t0, t1
+        ``evolve_schedule_adaptive_m2`` と同じ.
+    m, krylov_tol, tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects
+        PI controller の既定パラメータ (``docs/design.md`` §5.3).
+    richardson_extrapolate
+        ``True`` で外挿後の ``ψ_acc`` を accept 時の状態とする
+        (実効 6 次精度; 既定 ``False``).
+    save_tlist
+        Phase 5 予約 (現状 ``None`` のみ受付け).
+
+    Returns
+    -------
+    psi_final : np.ndarray
+        shape ``(2**n,)`` complex128 の終端状態.
+    t_history : np.ndarray
+        shape ``(K,)`` float64. ``t0`` を含み, 各 accept 後の時刻列.
+    dt_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の dt.
+    n_rejects : int
+        累積 reject 回数.
+
+    Raises
+    ------
+    ValueError, NotImplementedError, RuntimeError
+        ``evolve_schedule_adaptive_m2`` と同様.
+    """
+    if save_tlist is not None:
+        raise NotImplementedError(
+            "save_tlist is reserved for Phase 5; pass None in Phase 4."
+        )
+    if not (t1 > t0):
+        raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
+    if not (dt0 > 0.0 and dt_min > 0.0 and dt_min <= dt0):
+        raise ValueError(
+            f"require 0 < dt_min <= dt0; got dt0={dt0!r}, dt_min={dt_min!r}"
+        )
+    if not (safety > 0.0):
+        raise ValueError(f"safety must be > 0, got {safety!r}")
+    if not (growth_max > 1.0):
+        raise ValueError(f"growth_max must be > 1, got {growth_max!r}")
+    if max_rejects < 1:
+        raise ValueError(f"max_rejects must be >= 1, got {max_rejects!r}")
+
+    dt_max_eff = float(dt_max) if dt_max is not None else 10.0 * float(dt0)
+    if not (dt_max_eff >= dt0):
+        raise ValueError(
+            f"dt_max must be >= dt0; got dt_max={dt_max_eff!r}, dt0={dt0!r}"
+        )
+
+    psi = np.ascontiguousarray(psi0, dtype=np.complex128)
+    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
+    h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
+
+    rust_mod = _rust_mod
+    t = float(t0)
+    t_end = float(t1)
+    dt = float(dt0)
+    n_rejects = 0
+    n_consecutive_rejects = 0
+    t_hist: list[float] = [t]
+    dt_hist: list[float] = []
+    while t < t_end:
+        dt_try = min(dt, t_end - t)
+        half_dt = 0.5 * dt_try
+        # full-step ノード (dt) と half-step×2 ノード (dt/2 × 2) を pre-eval.
+        t_s1_full = t + _CFM4_C1 * dt_try
+        t_s2_full = t + _CFM4_C2 * dt_try
+        t_s1_h1 = t + _CFM4_C1 * half_dt
+        t_s2_h1 = t + _CFM4_C2 * half_dt
+        t_s1_h2 = t + half_dt + _CFM4_C1 * half_dt
+        t_s2_h2 = t + half_dt + _CFM4_C2 * half_dt
+        a_s1_full, b_s1_full = schedule.coeffs_at(t_s1_full)
+        a_s2_full, b_s2_full = schedule.coeffs_at(t_s2_full)
+        a_s1_h1, b_s1_h1 = schedule.coeffs_at(t_s1_h1)
+        a_s2_h1, b_s2_h1 = schedule.coeffs_at(t_s2_h1)
+        a_s1_h2, b_s1_h2 = schedule.coeffs_at(t_s1_h2)
+        a_s2_h2, b_s2_h2 = schedule.coeffs_at(t_s2_h2)
+
+        psi_new, err = _adaptive_dispatch_richardson_estimate(
+            rust_mod,
+            psi,
+            h_x_arr,
+            h_p_diag_arr,
+            a_s1_full,
+            b_s1_full,
+            a_s2_full,
+            b_s2_full,
+            a_s1_h1,
+            b_s1_h1,
+            a_s2_h1,
+            b_s2_h1,
+            a_s1_h2,
+            b_s1_h2,
+            a_s2_h2,
+            b_s2_h2,
+            dt_try,
+            m,
+            krylov_tol,
+            richardson_extrapolate,
+        )
+
+        accept = (err <= tol_step) or (dt_try <= dt_min)
+        if accept:
+            psi = psi_new
+            t = t + dt_try
+            t_hist.append(t)
+            dt_hist.append(dt_try)
+            n_consecutive_rejects = 0
+            dt = _pi_dt_next(
+                dt_try,
+                err,
+                tol_step=tol_step,
+                safety=safety,
+                growth_max=growth_max,
+                dt_max=dt_max_eff,
+                dt_min=dt_min,
+                p=4,
+            )
+        else:
+            n_rejects += 1
+            n_consecutive_rejects += 1
+            if n_consecutive_rejects > max_rejects:
+                raise RuntimeError(
+                    f"adaptive driver: exceeded max_rejects={max_rejects} "
+                    f"consecutive rejects at t={t}, dt={dt_try}, err={err}; "
+                    f"consider relaxing tol_step or shrinking dt0."
+                )
+            dt = max(dt_try * 0.5, dt_min)
+
+    return (
+        psi,
+        np.asarray(t_hist, dtype=np.float64),
+        np.asarray(dt_hist, dtype=np.float64),
+        int(n_rejects),
+    )

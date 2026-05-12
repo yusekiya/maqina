@@ -1,6 +1,6 @@
-"""``QuantumAnnealer.run`` の end-to-end smoke test (Phase 1 / Phase 2 / Phase 3).
+"""``QuantumAnnealer.run`` の end-to-end smoke test (Phase 1 / Phase 2 / Phase 3 / Phase 4).
 
-issue #8 / #21 / #22 / #32 の acceptance:
+issue #8 / #21 / #22 / #32 / #39 の acceptance:
 
 * ``QuantumAnnealer(prob, sched).run(psi0, 0, T, method="m2", n_steps=200)``
   の戻り値が ``QuantumResult`` で, 線形 schedule で十分長い ``T`` を取ると
@@ -11,6 +11,10 @@ issue #8 / #21 / #22 / #32 の acceptance:
   ``n_matvec = n_steps * 5 * (N + 1)`` の見積もりが返る.
 * ``method="cfm4"`` 経路 (Phase 3 C2) でも同じ smoke を満たし,
   ``n_matvec = n_steps * 2 * m`` の見積もりが返る.
+* ``method="cfm4_adaptive_richardson"`` 経路 (Phase 4 C3) でも同じ smoke
+  を満たし, ``n_matvec = n_steps_actual * 6 * m`` の見積もりと
+  ``result.success`` / ``result.method`` / ``result.n_steps_actual``
+  の新フィールドが正しく返る.
 * 公開 API (psi0 検証, method/save_tlist の NotImplementedError) が
   仕様どおりに raise する.
 """
@@ -54,7 +58,7 @@ def _ground_state_probability(psi: np.ndarray, h_p_diag: np.ndarray) -> float:
 
 
 def test_run_returns_quantum_result_with_phase1_fields() -> None:
-    """戻り値が ``QuantumResult`` で Phase 1 subset フィールドを持つ."""
+    """戻り値が ``QuantumResult`` で Phase 1 subset + Phase 4 追加フィールドを持つ."""
     n = 3
     prob = IsingProblem(
         n=n,
@@ -74,6 +78,10 @@ def test_run_returns_quantum_result_with_phase1_fields() -> None:
     assert res.n_steps == 20
     # n_matvec は Phase 1 では n_steps × m の見積もり (m=24 デフォルト).
     assert res.n_matvec == 20 * 24
+    # Phase 4 で追加した新フィールド (固定 dt 経路では n_steps と一致).
+    assert res.success is True
+    assert res.method == "m2"
+    assert res.n_steps_actual == 20
     # propagator は unitary なので ‖psi_final‖ ≈ 1.
     assert abs(np.linalg.norm(res.psi_final) - 1.0) < 1e-10
 
@@ -205,9 +213,63 @@ def test_run_cfm4_smoke_and_ground_state() -> None:
     assert p_gs > 0.95, f"ground state probability too low (cfm4): {p_gs}"
 
 
+def test_run_cfm4_adaptive_richardson_smoke_and_ground_state() -> None:
+    """``method="cfm4_adaptive_richardson"`` smoke + GS 到達確率 (Phase 4 C3).
+
+    n=4, T=10 linear schedule の強磁性 chain (縮退基底 ``|0000⟩`` /
+    ``|1111⟩``) で adaptive 経路を実行し, 終端波動関数の基底状態
+    合計確率が 0.95 を超えることを確認する.
+
+    あわせて Phase 4 規約を検証:
+
+    * ``n_matvec = n_steps_actual * 6 * m`` (full 2m + half×2 4m).
+    * ``result.success == True``, ``result.method == "cfm4_adaptive_richardson"``,
+      ``result.n_steps_actual is not None``.
+    """
+    n = 4
+    prob = IsingProblem(
+        n=n,
+        H_p_diag=_ferromagnetic_chain_h_p_diag(n),
+        h_x=np.ones(n, dtype=np.float64),
+    )
+    sched = Schedule.linear(T=10.0)
+    psi0 = uniform_superposition(n)
+    ann = QuantumAnnealer(prob, sched)
+    res = ann.run(
+        psi0,
+        0.0,
+        sched.T,
+        method="cfm4_adaptive_richardson",
+        atol=1e-8,
+        dt_init=0.1,
+    )
+
+    assert isinstance(res, QuantumResult)
+    assert res.psi_final.shape == (1 << n,)
+    assert res.psi_final.dtype == np.complex128
+    assert res.success is True
+    assert res.method == "cfm4_adaptive_richardson"
+    assert res.n_steps_actual is not None
+    assert res.n_steps_actual >= 1
+    # adaptive 経路は要求 step 数を持たないので n_steps = n_steps_actual.
+    assert res.n_steps == res.n_steps_actual
+    # Phase 4 C3 規約: n_matvec = n_steps_actual × 6 × m (m=24 デフォルト).
+    assert res.n_matvec == res.n_steps_actual * 6 * 24
+    # propagator は unitary.
+    assert abs(np.linalg.norm(res.psi_final) - 1.0) < 1e-10
+
+    p_gs = _ground_state_probability(res.psi_final, prob.H_p_diag)
+    assert p_gs > 0.95, (
+        f"ground state probability too low (cfm4_adaptive_richardson): {p_gs}"
+    )
+
+
 def test_run_rejects_unsupported_method() -> None:
-    """``method`` が ``"m2"`` / ``"trotter"`` / ``"trotter_suzuki4"`` /
-    ``"cfm4"`` 以外なら ``NotImplementedError``.
+    """サポート対象外の ``method`` で ``NotImplementedError``.
+
+    Phase 4 で ``cfm4_adaptive_richardson`` が追加されたため, 旧仕様の
+    sentinel ``"adaptive_m2"`` (本リリースでは API 表面に出さない) を
+    試して raise を確認する.
     """
     n = 3
     prob = IsingProblem(
@@ -219,7 +281,7 @@ def test_run_rejects_unsupported_method() -> None:
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     with pytest.raises(NotImplementedError):
-        ann.run(psi0, 0.0, 1.0, method="cfm4_adaptive_richardson", n_steps=10)  # type: ignore[arg-type]
+        ann.run(psi0, 0.0, 1.0, method="adaptive_m2", n_steps=10)  # type: ignore[arg-type]
 
 
 def test_run_rejects_save_tlist() -> None:
