@@ -59,10 +59,10 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(krylov::lanczos_propagate_py, m)?)?;
     m.add_function(wrap_pyfunction!(cfm4::m2_midpoint_step_py, m)?)?;
     m.add_function(wrap_pyfunction!(cfm4::cfm4_step_py, m)?)?;
+    m.add_function(wrap_pyfunction!(cfm4::cfm4_step_with_m2_estimate_py, m)?)?;
     m.add_function(wrap_pyfunction!(trotter::trotter_step_py, m)?)?;
     m.add_function(wrap_pyfunction!(trotter::trotter_suzuki4_step_py, m)?)?;
-    // TODO(phase4): adaptive estimators
-    // m.add_function(wrap_pyfunction!(cfm4::cfm4_step_with_m2_estimate, m)?)?;
-    // m.add_function(wrap_pyfunction!(cfm4::cfm4_step_with_richardson_estimate, m)?)?;
+    // TODO(phase4): Richardson 推定子 (C2)
+    // m.add_function(wrap_pyfunction!(cfm4::cfm4_step_with_richardson_estimate_py, m)?)?;
     Ok(())
 }
