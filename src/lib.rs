@@ -42,8 +42,7 @@ mod cfm4;
 mod krylov;
 mod matvec;
 mod tridiag;
-// TODO(phase2): Trotter 経路
-// mod trotter;
+mod trotter;
 
 /// 本拡張が `blas` feature 有効でビルドされたかを示す compile-time フラグ.
 /// Python 側からは `_rust.__has_blas__` として参照する.
@@ -53,11 +52,10 @@ const HAS_BLAS: bool = cfg!(feature = "blas");
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__has_blas__", HAS_BLAS)?;
     m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_py, m)?)?;
+    m.add_function(wrap_pyfunction!(matvec::apply_single_mode_axis_i_py, m)?)?;
     m.add_function(wrap_pyfunction!(krylov::lanczos_propagate_py, m)?)?;
     m.add_function(wrap_pyfunction!(cfm4::m2_midpoint_step_py, m)?)?;
-    // TODO(phase2): Trotter
-    // m.add_function(wrap_pyfunction!(matvec::apply_single_mode_axis_i_py, m)?)?;
-    // m.add_function(wrap_pyfunction!(trotter::trotter_step, m)?)?;
+    m.add_function(wrap_pyfunction!(trotter::trotter_step_py, m)?)?;
     // TODO(phase3): CFM4:2
     // m.add_function(wrap_pyfunction!(cfm4::cfm4_step, m)?)?;
     // TODO(phase4): adaptive estimators

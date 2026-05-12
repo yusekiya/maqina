@@ -706,7 +706,12 @@ pub fn trotter_step(
         psi[k] *= Complex64::new(phi.cos(), phi.sin());
     }
     for i in 0..n {
-        let theta = -a_t * h_x[i] * dt;   // 符号は H_drv = -Σ h_x_i X_i から
+        // H_drv = -Σ h_x_i X_i なので
+        //   exp(-i·dt·a_t·H_drv) = Π_i exp(+i·θ_i·X_i), θ_i = a_t·h_x_i·dt
+        // → u = cos(θ)·I + i·sin(θ)·X with θ = +a_t·h_x_i·dt.
+        // (H_drv の負符号は θ では巻き取らない. apply_h_kryanneal の
+        //  coeff = -a_t·h_x_i と同じ convention.)
+        let theta = a_t * h_x[i] * dt;
         let c = theta.cos();
         let s = theta.sin();
         let u = [
@@ -868,8 +873,11 @@ U(dt) ≈ exp(-i dt H_p / 2) · exp(-i dt H_drv) · exp(-i dt H_p / 2)
       = phase_p(dt/2) · (Π_i R_i(dt)) · phase_p(dt/2)
 ```
 
-各 `R_i(dt) = cos(-A·h_x_i·dt)·I + i·sin(-A·h_x_i·dt)·X_i` は §5.1.2 の
-`apply_single_mode_axis_i` で 1 軸 in-place 適用。
+各 `R_i(dt) = cos(A·h_x_i·dt)·I + i·sin(A·h_x_i·dt)·X_i` は §5.1.2 の
+`apply_single_mode_axis_i` で 1 軸 in-place 適用。`H_drv = -Σ h_x_i X_i`
+の負符号は `exp(-i·dt·H_drv) = Π_i exp(+i·a·h_x_i·dt·X_i)` で打ち消されて
+`R_i` の `θ = +a·h_x_i·dt` に乗る (`apply_h_kryanneal` の
+`coeff = -a_t·h_x_i` と同 convention)。
 
 per-step コスト: `(N + 1) · dim` 要素アクセス (matvec の 1 pass 相当が
 N+1 回)。CFM4:2 の `2m·dim` (m=24 で ~48·dim) と比較すると N=20 で
