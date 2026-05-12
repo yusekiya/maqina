@@ -391,21 +391,25 @@ class QuantumAnnealer:
         self,
         problem: IsingProblem,
         schedule: Schedule,
-        psi0: np.ndarray,            # ユーザー必須
+        *,
+        m: int = 24,                   # Lanczos 部分空間次元 (旧 krylov_dim)
+        krylov_tol: float = 1e-12,
     ): ...
 
     def run(
         self,
-        method: Literal["m2", "cfm4", "cfm4_adaptive_richardson"] = "cfm4",
+        psi0: np.ndarray,              # ユーザー必須 (run 側で渡す)
+        t0: float,
+        t1: float,
+        *,
+        method: Literal["m2", "cfm4", "cfm4_adaptive_richardson"] = "m2",
         n_steps: int | None = None,    # 固定ステップ時 (m2 / cfm4)
-        krylov_dim: int = 24,
-        krylov_tol: float = 1e-12,
         atol: float | None = None,     # adaptive 時の local error 許容値
         rtol: float | None = None,
         dt_init: float | None = None,  # adaptive 時の初期 dt 提案
-        store_states: bool = False,    # True なら全 step の ψ を保持
-        store_times: list[float] | None = None,  # 指定時刻のスナップショット
-        observables: dict[str, "Observable"] | None = None,  # 期待値を時系列で記録
+        store_states: bool = False,    # True なら全 step の ψ を保持 (Phase 5)
+        save_tlist: np.ndarray | None = None,  # 指定時刻スナップショット (Phase 5)
+        observables: dict[str, "Observable"] | None = None,  # 期待値時系列 (Phase 5)
     ) -> QuantumResult: ...
 
     def create_simulator(
@@ -413,6 +417,14 @@ class QuantumAnnealer:
         **method_kwargs
     ) -> "AnnealingSimulator": ...
 ```
+
+`psi0` は `__init__` ではなく `run` の必須位置引数として受け取る. 同じ問題
++ schedule に対して **異なる初期状態 / 異なる積分区間** で `run` を繰り返し
+呼べるようにするため (`QuantumAnnealer` 自身は問題定義のキャッシュ役).
+
+Phase 1 では `method="m2"` のみサポート (それ以外は `NotImplementedError`).
+`save_tlist` / `observables` / adaptive 関連引数も同様に Phase 5 以降で
+有効化する.
 
 返り値 `QuantumResult`:
 

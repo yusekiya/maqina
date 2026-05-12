@@ -5,18 +5,332 @@
 ディスパッチし, 利用不可なら Python リファレンスで silent fallback する
 契約 (詳細は ``docs/design.md`` §3, §5).
 
-提供予定:
-
+Phase 1 実装範囲
+----------------
 * ``evolve_schedule_m2``: 固定 dt の M2 中点則ドライバ.
-* ``evolve_schedule_cfm4``: 固定 dt の CFM4:2 ドライバ.
-* ``evolve_schedule_adaptive_m2``: M2 embedded error 推定子による
-  step-doubling Richardson + PI 制御.
-* ``evolve_schedule_adaptive_richardson``: CFM4:2 step-doubling Richardson.
+* ``_python_lanczos_propagate``: 純 NumPy の Lanczos 短時間プロパゲータ
+  リファレンス.
+* ``_python_m2_step``: 純 NumPy の M2 中点則 1 step リファレンス.
 
-Phase 1 で ``evolve_schedule_m2`` + Python リファレンス実装. Phase 3 で
-CFM4:2, Phase 4 で adaptive driver を追加.
+Phase 3 で CFM4:2, Phase 4 で adaptive driver
+(``evolve_schedule_adaptive_m2`` / ``evolve_schedule_adaptive_richardson``)
+を追加する.
+
+Rust 拡張へのアクセスは ``kryanneal._rust`` を **遅延 import** で行う:
+``_rust`` のロード失敗 (拡張未ビルド環境) を ``ImportError`` で捕捉して
+``_rust`` モジュール参照を ``None`` にし, fast path を選ぶ関数側で
+``None`` を見て Python リファレンスにフォールバックする.
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+import importlib
+from types import ModuleType
+from typing import Callable
+
+import numpy as np
+
+from kryanneal.schedule import Schedule
+
+
+def _try_import_rust() -> ModuleType | None:
+    """``kryanneal._rust`` を動的 import で取り込む.
+
+    ``importlib`` 経由にすることで, maturin develop 前の状態
+    (``_rust.so`` 未生成) を ``ImportError`` で捕捉して silent fallback
+    できる. ty / mypy 等の静的解析からは Rust 拡張モジュールが見えないため,
+    ``from kryanneal import _rust`` 形式だと未解決 import エラーになる.
+    動的 import なら静的解析の対象外になり, 実行時のみ可用性を判定する.
+    """
+    try:
+        return importlib.import_module("kryanneal._rust")
+    except ImportError:  # pragma: no cover - 拡張未ビルド環境向けフォールバック
+        return None
+
+
+_rust_mod: ModuleType | None = _try_import_rust()
+
+__all__ = [
+    "evolve_schedule_m2",
+]
+
+
+def _python_lanczos_propagate(
+    matvec: Callable[[np.ndarray], np.ndarray],
+    psi: np.ndarray,
+    dt: float,
+    m: int,
+    tol: float,
+) -> np.ndarray:
+    """``exp(-i dt H) ψ`` の Lanczos + 三重対角固有分解による近似 (Python リファレンス).
+
+    Rust 側 ``lanczos_propagate`` と同一アルゴリズム (Park-Light 1986,
+    full re-orthogonalization 付き) を pure NumPy で実装する.
+    ``rel < 1e-13`` で一致するのが契約 (``tests/test_krylov.py``).
+
+    Parameters
+    ----------
+    matvec
+        ``v -> H · v`` の callable. 入力 / 出力は ``(dim,) complex128``.
+    psi
+        shape ``(dim,)`` complex128 の入力状態.
+    dt
+        時刻刻み幅 (real).
+    m
+        Krylov 部分空間次元 (典型値 24, ``m >= 1`` を要求).
+    tol
+        Lanczos の β 打切り閾値. ``β_k < tol`` で ``m_eff = k+1`` として
+        早期終了.
+
+    Returns
+    -------
+    np.ndarray
+        shape ``(dim,)`` complex128 の新状態 ``ψ_new``.
+
+    Raises
+    ------
+    ValueError
+        ``m < 1`` のとき.
+    """
+    if m < 1:
+        raise ValueError(f"m must be >= 1, got {m!r}")
+    dim = psi.shape[0]
+    if dim == 0:
+        return psi.copy()
+
+    psi_norm = float(np.linalg.norm(psi))
+    if psi_norm == 0.0:
+        return np.zeros_like(psi)
+
+    # V: shape (dim, m), 各列が Lanczos vector v_0..v_{m-1}.
+    v_mat = np.zeros((dim, m), dtype=np.complex128)
+    alpha = np.zeros(m, dtype=np.float64)
+    beta = np.zeros(m, dtype=np.float64)
+
+    v_mat[:, 0] = psi / psi_norm
+    m_eff = m
+
+    for k in range(m):
+        # w = H · v_k
+        w = matvec(v_mat[:, k]).astype(np.complex128, copy=False)
+
+        # α_k = Re ⟨v_k | w⟩ (Hermitian H なら虚部は 0)
+        alpha_k = float(np.real(np.vdot(v_mat[:, k], w)))
+        alpha[k] = alpha_k
+
+        # w -= α_k · v_k + β_{k-1} · v_{k-1}
+        w = w - alpha_k * v_mat[:, k]
+        if k >= 1:
+            w = w - beta[k - 1] * v_mat[:, k - 1]
+
+        # Full re-orthogonalization (2-pass Gram-Schmidt).
+        for _pass in range(2):
+            for j in range(k + 1):
+                proj = np.vdot(v_mat[:, j], w)
+                w = w - proj * v_mat[:, j]
+
+        beta_k = float(np.linalg.norm(w))
+        beta[k] = beta_k
+
+        if beta_k < tol:
+            m_eff = k + 1
+            break
+
+        if k + 1 < m:
+            v_mat[:, k + 1] = w / beta_k
+
+    # 三重対角 T (m_eff × m_eff) の固有分解
+    # scipy.linalg.eigh_tridiagonal が無くても numpy.linalg.eigh で十分
+    # (m_eff ≤ 24 程度なので dense でも数 μs).
+    if m_eff == 1:
+        lam = alpha[:1].copy()
+        q = np.array([[1.0]], dtype=np.float64)
+    else:
+        t_dense = np.zeros((m_eff, m_eff), dtype=np.float64)
+        for i in range(m_eff):
+            t_dense[i, i] = alpha[i]
+        for i in range(m_eff - 1):
+            t_dense[i, i + 1] = beta[i]
+            t_dense[i + 1, i] = beta[i]
+        lam, q = np.linalg.eigh(t_dense)
+
+    # c = ‖ψ‖ · Q · diag(exp(-i dt λ)) · Qᵀ · e_0
+    # numpy.linalg.eigh は q の列が固有ベクトル → Q[i, j] = j 番目固有ベクトル
+    # の i 成分. 三重対角規約 (q の行 j が λ_j に対応) と転置の関係:
+    # Q^T (numpy) ↔ Q (Rust). e_0 を Q (= q.T) に掛けると q[0, :] = q.T の
+    # 0 列目に相当する. ここでは numpy 慣習で q[i, j] = j 番目固有ベクトル
+    # の i 番目成分とし, e_0 にあたる成分は q[0, j].
+    phases = np.exp(-1j * dt * lam)
+    coeff = psi_norm * (q @ (phases * q[0, :]))
+    psi_new = v_mat[:, :m_eff] @ coeff
+    return psi_new
+
+
+def _python_m2_step(
+    psi: np.ndarray,
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    a_mid: float,
+    b_mid: float,
+    dt: float,
+    m: int,
+    krylov_tol: float,
+) -> np.ndarray:
+    """M2 中点則 1 step の Python リファレンス実装.
+
+    ``psi_new = exp(-i dt · H(a_mid, b_mid)) · psi`` を
+    ``_python_lanczos_propagate`` 経由で計算する. ``a_mid`` / ``b_mid`` は
+    呼出側で ``schedule.coeffs_at(t + dt/2)`` を評価して渡す前提.
+
+    Parameters
+    ----------
+    psi
+        shape ``(2**n,)`` complex128 の入力状態.
+    h_x
+        shape ``(n,)`` float64 のサイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64 の Z 基底 problem 対角.
+    a_mid, b_mid
+        中点でフリーズ済の ``A(s(t+dt/2))``, ``B(s(t+dt/2))``.
+    dt
+        時刻刻み幅.
+    m
+        Krylov 部分空間次元.
+    krylov_tol
+        Lanczos の β 打切り閾値.
+
+    Returns
+    -------
+    np.ndarray
+        shape ``(2**n,)`` complex128 の新状態.
+    """
+    matvec = _make_python_matvec(h_x, h_p_diag, a_mid, b_mid)
+    return _python_lanczos_propagate(matvec, psi, dt, m, krylov_tol)
+
+
+def _make_python_matvec(
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    a_t: float,
+    b_t: float,
+) -> Callable[[np.ndarray], np.ndarray]:
+    """``v -> H(a_t, b_t) · v`` の純 NumPy matvec closure を作る.
+
+    ``H(a_t, b_t) = a_t · H_driver + b_t · diag(h_p_diag)`` (``H_driver =
+    -Σ_i h_x_i X_i``). bit-flip 部分は ``i`` 軸ごとに ``np.bitwise_xor`` で
+    インデックス並び替えを行うのが最も簡素. dim が大きい場合は cache
+    不利だが Phase 1 の参照実装としては許容範囲.
+    """
+    n = int(h_x.shape[0])
+    dim = 1 << n
+    if h_p_diag.shape != (dim,):
+        raise ValueError(
+            f"h_p_diag shape mismatch: expected ({dim},), got {h_p_diag.shape}"
+        )
+
+    diag = (b_t * h_p_diag).astype(np.float64, copy=False)
+    coeffs = (-a_t * h_x).astype(np.float64, copy=False)
+    masks = np.array([1 << i for i in range(n)], dtype=np.int64)
+    idx = np.arange(dim, dtype=np.int64)
+
+    def matvec(v: np.ndarray) -> np.ndarray:
+        y = diag * v
+        for i in range(n):
+            if coeffs[i] == 0.0:
+                continue
+            y = y + coeffs[i] * v[idx ^ int(masks[i])]
+        return y
+
+    return matvec
+
+
+def evolve_schedule_m2(
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    schedule: Schedule,
+    psi0: np.ndarray,
+    t0: float,
+    t1: float,
+    n_steps: int,
+    *,
+    m: int = 24,
+    krylov_tol: float = 1e-12,
+) -> tuple[np.ndarray, int]:
+    """固定 dt = (t1 - t0) / n_steps の M2 中点則ドライバ.
+
+    各 step で ``schedule.coeffs_at(t + dt/2)`` を評価して
+    ``m2_midpoint_step`` を呼ぶ. Rust 拡張が import 済なら
+    ``_rust.m2_midpoint_step_py`` を, そうでなければ Python リファレンス
+    ``_python_m2_step`` を使う (silent fallback).
+
+    Parameters
+    ----------
+    h_x
+        shape ``(n,)`` float64. サイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64. Z 基底 problem 対角.
+    schedule
+        ``Schedule`` インスタンス. ``coeffs_at(t)`` から
+        ``(A(s(t)), B(s(t)))`` を取り出す.
+    psi0
+        shape ``(2**n,)`` complex128. 初期状態 (L2-normalize 済みであること).
+    t0, t1
+        積分区間 ``[t0, t1]``. ``t1 > t0`` を要求.
+    n_steps
+        固定 step 数 (``n_steps >= 1``).
+    m
+        Krylov 部分空間次元.
+    krylov_tol
+        Lanczos の β 打切り閾値.
+
+    Returns
+    -------
+    psi_final : np.ndarray
+        shape ``(2**n,)`` complex128 の終端状態.
+    n_matvec : int
+        累積 matvec 呼出回数 (Lanczos の ``m`` 回 × ``n_steps`` の見積もり).
+
+    Raises
+    ------
+    ValueError
+        ``n_steps < 1`` または ``t1 <= t0`` のとき.
+    """
+    if n_steps < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps!r}")
+    if not (t1 > t0):
+        raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
+
+    dt = (float(t1) - float(t0)) / int(n_steps)
+    psi = np.ascontiguousarray(psi0, dtype=np.complex128)
+    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
+    h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
+
+    rust_mod = _rust_mod
+    for k in range(n_steps):
+        t_mid = t0 + (k + 0.5) * dt
+        a_mid, b_mid = schedule.coeffs_at(t_mid)
+        if rust_mod is not None:
+            psi = rust_mod.m2_midpoint_step_py(
+                psi,
+                h_x_arr,
+                h_p_diag_arr,
+                a_mid,
+                b_mid,
+                dt,
+                m,
+                krylov_tol,
+            )
+        else:
+            psi = _python_m2_step(
+                psi,
+                h_x_arr,
+                h_p_diag_arr,
+                a_mid,
+                b_mid,
+                dt,
+                m,
+                krylov_tol,
+            )
+
+    n_matvec = int(n_steps) * int(m)
+    return psi, n_matvec

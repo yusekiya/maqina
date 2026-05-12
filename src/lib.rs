@@ -53,6 +53,7 @@ const HAS_BLAS: bool = cfg!(feature = "blas");
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__has_blas__", HAS_BLAS)?;
     m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_py, m)?)?;
+    m.add_function(wrap_pyfunction!(krylov::lanczos_propagate_py, m)?)?;
     m.add_function(wrap_pyfunction!(cfm4::m2_midpoint_step_py, m)?)?;
     // TODO(phase2): Trotter
     // m.add_function(wrap_pyfunction!(matvec::apply_single_mode_axis_i_py, m)?)?;

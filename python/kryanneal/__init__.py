@@ -31,32 +31,70 @@ Usage
 ... )
 >>> sched = Schedule.linear(T=30.0)
 >>> psi0 = uniform_superposition(n)
->>> ann = QuantumAnnealer(prob, sched, psi0)
->>> res = ann.run(method="cfm4_adaptive_richardson")
->>> print(res.probabilities[:8])   # 最終状態 |ψ(T)|^2 の冒頭 8 成分
+>>> ann = QuantumAnnealer(prob, sched)
+>>> res = ann.run(psi0, 0.0, sched.T, method="m2", n_steps=300)
+>>> print(np.abs(res.psi_final[:8]) ** 2)   # 最終状態 |ψ(T)|^2 の冒頭 8 成分
 
 設計詳細は ``docs/design.md`` 参照. 各公開モジュールに対応する ``.pyi``
 スタブ (``python/kryanneal/*.pyi``) を一次 API リファレンスとして読むことを
 推奨する.
 """
 
+import warnings
+
+from kryanneal.annealer import QuantumAnnealer
 from kryanneal.problem import IsingProblem
 from kryanneal.result import QuantumResult, Trajectory
 from kryanneal.schedule import Schedule
 
-# QuantumAnnealer / AnnealingSimulator は C7 (Phase 1) / Phase 5 で実装予定.
-# from kryanneal.annealer import QuantumAnnealer, AnnealingSimulator
+# AnnealingSimulator は Phase 5 で実装予定.
 
 __all__ = [
     "IsingProblem",
+    "QuantumAnnealer",
     "QuantumResult",
     "Schedule",
     "Trajectory",
-    # "QuantumAnnealer",
-    # "AnnealingSimulator",
     "set_blas_threads",
     "available_blas_threads",
 ]
+
+
+def _warn_if_no_blas() -> None:
+    """Rust 拡張が ``blas`` feature 無効でビルドされていれば 1 度だけ警告する.
+
+    ``_rust.__has_blas__`` を import 時に読み, ``False`` (scalar fallback)
+    の場合に ``RuntimeWarning`` を発する. scalar fallback ビルドのまま
+    長時間ベンチを回す事故を防ぐためのアラート (``docs/design.md`` §7.5).
+    Rust 拡張自体が import できない環境では何もせず, 上位 (krylov 層) の
+    Python リファレンス fallback に任せる.
+
+    動的 import (``importlib.import_module``) を使う理由: Rust 拡張は
+    maturin develop 後にしか存在しないモジュールで, ``from kryanneal
+    import _rust`` を静的に書くと ty 等の型チェッカが解決失敗で fail
+    する. ``importlib`` 経由なら静的解析から見えず, 実行時のみ可用性を
+    判定する形にできる.
+    """
+    import importlib
+
+    try:
+        rust_mod = importlib.import_module("kryanneal._rust")
+    except ImportError:
+        return
+    has_blas = bool(getattr(rust_mod, "__has_blas__", False))
+    if not has_blas:
+        warnings.warn(
+            "kryanneal._rust was built without the 'blas' feature. "
+            "Lanczos / matvec primitives will use the Rust scalar fallback "
+            "path which is significantly slower than the CBLAS path. "
+            "Rebuild with `uv run maturin develop --uv --release` (default "
+            "features include 'blas') to enable BLAS.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+
+_warn_if_no_blas()
 
 
 def set_blas_threads(n: int) -> None:
