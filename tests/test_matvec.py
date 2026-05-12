@@ -13,6 +13,7 @@ Rust 側 ``#[cfg(test)] mod tests`` で nalgebra dense 構築との rel < 1e-13
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 
 def test_apply_h_kryanneal_py_matches_dense_reference() -> None:
@@ -20,8 +21,9 @@ def test_apply_h_kryanneal_py_matches_dense_reference() -> None:
 
     n=3 (dim=8) で固定 seed の擬似乱数を使い, 結果が **relative error
     1e-13 未満** で dense reference と一致することを確認する.
+    Rust 拡張未ビルドの環境では skip (fallback 経路は別テストで網羅).
     """
-    from kryanneal import _rust
+    _rust = pytest.importorskip("kryanneal._rust")
 
     n = 3
     dim = 1 << n

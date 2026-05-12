@@ -111,9 +111,7 @@ def test_rust_lanczos_matches_python_reference(n: int, seed: int) -> None:
 
     matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
     psi_py = _python_lanczos_propagate(matvec, psi, dt, m, tol)
-    psi_rust = _rust_mod.lanczos_propagate_py(
-        psi, h_x, h_p_diag, a_t, b_t, dt, m, tol
-    )
+    psi_rust = _rust_mod.lanczos_propagate_py(psi, h_x, h_p_diag, a_t, b_t, dt, m, tol)
 
     rel = np.linalg.norm(psi_py - psi_rust) / max(np.linalg.norm(psi_rust), 1.0)
     assert rel < 1e-13, f"n={n}, seed={seed}: rel = {rel}"

@@ -16,6 +16,8 @@ BLAS feature on/off の **両ブランチ網羅** はテスト 1 回では行わ
 
 from __future__ import annotations
 
+import pytest
+
 
 def test_import_kryanneal() -> None:
     """``import kryanneal`` がエラー無く成功し, 公開シンボルが見える."""
@@ -30,8 +32,13 @@ def test_import_kryanneal() -> None:
 
 
 def test_rust_extension_loads() -> None:
-    """Rust 拡張モジュール ``kryanneal._rust`` がロード可能."""
-    from kryanneal import _rust
+    """Rust 拡張モジュール ``kryanneal._rust`` がロード可能.
+
+    拡張未ビルド環境 (``maturin develop`` 未実施 / fallback-only build) では
+    skip する. fallback 経路自体は他テスト (``test_krylov.py`` の
+    Python リファレンス系) で網羅されている.
+    """
+    _rust = pytest.importorskip("kryanneal._rust")
 
     # PyO3 拡張は通常の ModuleType ではなく builtin types を返すため,
     # 厳密な型チェックではなく属性アクセス可否で判定する.
@@ -44,8 +51,9 @@ def test_has_blas_flag_is_bool() -> None:
     True/False のいずれかは build 時の feature 選択に依存する. 本テストは
     値の真偽ではなく **bool 型で属性として露出していること** のみを主張
     する (BLAS on/off の網羅は CI で 2 回 build / 2 回テストして担保).
+    拡張未ビルド環境では skip.
     """
-    from kryanneal import _rust
+    _rust = pytest.importorskip("kryanneal._rust")
 
     assert hasattr(_rust, "__has_blas__")
     assert isinstance(_rust.__has_blas__, bool)
