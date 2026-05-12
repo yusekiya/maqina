@@ -1,4 +1,4 @@
-# kryanneal: 設計書 (v0.3)
+# kryanneal: 設計書 (v0.4)
 
 横磁場イジングモデル (TFIM) の量子ダイナミクスを matrix-free に計算する
 Python パッケージ。Krylov 法 (Lanczos) で matvec を介した短時間プロパゲータ
@@ -425,13 +425,16 @@ class QuantumAnnealer:
 Phase 1 では `method="m2"` のみサポート, Phase 2 で `method="trotter"`
 (固定 dt Strang 2 次 Trotter, §5.3) と `method="trotter_suzuki4"` (固定
 dt Suzuki S_4 4 次 Trotter, §5.3) を追加, Phase 3 で `method="cfm4"`
-(固定 dt CFM4:2 commutator-free Magnus, §5.3) を追加. それ以外は
-`NotImplementedError`. `save_tlist` / `observables` / adaptive 関連引数も
-同様に Phase 5 以降で有効化する.
+(固定 dt CFM4:2 commutator-free Magnus, §5.3) を追加, Phase 4 で
+`method="cfm4_adaptive_richardson"` (step-doubling Richardson 推定子 +
+PI controller, §5.3) を追加. それ以外は `NotImplementedError`.
+`save_tlist` / `observables` 引数は Phase 5 以降で有効化する.
 
 `method="trotter"` / `method="trotter_suzuki4"` は Lanczos を使わないため,
-コンストラクタ引数 `m` / `krylov_tol` は無視される (`"m2"` / `"cfm4"`
-経路でのみ意味を持つ).
+コンストラクタ引数 `m` / `krylov_tol` は無視される (`"m2"` / `"cfm4"` /
+`"cfm4_adaptive_richardson"` 経路でのみ意味を持つ). adaptive 経路の
+`atol` / `dt_init` は `method="cfm4_adaptive_richardson"` でのみ参照され,
+固定 dt 経路では無視される.
 
 返り値 `QuantumResult`:
 
