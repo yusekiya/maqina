@@ -21,9 +21,7 @@ from kryanneal.initial_states import uniform_superposition
 qutip = pytest.importorskip("qutip")
 
 
-def _build_qutip_hamiltonian(
-    h_x: np.ndarray, h_p_diag: np.ndarray, T: float
-) -> list:
+def _build_qutip_hamiltonian(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) -> list:
     """QuTiP ``sesolve`` 用 ``H(t) = [[H_drv, A(t)], [H_p, B(t)]]`` を組む.
 
     linear schedule (``A(s) = 1 - s``, ``B(s) = s``, ``s = t/T``) を前提.
