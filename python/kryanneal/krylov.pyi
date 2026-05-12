@@ -8,17 +8,69 @@
 ディスパッチし, 利用不可なら Python リファレンスで silent fallback する
 契約 (詳細は ``docs/design.md`` §3, §5).
 
-提供予定:
-
+Phase 1 実装範囲
+----------------
 * ``evolve_schedule_m2``: 固定 dt の M2 中点則ドライバ.
-* ``evolve_schedule_cfm4``: 固定 dt の CFM4:2 ドライバ.
-* ``evolve_schedule_adaptive_m2``: M2 embedded error 推定子による
-  step-doubling Richardson + PI 制御.
-* ``evolve_schedule_adaptive_richardson``: CFM4:2 step-doubling Richardson.
+* ``_python_lanczos_propagate``: 純 NumPy の Lanczos 短時間プロパゲータ
+  リファレンス.
+* ``_python_m2_step``: 純 NumPy の M2 中点則 1 step リファレンス.
 
-Phase 1 で ``evolve_schedule_m2`` + Python リファレンス実装. Phase 3 で
-CFM4:2, Phase 4 で adaptive driver を追加.
+Phase 3 で CFM4:2, Phase 4 で adaptive driver
+(``evolve_schedule_adaptive_m2`` / ``evolve_schedule_adaptive_richardson``)
+を追加する.
+
+Rust 拡張へのアクセスは ``kryanneal._rust`` を **遅延 import** で行う:
+``_rust`` のロード失敗 (拡張未ビルド環境) を ``ImportError`` で捕捉して
+``_rust`` モジュール参照を ``None`` にし, fast path を選ぶ関数側で
+``None`` を見て Python リファレンスにフォールバックする.
 """
 from __future__ import annotations as annotations
+import importlib
+from types import ModuleType as ModuleType
+from typing import Callable as Callable
+import numpy as np
+from kryanneal.schedule import Schedule as Schedule
 from typing import Any
-__all__: list[str] = []
+__all__ = ['evolve_schedule_m2']
+
+def evolve_schedule_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, m: int=24, krylov_tol: float=1e-12) -> tuple[np.ndarray, int]:
+    """固定 dt = (t1 - t0) / n_steps の M2 中点則ドライバ.
+
+    各 step で ``schedule.coeffs_at(t + dt/2)`` を評価して
+    ``m2_midpoint_step`` を呼ぶ. Rust 拡張が import 済なら
+    ``_rust.m2_midpoint_step_py`` を, そうでなければ Python リファレンス
+    ``_python_m2_step`` を使う (silent fallback).
+
+    Parameters
+    ----------
+    h_x
+        shape ``(n,)`` float64. サイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64. Z 基底 problem 対角.
+    schedule
+        ``Schedule`` インスタンス. ``coeffs_at(t)`` から
+        ``(A(s(t)), B(s(t)))`` を取り出す.
+    psi0
+        shape ``(2**n,)`` complex128. 初期状態 (L2-normalize 済みであること).
+    t0, t1
+        積分区間 ``[t0, t1]``. ``t1 > t0`` を要求.
+    n_steps
+        固定 step 数 (``n_steps >= 1``).
+    m
+        Krylov 部分空間次元.
+    krylov_tol
+        Lanczos の β 打切り閾値.
+
+    Returns
+    -------
+    psi_final : np.ndarray
+        shape ``(2**n,)`` complex128 の終端状態.
+    n_matvec : int
+        累積 matvec 呼出回数 (Lanczos の ``m`` 回 × ``n_steps`` の見積もり).
+
+    Raises
+    ------
+    ValueError
+        ``n_steps < 1`` または ``t1 <= t0`` のとき.
+    """
+    ...

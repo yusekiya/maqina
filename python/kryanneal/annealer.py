@@ -1,17 +1,182 @@
 """高レベル公開 API (``QuantumAnnealer`` / ``AnnealingSimulator``).
 
-``QuantumAnnealer`` は ``IsingProblem`` + ``Schedule`` + 初期状態 ``psi0``
-を受け取り, ``run(method=...)`` で時間発展を実行して ``QuantumResult`` を
-返す one-shot 用途のファサード. ``AnnealingSimulator`` は同じ問題に対する
-複数 schedule / 複数初期状態のバッチ実行を意識した API.
+``QuantumAnnealer`` は ``IsingProblem`` + ``Schedule`` を受け取り,
+``run(psi0, t0, t1, *, method=..., n_steps=...)`` で時間発展を実行して
+``QuantumResult`` を返す one-shot 用途のファサード. 同じ問題・スケジュール
+に対して異なる初期状態 / 区間で繰り返し実行できるよう, ``psi0`` は
+コンストラクタではなく ``run`` 側で受け取る.
 
-実装は ``kryanneal.krylov`` の adaptive ドライバ群をディスパッチする
-薄いラッパに留める方針. method 文字列の許容値と既定値は
-``docs/design.md`` §4 / §5 を参照.
+``AnnealingSimulator`` は同じ問題に対する step-wise stateful API.
+Phase 1 では ``QuantumAnnealer`` のみ提供する (``AnnealingSimulator`` は
+Phase 5 で導入予定).
 
-Phase 1 で実装予定 (現状は API スケルトン).
+Phase 1 仕様
+------------
+* ``method="m2"`` (固定 dt M2 中点則) のみサポート. それ以外は
+  ``NotImplementedError``.
+* ``save_tlist`` 引数は **API 互換性のために予約済み** だが本リリースでは
+  ``None`` のみ受け付ける (非 ``None`` で ``NotImplementedError``).
+  Phase 5 の ``QuantumResult.times`` / ``states`` 拡張と一緒に有効化する.
+* 観測量経路 (``observables=...``) も Phase 5 で追加予定. 現状は
+  ``QuantumResult.observables_history = {}`` 固定.
+
+実装方針: ``kryanneal.krylov.evolve_schedule_m2`` (固定 dt M2 driver) を
+内部で呼ぶ薄いラッパ. 入力検証 (shape / dtype / L2-normalize) を本クラスで
+集中させ, krylov 層は数値計算に専念させる.
 """
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from typing import Literal
+
+import numpy as np
+
+from kryanneal.krylov import evolve_schedule_m2
+from kryanneal.problem import IsingProblem
+from kryanneal.result import QuantumResult
+from kryanneal.schedule import Schedule
+
+__all__ = ["QuantumAnnealer"]
+
+
+_PSI_NORM_TOL: float = 1e-10
+
+
+class QuantumAnnealer:
+    """One-shot 時間発展ファサード.
+
+    Parameters
+    ----------
+    problem
+        ``IsingProblem``. ``H_p_diag`` / ``h_x`` を保持する.
+    schedule
+        ``Schedule``. ``coeffs_at(t)`` から ``(A(s(t)), B(s(t)))`` を得る.
+    m
+        Lanczos / Krylov 部分空間次元の既定値 (``run`` 内で使用).
+        ``m >= 1``. 既定 ``24``.
+    krylov_tol
+        Lanczos の β 打切り閾値. ``β_k < tol`` で部分空間を切る.
+        既定 ``1e-12``.
+
+    Raises
+    ------
+    ValueError
+        ``m < 1`` または ``krylov_tol < 0`` の場合.
+    """
+
+    def __init__(
+        self,
+        problem: IsingProblem,
+        schedule: Schedule,
+        *,
+        m: int = 24,
+        krylov_tol: float = 1e-12,
+    ) -> None:
+        if not isinstance(m, (int, np.integer)) or m < 1:
+            raise ValueError(f"m must be a positive integer, got {m!r}")
+        if krylov_tol < 0.0:
+            raise ValueError(f"krylov_tol must be >= 0, got {krylov_tol!r}")
+
+        self.problem: IsingProblem = problem
+        self.schedule: Schedule = schedule
+        self.m: int = int(m)
+        self.krylov_tol: float = float(krylov_tol)
+
+    def run(
+        self,
+        psi0: np.ndarray,
+        t0: float,
+        t1: float,
+        *,
+        method: Literal["m2"] = "m2",
+        n_steps: int,
+        save_tlist: np.ndarray | None = None,
+    ) -> QuantumResult:
+        """``[t0, t1]`` 区間で時間発展を実行し ``QuantumResult`` を返す.
+
+        Parameters
+        ----------
+        psi0
+            shape ``(2**n,)`` complex128 の初期状態. L2-normalize 済み
+            (``|‖psi0‖ - 1| < 1e-10``) であることを検証する.
+        t0, t1
+            積分区間. ``t1 > t0``.
+        method
+            プロパゲータ. Phase 1 では ``"m2"`` のみ.
+        n_steps
+            固定 step 数 (``n_steps >= 1``). 等間隔 ``dt = (t1 - t0) /
+            n_steps`` で進める.
+        save_tlist
+            観測時刻列 (Phase 5 で実装予定). 現状は ``None`` 以外を
+            渡すと ``NotImplementedError``.
+
+        Returns
+        -------
+        QuantumResult
+            ``psi_final`` / ``n_steps`` / ``n_matvec`` を持つ result.
+            Phase 1 では ``t_history = None``, ``observables_history = {}``.
+
+        Raises
+        ------
+        ValueError
+            入力検証失敗 (``psi0`` の shape / dtype / 非正規化, ``n_steps <
+            1``, ``t1 <= t0``).
+        NotImplementedError
+            ``method`` が ``"m2"`` 以外, または ``save_tlist`` が ``None``
+            でない場合.
+        """
+        if method != "m2":
+            raise NotImplementedError(
+                f"method={method!r} is not supported in Phase 1; only 'm2' is available."
+            )
+        if save_tlist is not None:
+            raise NotImplementedError(
+                "save_tlist is reserved for Phase 5; pass None in Phase 1."
+            )
+
+        psi0_arr = self._validate_psi0(psi0)
+        psi_final, n_matvec = evolve_schedule_m2(
+            h_x=self.problem.h_x,
+            h_p_diag=self.problem.H_p_diag,
+            schedule=self.schedule,
+            psi0=psi0_arr,
+            t0=t0,
+            t1=t1,
+            n_steps=n_steps,
+            m=self.m,
+            krylov_tol=self.krylov_tol,
+        )
+        return QuantumResult(
+            psi_final=psi_final,
+            t_history=None,
+            observables_history={},
+            n_steps=int(n_steps),
+            n_matvec=int(n_matvec),
+        )
+
+    def _validate_psi0(self, psi0: np.ndarray) -> np.ndarray:
+        """``psi0`` の shape / dtype / L2-norm を検証して C-contiguous で返す.
+
+        ``dim = 2**problem.n`` と整合し, complex128 / C-contiguous で,
+        L2 ノルムが 1 から ``_PSI_NORM_TOL`` 以内であることを要求する.
+        非 complex128 は明示的にエラーにする (silent cast はしない).
+        """
+        if not isinstance(psi0, np.ndarray):
+            raise ValueError(f"psi0 must be a numpy.ndarray, got {type(psi0).__name__}")
+        expected_dim = self.problem.dim
+        if psi0.shape != (expected_dim,):
+            raise ValueError(
+                f"psi0 shape mismatch: expected ({expected_dim},), got {psi0.shape}"
+            )
+        if psi0.dtype != np.complex128:
+            raise ValueError(f"psi0 dtype must be complex128, got {psi0.dtype}")
+        if not psi0.flags.c_contiguous:
+            psi0 = np.ascontiguousarray(psi0)
+        if not np.all(np.isfinite(psi0.view(np.float64))):
+            raise ValueError("psi0 contains NaN or inf")
+        norm = float(np.linalg.norm(psi0))
+        if abs(norm - 1.0) > _PSI_NORM_TOL:
+            raise ValueError(
+                f"psi0 must be L2-normalized (‖psi0‖ ≈ 1), got ‖psi0‖ = {norm!r}"
+            )
+        return psi0

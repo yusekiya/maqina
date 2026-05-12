@@ -34,19 +34,21 @@ Usage
 ... )
 >>> sched = Schedule.linear(T=30.0)
 >>> psi0 = uniform_superposition(n)
->>> ann = QuantumAnnealer(prob, sched, psi0)
->>> res = ann.run(method="cfm4_adaptive_richardson")
->>> print(res.probabilities[:8])   # 最終状態 |ψ(T)|^2 の冒頭 8 成分
+>>> ann = QuantumAnnealer(prob, sched)
+>>> res = ann.run(psi0, 0.0, sched.T, method="m2", n_steps=300)
+>>> print(np.abs(res.psi_final[:8]) ** 2)   # 最終状態 |ψ(T)|^2 の冒頭 8 成分
 
 設計詳細は ``docs/design.md`` 参照. 各公開モジュールに対応する ``.pyi``
 スタブ (``python/kryanneal/*.pyi``) を一次 API リファレンスとして読むことを
 推奨する.
 """
+import warnings
+from kryanneal.annealer import QuantumAnnealer as QuantumAnnealer
 from kryanneal.problem import IsingProblem as IsingProblem
 from kryanneal.result import QuantumResult as QuantumResult, Trajectory as Trajectory
 from kryanneal.schedule import Schedule as Schedule
 from typing import Any
-__all__ = ['IsingProblem', 'QuantumResult', 'Schedule', 'Trajectory', 'set_blas_threads', 'available_blas_threads']
+__all__ = ['IsingProblem', 'QuantumAnnealer', 'QuantumResult', 'Schedule', 'Trajectory', 'set_blas_threads', 'available_blas_threads']
 
 def set_blas_threads(n: int) -> None:
     """ロード済みの全 OpenBLAS pool のスレッド上限を ``n`` に統一する.

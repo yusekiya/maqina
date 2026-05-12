@@ -29,10 +29,12 @@
 #![allow(dead_code)]
 
 use num_complex::Complex64;
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::PyResult;
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
 
 use crate::blas::{axpy, dot_conj, gemv_col_major, nrm2, scal_real};
+use crate::matvec::apply_h_kryanneal;
 use crate::tridiag::tridiag_eigh;
 
 /// `psi_new = exp(-i dt H) ψ` を m 次元 Lanczos + 三重対角固有分解で近似.
@@ -200,10 +202,78 @@ where
     Ok(psi_new)
 }
 
+/// `lanczos_propagate` の **テスト用 Python wrap**.
+///
+/// 内部 `lanczos_propagate` (closure 受け取り) は Python から直接呼べないため,
+/// `apply_h_kryanneal` を closure として固定した形で
+/// `psi_new = exp(-i dt · H(a_t, b_t)) · ψ` を計算する関数を露出する.
+/// `H(a_t, b_t) = a_t · H_driver + b_t · H_problem` で時間に独立な
+/// (フリーズ済の) Hamiltonian を仮定する点が `m2_midpoint_step_py` と異なる
+/// (本関数は中点採取をしない: ユーザ側で a, b を midpoint で評価して渡す
+/// 経路は `m2_midpoint_step_py` 側で提供).
+///
+/// 主用途は Python リファレンス実装 `_python_lanczos_propagate` との
+/// `rel < 1e-13` 等価性テスト (`tests/test_krylov.py`). `m2_midpoint_step_py`
+/// と本関数は **本体は同一** だが, 「lanczos = 中点採取しない時間独立
+/// プロパゲータ」「m2_midpoint = 中点で a, b を凍結する時間依存
+/// プロパゲータ」の **意味論を別 entry point で示す** ことで, Python
+/// テストが何を比較しているかを呼出名から読めるようにしている.
+///
+/// # Python 側シグネチャ
+/// ```python
+/// psi_new = _rust.lanczos_propagate_py(
+///     psi, h_x, h_p_diag, a_t, b_t, dt, m, krylov_tol,
+/// )
+/// ```
+#[pyfunction]
+#[pyo3(signature = (psi, h_x, h_p_diag, a_t, b_t, dt, m, krylov_tol))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lanczos_propagate_py<'py>(
+    py: Python<'py>,
+    psi: PyReadonlyArray1<'py, Complex64>,
+    h_x: PyReadonlyArray1<'py, f64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    a_t: f64,
+    b_t: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+) -> PyResult<Bound<'py, PyArray1<Complex64>>> {
+    let psi_slice = psi.as_slice()?;
+    let h_x_slice = h_x.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+
+    let n = h_x_slice.len();
+    let dim = 1usize << n;
+    if h_p_diag_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "h_p_diag length {} does not match 2^len(h_x) = 2^{} = {}",
+            h_p_diag_slice.len(),
+            n,
+            dim,
+        )));
+    }
+    if psi_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "psi length {} does not match 2^len(h_x) = {}",
+            psi_slice.len(),
+            dim,
+        )));
+    }
+    if m == 0 {
+        return Err(PyValueError::new_err("m must be >= 1"));
+    }
+
+    let matvec = |v: &[Complex64], y: &mut [Complex64]| {
+        apply_h_kryanneal(v, y, h_x_slice, h_p_diag_slice, a_t, b_t, n);
+    };
+    let psi_new = lanczos_propagate(matvec, psi_slice, dt, m, krylov_tol)?;
+    Ok(psi_new.into_pyarray(py))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::matvec::apply_h_kryanneal;
     use nalgebra::{DMatrix, SymmetricEigen};
 
     /// 軽量決定論的 PRNG (xorshift64). matvec / tridiag のテストと同実装.
