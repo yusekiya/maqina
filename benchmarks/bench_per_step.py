@@ -1,25 +1,43 @@
-"""M2 (Phase 1) per-step wall time benchmark.
+"""per-step wall time benchmark (M2 / Trotter / Suzuki S_4).
 
-``QuantumAnnealer.run(method="m2")`` の M2 中点則 1 step あたりの実時間を
-``n`` (スピン数 / Hilbert 空間次元 ``2^n``) を sweep して計測する. Phase 1
-の DoD (issue #1) で「``bench_per_step.py`` で M2 ベースライン数値が 1 回
-記録され ``benchmarks/results/`` 配下に置かれている」を満たすための
-ベンチエントリポイント.
+``QuantumAnnealer.run`` の 1 step あたりの実時間を, ``method`` ×
+``n`` (スピン数 / Hilbert 空間次元 ``2^n``) で sweep して計測する.
+Phase 1 の DoD (issue #1) と Phase 2 の DoD (issue #18) で
+「``bench_per_step.py`` で M2 / Trotter / Suzuki S_4 の per-step 数値が
+記録され ``benchmarks/results/`` 配下に置かれている (クロスオーバ実測)」
+を満たすためのベンチエントリポイント.
 
 設計規約は ``docs/design.md`` §10, 実行手順は ``benchmarks/README.md``,
 全体規約は ``CLAUDE.md`` 「ベンチマーク」節を参照する.
 
+サポート ``method`` (Phase 2 末時点):
+
+* ``"m2"``: M2 中点則 + Lanczos (Phase 1).
+* ``"trotter"``: Strang 2 次 Trotter (Phase 2 C3).
+* ``"trotter_suzuki4"``: Suzuki S_4 4 次 Trotter (Phase 2 C4).
+
+``method`` ごとに per-step コストの内訳が異なる:
+
+* M2: per-step ``m·dim`` flops (Lanczos m matvec).
+* Trotter: per-step ``(N+1)·dim`` flops (phase 1 + bit-flip N).
+* Suzuki S_4: per-step ``5·(N+1)·dim`` flops (Strang 5 回).
+
+LTE order も異なる (M2 / Strang は ``O(dt^3)``, Suzuki S_4 は ``O(dt^5)``)
+ので, 同じ ``n_steps`` での生 wall time 比較に加えて, 同じ精度を要求した
+ときの required ``n_steps`` のずれを別途見積もる必要がある.
+
 出力:
 
 * ``benchmarks/results/<YYYYMMDD-HHMMSS>/bench_per_step.csv``: per-trial
-  生データ (n, trial, dt, total_step_count, total_wall_sec, per_step_sec,
-  states_per_sec).
-* ``benchmarks/results/<YYYYMMDD-HHMMSS>/bench_per_step.md``: 集計表 +
-  machine info.
+  生データ (n, dim, method, trial, n_steps, dt, m, total_wall_sec,
+  per_step_sec, states_per_sec).
+* ``benchmarks/results/<YYYYMMDD-HHMMSS>/bench_per_step.md``: 集計表
+  (per-method summary + cross-method 比較表) + machine info.
 
 CLI 例::
 
     uv run python benchmarks/bench_per_step.py --n-values 4,8,12 --n-steps 50
+    uv run python benchmarks/bench_per_step.py --methods m2,trotter
 
 ベンチは原則 ``--release`` build (``maturin develop --uv --release``) で
 取る. debug build (``maturin develop --uv`` のみ) の値はベースラインに
@@ -51,6 +69,10 @@ from kryanneal.initial_states import uniform_superposition
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "benchmarks" / "results"
 
+# サポートする method 一覧. ``QuantumAnnealer.run`` の Literal 型ヒントと
+# 揃える. CFM4 / Richardson 系は Phase 3 / Phase 4 で追加予定.
+_VALID_METHODS: tuple[str, ...] = ("m2", "trotter", "trotter_suzuki4")
+
 
 def _parse_int_list(text: str) -> list[int]:
     """``"4,8,12"`` のような CSV 文字列を ``[4, 8, 12]`` にする."""
@@ -58,6 +80,19 @@ def _parse_int_list(text: str) -> list[int]:
     if not parts:
         raise argparse.ArgumentTypeError("expected at least one integer")
     return [int(p) for p in parts]
+
+
+def _parse_method_list(text: str) -> list[str]:
+    """``"m2,trotter"`` のような CSV 文字列を `_VALID_METHODS` で検証してリスト化."""
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError("expected at least one method")
+    for p in parts:
+        if p not in _VALID_METHODS:
+            raise argparse.ArgumentTypeError(
+                f"method must be one of {_VALID_METHODS!r}, got {p!r}"
+            )
+    return parts
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -80,16 +115,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="comma-separated sweep over spin counts (default: 4,8,12,16)",
     )
     parser.add_argument(
+        "--methods",
+        type=_parse_method_list,
+        default=list(_VALID_METHODS),
+        help=(
+            f"comma-separated propagator methods to benchmark "
+            f"(choices: {','.join(_VALID_METHODS)}; "
+            f"default: {','.join(_VALID_METHODS)})"
+        ),
+    )
+    parser.add_argument(
         "--n-steps",
         type=int,
         default=50,
-        help="number of M2 driver steps per measurement (default: 50)",
+        help="number of driver steps per measurement (default: 50)",
     )
     parser.add_argument(
         "--m",
         type=int,
         default=24,
-        help="Lanczos subspace dimension (default: 24)",
+        help=(
+            "Lanczos subspace dimension (default: 24). Only used by "
+            "method='m2'; Trotter methods do not invoke Lanczos."
+        ),
     )
     parser.add_argument(
         "--repeat",
@@ -141,25 +189,30 @@ def make_random_problem(n: int, seed: int) -> IsingProblem:
     return IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
 
 
-def time_m2_run(
+def time_method_run(
     problem: IsingProblem,
     schedule: Schedule,
     psi0: np.ndarray,
     t0: float,
     t1: float,
     n_steps: int,
+    method: str,
     m: int,
 ) -> float:
     """``QuantumAnnealer.run`` の wall time (秒) を ``time.perf_counter`` で計る.
 
     壁時計のジッタを最小化するため, 1 試行で run 1 回ぶん計測する.
     ``n_steps`` 内のループは Python 側に閉じているため step 単位の
-    overhead もそこそこ乗るが, Phase 1 はそのスナップショットを取るのが
-    目的.
+    overhead もそこそこ乗る. ``method`` ごとに :class:`QuantumAnnealer` の
+    コンストラクタ引数 (``m`` を渡すかどうか) が変わる: Trotter 系は
+    Lanczos を呼ばないため ``m`` は無視されるが, デフォルト値で渡しても
+    害は無いので統一的に渡す.
     """
+    if method not in _VALID_METHODS:
+        raise ValueError(f"unsupported method {method!r}; valid: {_VALID_METHODS!r}")
     ann = QuantumAnnealer(problem, schedule, m=m)
     t_start = time.perf_counter()
-    res = ann.run(psi0, t0, t1, method="m2", n_steps=n_steps)
+    res = ann.run(psi0, t0, t1, method=method, n_steps=n_steps)  # type: ignore[arg-type]
     t_end = time.perf_counter()
     # res を黒箱に積んでおいて dead code elimination されないようにする.
     # `n_matvec` を最後に touch するだけで JIT/AOT 関係無しに副作用化する.
@@ -220,7 +273,14 @@ def write_outputs(
     machine_info: dict[str, str],
     args: argparse.Namespace,
 ) -> None:
-    """CSV (生データ) と markdown (集計 + machine info) を ``out_dir`` に書く."""
+    """CSV (生データ) と markdown (集計 + machine info) を ``out_dir`` に書く.
+
+    markdown は **per-method summary** と **method ごとの median 比較表**
+    の 2 種類を出す. 比較表は M2 を基準にした ratio を併記し, 同じ
+    ``n_steps`` での raw per-step コスト比較を一目で見られるようにする
+    (LTE order の違いから「精度を揃えた場合の wall time 比較」は別途
+    必要; 詳細は冒頭 docstring の Notes 参照).
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
 
     csv_path = out_dir / "bench_per_step.csv"
@@ -231,7 +291,7 @@ def write_outputs(
 
     md_path = out_dir / "bench_per_step.md"
     lines: list[str] = []
-    lines.append("# bench_per_step results (M2, Phase 1 baseline)")
+    lines.append("# bench_per_step results (M2 / Trotter / Suzuki S_4)")
     lines.append("")
     lines.append("## Machine info")
     lines.append("")
@@ -243,22 +303,59 @@ def write_outputs(
     for key, val in vars(args).items():
         lines.append(f"- **{key}**: {val}")
     lines.append("")
-    lines.append("## Summary (per-n)")
+    lines.append("## Summary (per-n × method)")
     lines.append("")
     lines.append(
-        "| n | dim | per-step (sec) min | per-step (sec) median | "
+        "| n | dim | method | per-step (sec) min | per-step (sec) median | "
         "states/sec (median) | trials |"
     )
-    lines.append("|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|")
     for row in summary:
         lines.append(
-            f"| {row['n']} | {row['dim']} | "
+            f"| {row['n']} | {row['dim']} | {row['method']} | "
             f"{row['per_step_sec_min']:.6e} | "
             f"{row['per_step_sec_median']:.6e} | "
             f"{row['states_per_sec_median']:.3e} | "
             f"{row['trials']} |"
         )
     lines.append("")
+
+    # Cross-method 比較: 各 n で method ごとの median per-step を横並びに
+    # 配置し, M2 を基準とした ratio (m2/method) を併記する.
+    methods_in_summary = sorted({str(s["method"]) for s in summary})
+    if len(methods_in_summary) > 1:
+        lines.append("## Cross-method per-step median (sec)")
+        lines.append("")
+        header_cells = ["n", "dim", *methods_in_summary]
+        # M2 を基準とした ratio (m2 / x) 列を, m2 以外の method について並べる.
+        non_m2_methods = [m for m in methods_in_summary if m != "m2"]
+        has_m2 = "m2" in methods_in_summary
+        if has_m2:
+            header_cells.extend(f"m2 / {m}" for m in non_m2_methods)
+        lines.append("| " + " | ".join(header_cells) + " |")
+        lines.append("|" + "|".join(["---"] * len(header_cells)) + "|")
+
+        by_n_method: dict[int, dict[str, float]] = {}
+        for s in summary:
+            by_n_method.setdefault(int(s["n"]), {})[str(s["method"])] = float(
+                s["per_step_sec_median"]
+            )
+        for n in sorted(by_n_method.keys()):
+            dim = 1 << n
+            row_cells: list[str] = [str(n), str(dim)]
+            for method in methods_in_summary:
+                val = by_n_method[n].get(method)
+                row_cells.append(f"{val:.6e}" if val is not None else "n/a")
+            if has_m2:
+                m2_val = by_n_method[n].get("m2")
+                for method in non_m2_methods:
+                    other = by_n_method[n].get(method)
+                    if m2_val is not None and other is not None and other > 0:
+                        row_cells.append(f"{m2_val / other:.3f}")
+                    else:
+                        row_cells.append("n/a")
+            lines.append("| " + " | ".join(row_cells) + " |")
+        lines.append("")
 
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"wrote {csv_path.relative_to(REPO_ROOT)}")
@@ -284,48 +381,64 @@ def main(argv: list[str] | None = None) -> int:
         problem = make_random_problem(n, seed=args.seed)
         psi0 = uniform_superposition(n)
         dim = 1 << n
-        print(f"[n={n} dim={dim}] warmup={args.warmup}, repeat={args.repeat}")
+        print(
+            f"[n={n} dim={dim}] methods={args.methods}, "
+            f"warmup={args.warmup}, repeat={args.repeat}"
+        )
 
-        for _ in range(args.warmup):
-            time_m2_run(problem, schedule, psi0, 0.0, args.T, args.n_steps, args.m)
+        for method in args.methods:
+            print(f"  method={method}")
+            for _ in range(args.warmup):
+                time_method_run(
+                    problem, schedule, psi0, 0.0, args.T, args.n_steps, method, args.m
+                )
 
-        trial_times: list[float] = []
-        for trial in range(args.repeat):
-            wall = time_m2_run(
-                problem, schedule, psi0, 0.0, args.T, args.n_steps, args.m
-            )
-            trial_times.append(wall)
-            per_step = wall / args.n_steps
-            states_per_sec = dim / per_step if per_step > 0 else float("inf")
-            rows.append(
+            trial_times: list[float] = []
+            for trial in range(args.repeat):
+                wall = time_method_run(
+                    problem,
+                    schedule,
+                    psi0,
+                    0.0,
+                    args.T,
+                    args.n_steps,
+                    method,
+                    args.m,
+                )
+                trial_times.append(wall)
+                per_step = wall / args.n_steps
+                states_per_sec = dim / per_step if per_step > 0 else float("inf")
+                rows.append(
+                    {
+                        "n": n,
+                        "dim": dim,
+                        "method": method,
+                        "trial": trial,
+                        "n_steps": args.n_steps,
+                        "dt": args.T / args.n_steps,
+                        "m": args.m,
+                        "total_wall_sec": f"{wall:.9e}",
+                        "per_step_sec": f"{per_step:.9e}",
+                        "states_per_sec": f"{states_per_sec:.9e}",
+                    }
+                )
+                print(
+                    f"    trial {trial}: wall={wall:.4f}s, "
+                    f"per_step={per_step:.4e}s ({states_per_sec:.3e} states/sec)"
+                )
+
+            per_step_times = [t / args.n_steps for t in trial_times]
+            summary.append(
                 {
                     "n": n,
                     "dim": dim,
-                    "trial": trial,
-                    "n_steps": args.n_steps,
-                    "dt": args.T / args.n_steps,
-                    "m": args.m,
-                    "total_wall_sec": f"{wall:.9e}",
-                    "per_step_sec": f"{per_step:.9e}",
-                    "states_per_sec": f"{states_per_sec:.9e}",
+                    "method": method,
+                    "trials": len(per_step_times),
+                    "per_step_sec_min": min(per_step_times),
+                    "per_step_sec_median": statistics.median(per_step_times),
+                    "states_per_sec_median": dim / statistics.median(per_step_times),
                 }
             )
-            print(
-                f"  trial {trial}: wall={wall:.4f}s, "
-                f"per_step={per_step:.4e}s ({states_per_sec:.3e} states/sec)"
-            )
-
-        per_step_times = [t / args.n_steps for t in trial_times]
-        summary.append(
-            {
-                "n": n,
-                "dim": dim,
-                "trials": len(per_step_times),
-                "per_step_sec_min": min(per_step_times),
-                "per_step_sec_median": statistics.median(per_step_times),
-                "states_per_sec_median": dim / statistics.median(per_step_times),
-            }
-        )
 
     write_outputs(out_dir, rows, summary, machine_info, args)
     return 0
