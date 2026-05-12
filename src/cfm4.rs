@@ -492,6 +492,246 @@ pub(crate) fn cfm4_step_with_m2_estimate_py<'py>(
     Ok((psi_owned.into_pyarray(py), err))
 }
 
+/// CFM4:2 step を **同一入口 ψ** から full-step (dt) と half-step×2 (dt/2 + dt/2)
+/// の 2 つの軌道で走らせ,
+///
+/// ```text
+/// err = ‖ψ_full - ψ_h2‖_2 ≈ (1 - 1/16) · C_4 · dt^5
+/// ```
+///
+/// を **CFM4:2 自身の LTE 推定値** として返す step-doubling Richardson 推定子.
+/// CFM4:2 の LTE が `O(dt^5)`, half-step×2 の LTE は
+/// `2 · C_4 · (dt/2)^5 = C_4 · dt^5 / 16` なので両者の差は `(15/16) · C_4 · dt^5`
+/// で先頭次数の係数まで取り出せる. PI controller の `p = 4` 指数
+/// `dt_next = dt · safety · (tol/err)^{1/(p+1)}` で扱える 4 次の推定子になる
+/// (`docs/design.md` §5.3 PI controller 表).
+///
+/// per-step matvec は full CFM4:2 の 2m + half×2 CFM4:2 の 4m = **6m**
+/// (Lanczos 呼出 6 回, 固定 dt CFM4:2 比 3×). M2 embedded 比 2 オーダ高精度なので
+/// smooth schedule では許容 dt を 1〜2 桁伸ばせる.
+///
+/// `extrapolate = true` のとき Richardson 外挿
+///
+/// ```text
+/// ψ_acc = (16 · ψ_h2 - ψ_full) / 15
+/// ```
+///
+/// を採用して psi に書き戻す (先頭 dt^5 誤差が打ち消され実効 6 次精度).
+/// `extrapolate = false` のときは `ψ_h2` (より高精度な方) を psi に書き戻す.
+///
+/// 戻り値 `err` は `extrapolate` フラグに依らず常に `‖ψ_full - ψ_h2‖` を返す
+/// (推定子の意味を保つため; PI controller は accept 判定にこの値を使う).
+///
+/// # 引数
+/// * `psi` (length `2^n`): 入出力状態. 入口で読まれ, 出口で `ψ_acc`
+///   (`extrapolate=true`) または `ψ_h2` (`extrapolate=false`) に in-place 更新される.
+/// * `h_x` (length `n`), `h_p_diag` (length `2^n`): operator 部分.
+/// * `a_s1_full`, `b_s1_full`, `a_s2_full`, `b_s2_full`: full-step CFM4:2 (dt)
+///   の 2 stage 用スケジュール係数. ガウス-ルジャンドル 2 点ノード
+///   `(t + c_1·dt, t + c_2·dt)` で `(A, B)` を評価したもの.
+/// * `a_s1_h1`, `b_s1_h1`, `a_s2_h1`, `b_s2_h1`: 前半 half-step CFM4:2 (dt/2)
+///   の 2 stage 用, ノード `(t + c_1·dt/2, t + c_2·dt/2)`.
+/// * `a_s1_h2`, `b_s1_h2`, `a_s2_h2`, `b_s2_h2`: 後半 half-step CFM4:2 (dt/2)
+///   の 2 stage 用, ノード `(t + dt/2 + c_1·dt/2, t + dt/2 + c_2·dt/2)`.
+/// * `dt`, `m`, `krylov_tol`, `n`: 既存カーネル primitive と同義.
+/// * `extrapolate`: true で Richardson 外挿後の `ψ_acc` を, false で `ψ_h2` を
+///   psi に書き戻す.
+///
+/// # 戻り値
+/// * `Ok(err)`: `‖ψ_full - ψ_h2‖_2` (real, non-negative).
+/// * `Err`: 内部 `cfm4_step` (Lanczos) で tridiag 固有分解が収束しなかった場合
+///   (full / 前半 half / 後半 half いずれの段でも propagate).
+///
+/// # Panics
+/// `cfm4_step` の precondition と同じ (長さ不整合, `m == 0`).
+//
+// 数値カーネル primitive は cv_ising 流に引数フラットで持つ. スケジュール
+// 係数 3 セット × 4 = 12 引数 + 共通 7 引数で計 19 だが, 構造体化は adaptive
+// driver (Python 側) の API が固まるまで保留.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_with_richardson_estimate(
+    psi: &mut [Complex64],
+    h_x: &[f64],
+    h_p_diag: &[f64],
+    a_s1_full: f64,
+    b_s1_full: f64,
+    a_s2_full: f64,
+    b_s2_full: f64,
+    a_s1_h1: f64,
+    b_s1_h1: f64,
+    a_s2_h1: f64,
+    b_s2_h1: f64,
+    a_s1_h2: f64,
+    b_s1_h2: f64,
+    a_s2_h2: f64,
+    b_s2_h2: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+    n: usize,
+    extrapolate: bool,
+) -> PyResult<f64> {
+    // 1) full-step CFM4:2 (dt) を同じ入口 ψ から走らせる.
+    let psi_full = cfm4_step(
+        psi, h_x, h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, dt, m, krylov_tol, n,
+    )?;
+
+    // 2) 前半 half-step CFM4:2 (dt/2) を同じ入口 ψ から走らせる.
+    let psi_mid = cfm4_step(
+        psi,
+        h_x,
+        h_p_diag,
+        a_s1_h1,
+        b_s1_h1,
+        a_s2_h1,
+        b_s2_h1,
+        0.5 * dt,
+        m,
+        krylov_tol,
+        n,
+    )?;
+
+    // 3) 後半 half-step CFM4:2 (dt/2) を前半の出口状態から走らせる.
+    let psi_h2 = cfm4_step(
+        &psi_mid,
+        h_x,
+        h_p_diag,
+        a_s1_h2,
+        b_s1_h2,
+        a_s2_h2,
+        b_s2_h2,
+        0.5 * dt,
+        m,
+        krylov_tol,
+        n,
+    )?;
+
+    // 4) err = ‖ψ_full - ψ_h2‖_2. 差ベクトルを一度組んで `blas::nrm2` を通すと
+    //    BLAS feature on/off いずれの経路でも同一実装で算出できる
+    //    (`cfm4_step_with_m2_estimate` と同じパターン).
+    let diff: Vec<Complex64> = psi_full
+        .iter()
+        .zip(psi_h2.iter())
+        .map(|(a, b)| a - b)
+        .collect();
+    let err = nrm2(&diff);
+
+    // 5) extrapolate フラグに応じて psi に書き戻す.
+    if extrapolate {
+        // ψ_acc = (16 · ψ_h2 - ψ_full) / 15. Richardson 外挿で先頭 dt^5 誤差が
+        // 打ち消され実効 6 次精度.
+        let inv15 = 1.0 / 15.0;
+        for k in 0..psi.len() {
+            psi[k] = (psi_h2[k] * 16.0 - psi_full[k]) * inv15;
+        }
+    } else {
+        // よりオーダが高い ψ_h2 をそのまま採用 (LTE は `C_4 · dt^5 / 16` で
+        // ψ_full の 1/16).
+        psi.copy_from_slice(&psi_h2);
+    }
+
+    Ok(err)
+}
+
+/// `cfm4_step_with_richardson_estimate` の Python wrap.
+///
+/// Python 側 (`_rust.cfm4_step_with_richardson_estimate_py`) からは
+///
+/// ```python
+/// psi_new, err = _rust.cfm4_step_with_richardson_estimate_py(
+///     psi, h_x, h_p_diag,
+///     a_s1_full, b_s1_full, a_s2_full, b_s2_full,
+///     a_s1_h1,   b_s1_h1,   a_s2_h1,   b_s2_h1,
+///     a_s1_h2,   b_s1_h2,   a_s2_h2,   b_s2_h2,
+///     dt, m, krylov_tol, extrapolate,
+/// )
+/// ```
+///
+/// として呼ぶ. 戻り値は `(ψ_new, err)` のタプル. `psi_new` は extrapolate フラグに
+/// 応じて `ψ_acc` (true) または `ψ_h2` (false) になる. サイト数 `n = len(h_x)` /
+/// 状態次元 `dim = 2^n` は `len(h_p_diag)` から取り出し, 整合性を検証する.
+#[pyfunction]
+#[pyo3(signature = (
+    psi, h_x, h_p_diag,
+    a_s1_full, b_s1_full, a_s2_full, b_s2_full,
+    a_s1_h1, b_s1_h1, a_s2_h1, b_s2_h1,
+    a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2,
+    dt, m, krylov_tol, extrapolate,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_with_richardson_estimate_py<'py>(
+    py: Python<'py>,
+    psi: PyReadonlyArray1<'py, Complex64>,
+    h_x: PyReadonlyArray1<'py, f64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    a_s1_full: f64,
+    b_s1_full: f64,
+    a_s2_full: f64,
+    b_s2_full: f64,
+    a_s1_h1: f64,
+    b_s1_h1: f64,
+    a_s2_h1: f64,
+    b_s2_h1: f64,
+    a_s1_h2: f64,
+    b_s1_h2: f64,
+    a_s2_h2: f64,
+    b_s2_h2: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+    extrapolate: bool,
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, f64)> {
+    let psi_slice = psi.as_slice()?;
+    let h_x_slice = h_x.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+
+    let n = h_x_slice.len();
+    let dim = 1usize << n;
+    if h_p_diag_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "h_p_diag length {} does not match 2^len(h_x) = 2^{} = {}",
+            h_p_diag_slice.len(),
+            n,
+            dim,
+        )));
+    }
+    if psi_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "psi length {} does not match 2^len(h_x) = {}",
+            psi_slice.len(),
+            dim,
+        )));
+    }
+    if m == 0 {
+        return Err(PyValueError::new_err("m must be >= 1"));
+    }
+
+    let mut psi_owned: Vec<Complex64> = psi_slice.to_vec();
+    let err = cfm4_step_with_richardson_estimate(
+        &mut psi_owned,
+        h_x_slice,
+        h_p_diag_slice,
+        a_s1_full,
+        b_s1_full,
+        a_s2_full,
+        b_s2_full,
+        a_s1_h1,
+        b_s1_h1,
+        a_s2_h1,
+        b_s2_h1,
+        a_s1_h2,
+        b_s1_h2,
+        a_s2_h2,
+        b_s2_h2,
+        dt,
+        m,
+        krylov_tol,
+        n,
+        extrapolate,
+    )?;
+    Ok((psi_owned.into_pyarray(py), err))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1134,5 +1374,306 @@ mod tests {
 
         let rel = relative_error(&psi, &expected);
         assert!(rel < 1e-10, "chain n_steps={} rel = {}", n_steps, rel);
+    }
+
+    /// `cfm4_step_with_richardson_estimate` を `dt = 0` で呼ぶと err は同一の入口 ψ
+    /// から両軌道とも位相 `exp(0) = 1` で進まないので, 数値雑音を除いてゼロ.
+    /// 同時に psi も入口と一致するはず (`extrapolate=false` 経路で `ψ_h2` を
+    /// そのまま書き戻すケース).
+    #[test]
+    fn richardson_estimate_dt_zero_err_is_zero() {
+        let n = 4_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xfeed);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let psi0 = random_complex_vec(dim, 0xdada);
+        let (a_s1_full, b_s1_full) = (rng.signed(), rng.signed());
+        let (a_s2_full, b_s2_full) = (rng.signed(), rng.signed());
+        let (a_s1_h1, b_s1_h1) = (rng.signed(), rng.signed());
+        let (a_s2_h1, b_s2_h1) = (rng.signed(), rng.signed());
+        let (a_s1_h2, b_s1_h2) = (rng.signed(), rng.signed());
+        let (a_s2_h2, b_s2_h2) = (rng.signed(), rng.signed());
+
+        let mut psi = psi0.clone();
+        let err = cfm4_step_with_richardson_estimate(
+            &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
+            b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, 0.0, 24, 1e-12, n,
+            false,
+        )
+        .expect("ok");
+
+        assert!(err.abs() < 1e-13, "dt=0 err = {}", err);
+        let rel = relative_error(&psi, &psi0);
+        assert!(rel < 1e-13, "dt=0 psi rel = {}", rel);
+    }
+
+    /// per-step Richardson 推定値 `err = ‖ψ_full - ψ_h2‖` が `O(dt^5)` (CFM4:2 の
+    /// LTE オーダ) でスケールすることを確認する.
+    ///
+    /// 設定: operator 部分 (`h_x`, `h_p_diag`) は固定したまま, schedule 係数を
+    /// `(A(s), B(s)) = (a_base · f(t), b_base · f(t))` で時間依存にする
+    /// (`f(t) = sin(2t)` を採用, `f^(4)(t)` を amplify して signal を
+    /// Lanczos floor 上に確保). `t_0 = 1.0` を中心に 1 step 評価.
+    ///
+    /// この設定で CFM4:2 の LTE は `C_4 · dt^5 + O(dt^7)`, half-step×2 の LTE は
+    /// `2 · C_4 · (dt/2)^5 + O(dt^7) = C_4·dt^5/16 + O(dt^7)` なので
+    /// `err = ‖ψ_full - ψ_h2‖ ≈ (15/16) · C_4 · dt^5`. dt 半減で err 比 `~32`,
+    /// issue spec の `[16, 64]` 窓を要求.
+    /// (`m2_estimate_err_scales_as_dt_cubed_for_smooth_schedule` と同じ
+    /// 「operator は time-independent, schedule が smooth time-dependent」設定.)
+    #[test]
+    fn richardson_estimate_err_scales_as_dt_fifth_for_smooth_schedule() {
+        let n = 3_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xcafe);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let psi_raw = random_complex_vec(dim, 0xbeef);
+        let norm = nrm2(&psi_raw);
+        let psi0: Vec<Complex64> = psi_raw.iter().map(|c| *c / norm).collect();
+
+        let a_base = 0.4_f64;
+        let b_base = 0.7_f64;
+        // f(t) = sin(2t). α = 2 で f^(4) を 16× amplify し err を Lanczos floor
+        // (~1e-14) より十分上に保つ. f^(6)/f^(4) = -α^2 = -4 で higher-order
+        // pollution が 0.01·dt^2 程度なので [16, 64] 窓には収まる.
+        let f = |t: f64| (2.0 * t).sin();
+        let t0 = 1.0_f64;
+        let m = 24_usize;
+        let krylov_tol = 1e-14_f64;
+        let c_1 = cfm4_c1();
+        let c_2 = cfm4_c2();
+
+        let step_err = |dt: f64| -> f64 {
+            // full-step CFM4:2 nodes at t0 + c_k · dt
+            let a_s1_full = a_base * f(t0 + c_1 * dt);
+            let b_s1_full = b_base * f(t0 + c_1 * dt);
+            let a_s2_full = a_base * f(t0 + c_2 * dt);
+            let b_s2_full = b_base * f(t0 + c_2 * dt);
+            // first-half nodes at t0 + c_k · dt/2
+            let a_s1_h1 = a_base * f(t0 + c_1 * dt * 0.5);
+            let b_s1_h1 = b_base * f(t0 + c_1 * dt * 0.5);
+            let a_s2_h1 = a_base * f(t0 + c_2 * dt * 0.5);
+            let b_s2_h1 = b_base * f(t0 + c_2 * dt * 0.5);
+            // second-half nodes at t0 + dt/2 + c_k · dt/2
+            let a_s1_h2 = a_base * f(t0 + 0.5 * dt + c_1 * dt * 0.5);
+            let b_s1_h2 = b_base * f(t0 + 0.5 * dt + c_1 * dt * 0.5);
+            let a_s2_h2 = a_base * f(t0 + 0.5 * dt + c_2 * dt * 0.5);
+            let b_s2_h2 = b_base * f(t0 + 0.5 * dt + c_2 * dt * 0.5);
+
+            let mut psi = psi0.clone();
+            cfm4_step_with_richardson_estimate(
+                &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
+                b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, dt, m, krylov_tol,
+                n, false,
+            )
+            .expect("ok")
+        };
+
+        let dt_coarse = 0.05_f64;
+        let err_coarse = step_err(dt_coarse);
+        let err_fine = step_err(dt_coarse * 0.5);
+        let ratio = err_coarse / err_fine;
+
+        // O(dt^5) → ratio ~ 32. issue spec の [16, 64] 窓.
+        assert!(
+            ratio > 16.0 && ratio < 64.0,
+            "expected ratio ~ 32 (O(dt^5)), got ratio = {} (err_coarse = {}, err_fine = {})",
+            ratio,
+            err_coarse,
+            err_fine,
+        );
+        // err_fine が Lanczos 床 (~1e-14·dim) より十分大きいことも確認 (床に
+        // 張り付いていると ratio がノイズ支配でテストが空振りする).
+        assert!(
+            err_fine > 1e-12,
+            "err_fine = {} too small (Lanczos floor reached?)",
+            err_fine,
+        );
+    }
+
+    /// `extrapolate = true` で Richardson 外挿した psi の per-step 誤差が
+    /// CFM4:2 1 step (LTE O(dt^5)) より高次でスケールすることを確認する
+    /// (実効 6 次精度. dt 半減で psi-誤差比 ~64, issue spec の [32, 128] 窓).
+    ///
+    /// 検証技法: `cfm4_global_error_order_4_on_commuting_time_dependent_h` と
+    /// 同じ可換時間依存 `H(t) = f(t) · H_0` 構造を流用. H_0 は時間に依らず一定
+    /// なので 1 step の参照解は `exp(-i · F_int · H_0) · ψ_0`,
+    /// `F_int = ∫_{t0}^{t0+dt} sin(α τ) dτ = (cos(α·t0) - cos(α·(t0+dt))) / α`
+    /// で解析的.
+    ///
+    /// f がガウス-ルジャンドル 2 点求積で誤差 O(dt^5) になるため,
+    /// `F_full - F_int = C · dt^5 + O(dt^7)`, `F_halves - F_int = C·dt^5/16 + O(dt^7)`,
+    /// Richardson 外挿後の有効積分誤差は `(16·F_halves - F_full)/15 - F_int = O(dt^7)`.
+    /// 1 step propagator も exp 線形項に limited な議論で `‖ψ_acc - ψ_exact‖ = O(dt^{6 or 7})`.
+    /// issue spec の `[32, 128]` 窓は dt^6 (= 2^6 = 64) と dt^7 (= 2^7 = 128) の
+    /// 両端を包含する. CFM4:2 は時間対称な scheme なので LTE 展開は奇数次のみ,
+    /// 残差は dt^7 (理想 ratio 128) になる見込み.
+    ///
+    /// `f(t) = sin(2t)` で f^(6) を `α^6 = 64×` amplify し err signal を
+    /// Lanczos floor (~1e-14) より十分上に保つ. dt_coarse=0.2 で dt^9 pollution は
+    /// (B/A)·dt^2 ~ -4·0.04 = -0.16 なので ratio は 100〜128 の範囲に着地する見込み.
+    #[test]
+    fn richardson_extrapolate_psi_error_higher_order_for_commuting_time_dependent_h() {
+        let n = 3_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0x1eaf);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let psi_raw = random_complex_vec(dim, 0xface);
+        let norm = nrm2(&psi_raw);
+        let psi0: Vec<Complex64> = psi_raw.iter().map(|c| *c / norm).collect();
+
+        let a_base = 0.4_f64;
+        let b_base = 0.7_f64;
+        let alpha = 2.0_f64;
+        let f = |t: f64| (alpha * t).sin();
+        let h_real = build_dense_h_real(n, &h_x, &h_p_diag, a_base, b_base);
+
+        let t0 = 1.0_f64;
+        let m = 24_usize;
+        let krylov_tol = 1e-14_f64;
+        let c_1 = cfm4_c1();
+        let c_2 = cfm4_c2();
+
+        let step_err = |dt: f64| -> f64 {
+            let a_s1_full = a_base * f(t0 + c_1 * dt);
+            let b_s1_full = b_base * f(t0 + c_1 * dt);
+            let a_s2_full = a_base * f(t0 + c_2 * dt);
+            let b_s2_full = b_base * f(t0 + c_2 * dt);
+            let a_s1_h1 = a_base * f(t0 + c_1 * dt * 0.5);
+            let b_s1_h1 = b_base * f(t0 + c_1 * dt * 0.5);
+            let a_s2_h1 = a_base * f(t0 + c_2 * dt * 0.5);
+            let b_s2_h1 = b_base * f(t0 + c_2 * dt * 0.5);
+            let a_s1_h2 = a_base * f(t0 + 0.5 * dt + c_1 * dt * 0.5);
+            let b_s1_h2 = b_base * f(t0 + 0.5 * dt + c_1 * dt * 0.5);
+            let a_s2_h2 = a_base * f(t0 + 0.5 * dt + c_2 * dt * 0.5);
+            let b_s2_h2 = b_base * f(t0 + 0.5 * dt + c_2 * dt * 0.5);
+
+            let mut psi = psi0.clone();
+            cfm4_step_with_richardson_estimate(
+                &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
+                b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, dt, m, krylov_tol,
+                n, true,
+            )
+            .expect("ok");
+
+            // exact: F_int = ∫_{t0}^{t0+dt} sin(α τ) dτ = (cos(α·t0) - cos(α·(t0+dt)))/α
+            let f_integral = ((alpha * t0).cos() - (alpha * (t0 + dt)).cos()) / alpha;
+            let expected = reference_propagate_real_h(&h_real, &psi0, f_integral);
+            relative_error(&psi, &expected)
+        };
+
+        let dt_coarse = 0.2_f64;
+        let err_coarse = step_err(dt_coarse);
+        let err_fine = step_err(dt_coarse * 0.5);
+        let ratio = err_coarse / err_fine;
+
+        assert!(
+            ratio > 32.0 && ratio < 128.0,
+            "expected ratio ~ 64 (effective 6th order), got ratio = {} (err_coarse = {}, err_fine = {})",
+            ratio,
+            err_coarse,
+            err_fine,
+        );
+        assert!(
+            err_fine > 1e-13,
+            "err_fine = {} too small (Lanczos floor reached?)",
+            err_fine,
+        );
+    }
+
+    /// `extrapolate = false` で書き戻される psi は, 同一の half-step スケジュール
+    /// 係数 (h1, h2) を持つ `cfm4_step` を dt/2 で 2 回呼んだ結果と
+    /// **bit-exact 一致** することを確認する.
+    ///
+    /// Richardson 推定子は full-step / half-step×2 の 3 軌道を内部で走らせるが,
+    /// `extrapolate=false` のとき psi に書き戻されるのは half-step×2 の出口
+    /// `ψ_h2`. 同じ `cfm4_step` を同じ引数で呼んだ結果と同じビット列を生む契約
+    /// (full-step 軌道は err 算出にのみ使い破棄される).
+    #[test]
+    fn richardson_extrapolate_false_matches_two_half_steps_bit_exact() {
+        let n = 4_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0x6789);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let psi0 = random_complex_vec(dim, 0x4321);
+
+        let (a_s1_full, b_s1_full) = (0.4_f64, 1.1_f64);
+        let (a_s2_full, b_s2_full) = (0.7_f64, 0.3_f64);
+        let (a_s1_h1, b_s1_h1) = (0.45_f64, 1.05_f64);
+        let (a_s2_h1, b_s2_h1) = (0.65_f64, 0.35_f64);
+        let (a_s1_h2, b_s1_h2) = (0.50_f64, 0.95_f64);
+        let (a_s2_h2, b_s2_h2) = (0.60_f64, 0.40_f64);
+
+        let dt = 0.25_f64;
+        let m = 24_usize;
+        let krylov_tol = 1e-12_f64;
+
+        // reference: cfm4_step を dt/2 で 2 回叩く.
+        let psi_mid_expected = cfm4_step(
+            &psi0,
+            &h_x,
+            &h_p_diag,
+            a_s1_h1,
+            b_s1_h1,
+            a_s2_h1,
+            b_s2_h1,
+            0.5 * dt,
+            m,
+            krylov_tol,
+            n,
+        )
+        .expect("ok");
+        let psi_expected = cfm4_step(
+            &psi_mid_expected,
+            &h_x,
+            &h_p_diag,
+            a_s1_h2,
+            b_s1_h2,
+            a_s2_h2,
+            b_s2_h2,
+            0.5 * dt,
+            m,
+            krylov_tol,
+            n,
+        )
+        .expect("ok");
+
+        // actual: Richardson 経路を extrapolate=false で実行.
+        let mut psi_actual = psi0.clone();
+        let _err = cfm4_step_with_richardson_estimate(
+            &mut psi_actual,
+            &h_x,
+            &h_p_diag,
+            a_s1_full,
+            b_s1_full,
+            a_s2_full,
+            b_s2_full,
+            a_s1_h1,
+            b_s1_h1,
+            a_s2_h1,
+            b_s2_h1,
+            a_s1_h2,
+            b_s1_h2,
+            a_s2_h2,
+            b_s2_h2,
+            dt,
+            m,
+            krylov_tol,
+            n,
+            false,
+        )
+        .expect("ok");
+
+        for k in 0..dim {
+            assert_eq!(
+                psi_actual[k], psi_expected[k],
+                "k={}: actual={:?}, expected={:?}",
+                k, psi_actual[k], psi_expected[k]
+            );
+        }
     }
 }

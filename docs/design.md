@@ -876,9 +876,10 @@ CFM4:2 を full-step (dt) と half-step×2 (dt/2 + dt/2) で **同一入口 ψ**
 err = ‖ψ_full - ψ_h2‖ ≈ (1 - 1/16) · C_4 · dt^5
 ```
 
-を CFM4:2 自身の LTE 推定値として返す。per-step matvec は **12m**
-(full 4m + half×2 × 4m)。M2 embedded 版より 2 オーダ高精度なので
-smooth schedule では許容 dt を 1〜2 桁伸ばせる。
+を CFM4:2 自身の LTE 推定値として返す。per-step matvec は **6m**
+(full 2m + half×2 × 2m, Lanczos 呼出 6 回, 固定 dt CFM4:2 比 3×)。
+M2 embedded 版より 2 オーダ高精度なので smooth schedule では許容 dt を
+1〜2 桁伸ばせる。
 
 オプション `extrapolate=True` で Richardson 外挿:
 `ψ_acc = (16 · ψ_h2 - ψ_full) / 15` (実効 6 次精度)。
