@@ -1,6 +1,6 @@
-"""``QuantumAnnealer.run`` の end-to-end smoke test (Phase 1 / Phase 2).
+"""``QuantumAnnealer.run`` の end-to-end smoke test (Phase 1 / Phase 2 / Phase 3).
 
-issue #8 / #21 / #22 の acceptance:
+issue #8 / #21 / #22 / #32 の acceptance:
 
 * ``QuantumAnnealer(prob, sched).run(psi0, 0, T, method="m2", n_steps=200)``
   の戻り値が ``QuantumResult`` で, 線形 schedule で十分長い ``T`` を取ると
@@ -9,6 +9,8 @@ issue #8 / #21 / #22 の acceptance:
   ``n_matvec = n_steps * (N + 1)`` の見積もりが返る.
 * ``method="trotter_suzuki4"`` 経路 (Phase 2 C4) でも同じ smoke を満たし,
   ``n_matvec = n_steps * 5 * (N + 1)`` の見積もりが返る.
+* ``method="cfm4"`` 経路 (Phase 3 C2) でも同じ smoke を満たし,
+  ``n_matvec = n_steps * 2 * m`` の見積もりが返る.
 * 公開 API (psi0 検証, method/save_tlist の NotImplementedError) が
   仕様どおりに raise する.
 """
@@ -168,8 +170,45 @@ def test_run_trotter_suzuki4_smoke_and_ground_state() -> None:
     assert p_gs > 0.95, f"ground state probability too low (trotter_suzuki4): {p_gs}"
 
 
+def test_run_cfm4_smoke_and_ground_state() -> None:
+    """``method="cfm4"`` の smoke + GS 到達確率テスト (Phase 3 C2).
+
+    n=4, T=10 linear schedule の強磁性 chain (縮退基底 ``|0000⟩`` /
+    ``|1111⟩``) で ``n_steps=200`` を取り, 終端波動関数の基底状態
+    合計確率が 0.95 を超えることを確認する. CFM4:2 は ``O(dt^5)`` LTE で
+    Suzuki S_4 と同じ局所オーダなので, ``n_steps=200`` で十分到達する.
+
+    あわせて ``n_matvec = n_steps × 2 × m`` の Phase 3 C2 規約 (CFM4:2 は
+    1 step あたり Lanczos 2 回) を検証する.
+    """
+    n = 4
+    prob = IsingProblem(
+        n=n,
+        H_p_diag=_ferromagnetic_chain_h_p_diag(n),
+        h_x=np.ones(n, dtype=np.float64),
+    )
+    sched = Schedule.linear(T=10.0)
+    psi0 = uniform_superposition(n)
+    ann = QuantumAnnealer(prob, sched)
+    res = ann.run(psi0, 0.0, sched.T, method="cfm4", n_steps=200)
+
+    assert isinstance(res, QuantumResult)
+    assert res.psi_final.shape == (1 << n,)
+    assert res.psi_final.dtype == np.complex128
+    assert res.n_steps == 200
+    # CFM4:2 規約: n_matvec = n_steps × 2 × m (m=24 デフォルト).
+    assert res.n_matvec == 200 * 2 * 24
+    # propagator は unitary.
+    assert abs(np.linalg.norm(res.psi_final) - 1.0) < 1e-10
+
+    p_gs = _ground_state_probability(res.psi_final, prob.H_p_diag)
+    assert p_gs > 0.95, f"ground state probability too low (cfm4): {p_gs}"
+
+
 def test_run_rejects_unsupported_method() -> None:
-    """``method`` が ``"m2"`` / ``"trotter"`` / ``"trotter_suzuki4"`` 以外なら ``NotImplementedError``."""
+    """``method`` が ``"m2"`` / ``"trotter"`` / ``"trotter_suzuki4"`` /
+    ``"cfm4"`` 以外なら ``NotImplementedError``.
+    """
     n = 3
     prob = IsingProblem(
         n=n,
@@ -180,7 +219,7 @@ def test_run_rejects_unsupported_method() -> None:
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     with pytest.raises(NotImplementedError):
-        ann.run(psi0, 0.0, 1.0, method="cfm4", n_steps=10)  # type: ignore[arg-type]
+        ann.run(psi0, 0.0, 1.0, method="cfm4_adaptive_richardson", n_steps=10)  # type: ignore[arg-type]
 
 
 def test_run_rejects_save_tlist() -> None:

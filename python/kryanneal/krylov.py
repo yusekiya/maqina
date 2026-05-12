@@ -18,9 +18,18 @@ Phase 2 で Trotter (Strang 2 次) 経路を追加:
 * ``_python_trotter_step``: 純 NumPy の Strang 1 step リファレンス
   (Rust 拡張 ``_rust.trotter_step_py`` と ``rel < 1e-13`` で一致する契約).
 
-Phase 3 で CFM4:2, Phase 4 で adaptive driver
-(``evolve_schedule_adaptive_m2`` / ``evolve_schedule_adaptive_richardson``)
-を追加する.
+Phase 3 で CFM4:2 (Alvermann-Fehske 2011) 経路を追加:
+
+* ``evolve_schedule_cfm4``: 固定 dt の CFM4:2 (4 次 commutator-free Magnus)
+  ドライバ. 各 step で Gauss-Legendre 2 点ノードでスケジュール係数を
+  pre-eval し, Rust ``_rust.cfm4_step_py`` (fast path) または
+  ``_python_cfm4_step`` (silent fallback) を呼ぶ.
+* ``_python_cfm4_step``: 純 NumPy の CFM4:2 1 step リファレンス
+  (``_python_lanczos_propagate`` を 2 回呼ぶ; Rust ``_rust.cfm4_step_py``
+  と ``rel < 1e-13`` で一致する契約).
+
+Phase 4 で adaptive driver (``evolve_schedule_adaptive_m2`` /
+``evolve_schedule_adaptive_richardson``) を追加する.
 
 Rust 拡張へのアクセスは ``kryanneal._rust`` を **遅延 import** で行う:
 ``_rust`` のロード失敗 (拡張未ビルド環境) を ``ImportError`` で捕捉して
@@ -57,10 +66,23 @@ def _try_import_rust() -> ModuleType | None:
 _rust_mod: ModuleType | None = _try_import_rust()
 
 __all__ = [
+    "evolve_schedule_cfm4",
     "evolve_schedule_m2",
     "evolve_schedule_trotter",
     "evolve_schedule_trotter_suzuki4",
 ]
+
+
+# CFM4:2 (Alvermann-Fehske 2011) のガウス-ルジャンドル 2 点求積ノードと
+# 線形結合係数. ``f64`` precision で `1/2 ± √3/6`, `1/4 ± √3/6` を計算する
+# (Rust 側 `src/cfm4.rs` の `cfm4_c1` / `cfm4_c2` / `cfm4_a_high` /
+# `cfm4_a_low` と完全一致する値). `a_high + a_low = 1/2`,
+# `c_1 + c_2 = 1` の不変量を満たす. 詳細は `docs/design.md` §5.3 CFM4:2
+# サブセクション.
+_CFM4_C1: float = 0.5 - 3.0**0.5 / 6.0
+_CFM4_C2: float = 0.5 + 3.0**0.5 / 6.0
+_CFM4_A_HIGH: float = 0.25 + 3.0**0.5 / 6.0
+_CFM4_A_LOW: float = 0.25 - 3.0**0.5 / 6.0
 
 
 # Trotter-Suzuki S_4 のサブステップ係数係数 `p = 1 / (4 - 4^{1/3})`.
@@ -716,4 +738,183 @@ def evolve_schedule_trotter_suzuki4(
             )
 
     n_matvec = int(n_steps) * 5 * (n + 1)
+    return psi, n_matvec
+
+
+def _python_cfm4_step(
+    psi: np.ndarray,
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    a_s1: float,
+    b_s1: float,
+    a_s2: float,
+    b_s2: float,
+    dt: float,
+    m: int,
+    krylov_tol: float,
+) -> np.ndarray:
+    """CFM4:2 (Alvermann-Fehske 2011) 1 step の Python リファレンス実装.
+
+    Rust 側 ``cfm4_step`` (``src/cfm4.rs``) と同一アルゴリズム:
+
+    .. code-block:: text
+
+        U(t+dt, t) ≈ exp(-i dt · B_2) · exp(-i dt · B_1)
+        stage 1 : c_drv  = a_high·A_1 + a_low ·A_2
+                  c_diag = a_high·B_1 + a_low ·B_2
+        stage 2 : c_drv  = a_low ·A_1 + a_high·A_2
+                  c_diag = a_low ·B_1 + a_high·B_2
+
+    各 stage で ``(c_drv, c_diag)`` スカラ 2 つに畳み込み, 既存の
+    ``_python_lanczos_propagate`` を 1 回ずつ呼ぶ「線形結合 callback 形式」
+    (``docs/design.md`` §5.2 末尾). per-step matvec は ``2m``, LTE
+    ``O(dt^5)``. Rust ``_rust.cfm4_step_py`` と ``rel < 1e-13`` で一致する
+    のが契約 (``tests/test_cfm4.py``).
+
+    ``(a_s1, b_s1)``, ``(a_s2, b_s2)`` はガウス-ルジャンドル 2 点ノード
+    ``t + c_1·dt``, ``t + c_2·dt`` で評価されたスケジュール係数を呼出側で
+    pre-eval して渡す前提.
+
+    Parameters
+    ----------
+    psi
+        shape ``(2**n,)`` complex128 の入力状態.
+    h_x
+        shape ``(n,)`` float64 のサイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64 の Z 基底 problem 対角.
+    a_s1, b_s1
+        ノード ``t + c_1·dt`` でフリーズ済の ``A(s(·))``, ``B(s(·))``.
+    a_s2, b_s2
+        ノード ``t + c_2·dt`` でフリーズ済の ``A(s(·))``, ``B(s(·))``.
+    dt
+        時刻刻み幅.
+    m
+        Krylov 部分空間次元.
+    krylov_tol
+        Lanczos の β 打切り閾値.
+
+    Returns
+    -------
+    np.ndarray
+        shape ``(2**n,)`` complex128 の新状態.
+    """
+    # stage 1: B_1 = a_high · H_1 + a_low · H_2 を (c_drv_1, c_diag_1) に
+    # 畳み込んで Lanczos 1 回.
+    c_drv_1 = _CFM4_A_HIGH * a_s1 + _CFM4_A_LOW * a_s2
+    c_diag_1 = _CFM4_A_HIGH * b_s1 + _CFM4_A_LOW * b_s2
+    matvec_1 = _make_python_matvec(h_x, h_p_diag, c_drv_1, c_diag_1)
+    psi_mid = _python_lanczos_propagate(matvec_1, psi, dt, m, krylov_tol)
+
+    # stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に
+    # 畳み込んで Lanczos もう 1 回.
+    c_drv_2 = _CFM4_A_LOW * a_s1 + _CFM4_A_HIGH * a_s2
+    c_diag_2 = _CFM4_A_LOW * b_s1 + _CFM4_A_HIGH * b_s2
+    matvec_2 = _make_python_matvec(h_x, h_p_diag, c_drv_2, c_diag_2)
+    return _python_lanczos_propagate(matvec_2, psi_mid, dt, m, krylov_tol)
+
+
+def evolve_schedule_cfm4(
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    schedule: Schedule,
+    psi0: np.ndarray,
+    t0: float,
+    t1: float,
+    n_steps: int,
+    *,
+    m: int = 24,
+    krylov_tol: float = 1e-12,
+) -> tuple[np.ndarray, int]:
+    """固定 dt = (t1 - t0) / n_steps の CFM4:2 ドライバ.
+
+    各 step でガウス-ルジャンドル 2 点ノード ``t + c_1·dt`` / ``t + c_2·dt``
+    (``c_1, c_2 = 1/2 ∓ √3/6``) で ``schedule.coeffs_at`` を 2 回評価して
+    ``(a_s1, b_s1)`` / ``(a_s2, b_s2)`` を pre-eval し, ``cfm4_step`` を呼ぶ.
+    Rust 拡張が import 済なら ``_rust.cfm4_step_py`` を, そうでなければ
+    Python リファレンス ``_python_cfm4_step`` を使う (silent fallback).
+
+    Alvermann-Fehske (2011) の 4 次 commutator-free Magnus を 1 step ぶん
+    適用する. Lanczos を 2 回 / step 呼ぶ (per-step matvec は ``2m``) ので
+    M2 中点則 (per-step matvec ``m``) より 2 倍重いが, LTE が ``O(dt^5)`` で
+    2 オーダ高精度. 「長時間 / 高精度」要求では同精度比較で総コストが M2 を
+    下回るクロスオーバが発生する (``docs/design.md`` §5.3 / §12).
+
+    Parameters
+    ----------
+    h_x
+        shape ``(n,)`` float64. サイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64. Z 基底 problem 対角.
+    schedule
+        ``Schedule`` インスタンス. ``coeffs_at(t)`` から
+        ``(A(s(t)), B(s(t)))`` を取り出す.
+    psi0
+        shape ``(2**n,)`` complex128. 初期状態 (L2-normalize 済みであること).
+    t0, t1
+        積分区間 ``[t0, t1]``. ``t1 > t0`` を要求.
+    n_steps
+        固定 step 数 (``n_steps >= 1``).
+    m
+        Krylov 部分空間次元.
+    krylov_tol
+        Lanczos の β 打切り閾値.
+
+    Returns
+    -------
+    psi_final : np.ndarray
+        shape ``(2**n,)`` complex128 の終端状態.
+    n_matvec : int
+        累積 matvec 呼出回数 (Lanczos の ``2m`` 回 × ``n_steps`` の見積もり).
+
+    Raises
+    ------
+    ValueError
+        ``n_steps < 1`` または ``t1 <= t0`` のとき.
+    """
+    if n_steps < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps!r}")
+    if not (t1 > t0):
+        raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
+
+    dt = (float(t1) - float(t0)) / int(n_steps)
+    psi = np.ascontiguousarray(psi0, dtype=np.complex128)
+    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
+    h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
+
+    rust_mod = _rust_mod
+    for k in range(n_steps):
+        t_step_start = t0 + k * dt
+        t_s1 = t_step_start + _CFM4_C1 * dt
+        t_s2 = t_step_start + _CFM4_C2 * dt
+        a_s1, b_s1 = schedule.coeffs_at(t_s1)
+        a_s2, b_s2 = schedule.coeffs_at(t_s2)
+        if rust_mod is not None:
+            psi = rust_mod.cfm4_step_py(
+                psi,
+                h_x_arr,
+                h_p_diag_arr,
+                a_s1,
+                b_s1,
+                a_s2,
+                b_s2,
+                dt,
+                m,
+                krylov_tol,
+            )
+        else:
+            psi = _python_cfm4_step(
+                psi,
+                h_x_arr,
+                h_p_diag_arr,
+                a_s1,
+                b_s1,
+                a_s2,
+                b_s2,
+                dt,
+                m,
+                krylov_tol,
+            )
+
+    n_matvec = int(n_steps) * 2 * int(m)
     return psi, n_matvec
