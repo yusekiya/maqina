@@ -196,9 +196,7 @@ def test_python_cfm4_time_independent_lte_order_5() -> None:
         # H_0 = a_base · H_drv + b_base · diag(h_p_diag) の作用. dense は
         # `_dense_exp_minus_i_dt_h(... dt=1)` の log を取って ·F する代わりに
         # 「a_base · F の H_drv 係数」「b_base · F の diag 係数」で直接構築する.
-        expected = _dense_exp_minus_i_dt_h(
-            h_x, h_p_diag, a_base, b_base, f_int
-        ) @ psi
+        expected = _dense_exp_minus_i_dt_h(h_x, h_p_diag, a_base, b_base, f_int) @ psi
         a_s1 = a_base * f(_CFM4_C1 * dt)
         b_s1 = b_base * f(_CFM4_C1 * dt)
         a_s2 = a_base * f(_CFM4_C2 * dt)
