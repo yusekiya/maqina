@@ -37,7 +37,7 @@ from typing import Callable as Callable
 import numpy as np
 from kryanneal.schedule import Schedule as Schedule
 from typing import Any
-__all__ = ['evolve_schedule_m2', 'evolve_schedule_trotter']
+__all__ = ['evolve_schedule_m2', 'evolve_schedule_trotter', 'evolve_schedule_trotter_suzuki4']
 
 def evolve_schedule_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, m: int=24, krylov_tol: float=1e-12) -> tuple[np.ndarray, int]:
     """固定 dt = (t1 - t0) / n_steps の M2 中点則ドライバ.
@@ -119,6 +119,52 @@ def evolve_schedule_trotter(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Sch
         無いが, ``M2`` ドライバの ``n_steps × m`` と同様の「dim-walk
         見積もり」として ``n_steps × (N + 1)`` (phase pass 1 + bit-flip
         pass N の合計) を返す. ``QuantumResult.n_matvec`` の解釈は
+        ``docs/design.md`` §4.4 (Trotter 注記) を参照.
+
+    Raises
+    ------
+    ValueError
+        ``n_steps < 1`` または ``t1 <= t0`` のとき.
+    """
+    ...
+
+def evolve_schedule_trotter_suzuki4(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int) -> tuple[np.ndarray, int]:
+    """固定 dt = (t1 - t0) / n_steps の Suzuki S_4 Trotter ドライバ.
+
+    各 step で 5 sub-step の中点 ``t + offset_k · dt`` (``offset_k ∈ [p/2,
+    3p/2, 1/2, 1 - 3p/2, 1 - p/2]``) で ``schedule.coeffs_at`` を評価し,
+    ``trotter_suzuki4_step`` (Rust) または ``_python_trotter_suzuki4_step``
+    (silent fallback) を呼ぶ.
+
+    Lanczos を介さない operator splitting 経路の 4 次版. LTE は ``O(dt^5)``
+    で CFM4:2 と同じ局所オーダだが, per-step は ``5·(N + 1)·dim`` 要素アクセス
+    (Strang S_2 の 5 倍, M2 の Lanczos m=24 と比べて N の係数次第).
+    詳細は ``docs/design.md`` §5.3 (Trotter-Suzuki S_4 サブセクション).
+
+    Parameters
+    ----------
+    h_x
+        shape ``(n,)`` float64. サイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64. Z 基底 problem 対角.
+    schedule
+        ``Schedule`` インスタンス.
+    psi0
+        shape ``(2**n,)`` complex128. 初期状態 (L2-normalize 済みであること).
+    t0, t1
+        積分区間 ``[t0, t1]``. ``t1 > t0`` を要求.
+    n_steps
+        固定 step 数 (``n_steps >= 1``).
+
+    Returns
+    -------
+    psi_final : np.ndarray
+        shape ``(2**n,)`` complex128 の終端状態.
+    n_matvec : int
+        Trotter 経路は Lanczos を呼ばないため真の matvec カウント概念は
+        無いが, Strang ドライバとの整合のため
+        ``n_steps × 5 × (N + 1)`` (5 sub-step × ``phase pass 1 + bit-flip
+        pass N``) を返す. ``QuantumResult.n_matvec`` の解釈は
         ``docs/design.md`` §4.4 (Trotter 注記) を参照.
 
     Raises

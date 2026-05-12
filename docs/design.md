@@ -423,12 +423,14 @@ class QuantumAnnealer:
 呼べるようにするため (`QuantumAnnealer` 自身は問題定義のキャッシュ役).
 
 Phase 1 では `method="m2"` のみサポート, Phase 2 で `method="trotter"`
-(固定 dt Strang 2 次 Trotter, §5.3) を追加. それ以外は `NotImplementedError`.
+(固定 dt Strang 2 次 Trotter, §5.3) と `method="trotter_suzuki4"` (固定
+dt Suzuki S_4 4 次 Trotter, §5.3) を追加. それ以外は `NotImplementedError`.
 `save_tlist` / `observables` / adaptive 関連引数も同様に Phase 5 以降で
 有効化する.
 
-`method="trotter"` は Lanczos を使わないため, コンストラクタ引数 `m` /
-`krylov_tol` は無視される (`"m2"` 経路でのみ意味を持つ).
+`method="trotter"` / `method="trotter_suzuki4"` は Lanczos を使わないため,
+コンストラクタ引数 `m` / `krylov_tol` は無視される (`"m2"` 経路でのみ
+意味を持つ).
 
 返り値 `QuantumResult`:
 
@@ -474,6 +476,9 @@ class Trajectory:
   per-step コスト記述と一致). 別フィールド `n_passes` を切らずに
   `n_matvec` を「dim-walk 見積もり」として両経路で再解釈する方針
   (issue #21).
+- `method="trotter_suzuki4"`: `n_steps × 5 × (N + 1)` (Suzuki S_4 は
+  Strang を 5 回呼ぶので Strang 経路の dim-walk 見積もりを 5 倍する;
+  issue #22).
 
 追加予定のフィールド:
 
@@ -927,6 +932,43 @@ p = 1 / (4 - 4^{1/3}) ≈ 0.4145
 で Strang 5 回適用に分解。per-step は ~5·(N+1)·dim、LTE O(dt^5)。CFM4:2 と
 同じ局所オーダだが、Lanczos の m 回 matvec を完全に排した経路としての
 比較・検証用に Phase 2 末で追加 (`method="trotter_suzuki4"`)。
+
+中央 sub-step は `1 - 4p ≈ -0.658` で **時間逆向き** に走る (Suzuki の
+高次合成では正の係数しか持つ対称合成が存在しないことの帰結)。`trotter_step`
+は `dt < 0` を許容するので呼出側で特別扱い不要。
+
+API:
+
+```rust
+pub fn trotter_suzuki4_step(
+    psi: &mut [Complex64],
+    h_x: &[f64],
+    h_p_diag: &[f64],
+    a_t_list: &[f64],    // length 5: 各 sub-step の A(s(中点))
+    b_t_list: &[f64],    // length 5: 各 sub-step の B(s(中点))
+    dt: f64,             // 外側 1 step の時間刻み
+    n: usize,
+);
+```
+
+**サブステップ係数・中点 offset**: sub-step 幅 `[p, p, 1-4p, p, p]·dt` を
+時間順に並べたとき, sub-step `k` の **中点 offset** (`(start_k + end_k)/2`)
+は
+
+```
+offsets = [p/2, 3p/2, 1/2, 1 - 3p/2, 1 - p/2]
+```
+
+で `t + dt/2` を中心に対称。時間依存 H に対しては各 sub-step の中点で
+`(A(s(·)), B(s(·)))` をフリーズ採取することで全体の LTE `O(dt^5)` を保つ。
+
+**schedule 評価の責務**: ホスト言語 (Python driver
+`evolve_schedule_trotter_suzuki4`) が中点 offset を内部で持ち, 各 step
+ごとに 5 つの `(a_mid, b_mid)` を事前計算して長さ 5 の配列として Rust 側に
+渡す。Rust 拡張は `schedule` callable を持ち込まず, Strang `trotter_step`
+を `a_t_list[k] / b_t_list[k] / coeffs[k] * dt` で 5 回呼ぶだけのループ。
+Strang 経路 API (`trotter_step(psi, ..., a_t, b_t, dt, n)`) と「呼出側で
+schedule 評価 → Rust に純粋な係数を渡す」契約を統一する。
 
 **embedded error estimator は持たない**: Strang↔Suzuki4 の差を embedded
 推定子に使う案も理論上はあるが、Phase 4 の `cfm4_step_with_*_estimate`
