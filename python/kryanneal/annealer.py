@@ -10,22 +10,24 @@
 Phase 1 では ``QuantumAnnealer`` のみ提供する (``AnnealingSimulator`` は
 Phase 5 で導入予定).
 
-仕様 (Phase 1 + Phase 2)
-------------------------
+仕様 (Phase 1 + Phase 2 + Phase 3)
+---------------------------------
 * サポート ``method``: ``"m2"`` (固定 dt M2 中点則, Phase 1), ``"trotter"``
   (固定 dt Strang 2 次 Trotter, Phase 2), ``"trotter_suzuki4"`` (固定 dt
-  Suzuki S_4 4 次 Trotter, Phase 2 末). それ以外は ``NotImplementedError``.
+  Suzuki S_4 4 次 Trotter, Phase 2 末), ``"cfm4"`` (固定 dt CFM4:2
+  commutator-free Magnus, Phase 3). それ以外は ``NotImplementedError``.
 * ``save_tlist`` 引数は **API 互換性のために予約済み** だが本リリースでは
   ``None`` のみ受け付ける (非 ``None`` で ``NotImplementedError``).
   Phase 5 の ``QuantumResult.times`` / ``states`` 拡張と一緒に有効化する.
 * 観測量経路 (``observables=...``) も Phase 5 で追加予定. 現状は
   ``QuantumResult.observables_history = {}`` 固定.
 
-実装方針: ``kryanneal.krylov.evolve_schedule_m2`` / ``evolve_schedule_trotter``
-/ ``evolve_schedule_trotter_suzuki4`` (固定 dt driver) を内部で呼ぶ薄い
-ラッパ. 入力検証 (shape / dtype / L2-normalize) を本クラスで集中させ,
-krylov 層は数値計算に専念させる. ``m`` / ``krylov_tol`` は ``"m2"`` 経路で
-のみ意味を持ち, ``"trotter"`` / ``"trotter_suzuki4"`` 経路は Lanczos を
+実装方針: ``kryanneal.krylov.evolve_schedule_m2`` /
+``evolve_schedule_trotter`` / ``evolve_schedule_trotter_suzuki4`` /
+``evolve_schedule_cfm4`` (固定 dt driver) を内部で呼ぶ薄いラッパ.
+入力検証 (shape / dtype / L2-normalize) を本クラスで集中させ, krylov 層は
+数値計算に専念させる. ``m`` / ``krylov_tol`` は ``"m2"`` / ``"cfm4"`` 経路
+でのみ意味を持ち, ``"trotter"`` / ``"trotter_suzuki4"`` 経路は Lanczos を
 使わないため両パラメータは無視される.
 """
 
@@ -36,6 +38,7 @@ from typing import Literal
 import numpy as np
 
 from kryanneal.krylov import (
+    evolve_schedule_cfm4,
     evolve_schedule_m2,
     evolve_schedule_trotter,
     evolve_schedule_trotter_suzuki4,
@@ -96,7 +99,7 @@ class QuantumAnnealer:
         t0: float,
         t1: float,
         *,
-        method: Literal["m2", "trotter", "trotter_suzuki4"] = "m2",
+        method: Literal["m2", "trotter", "trotter_suzuki4", "cfm4"] = "m2",
         n_steps: int,
         save_tlist: np.ndarray | None = None,
     ) -> QuantumResult:
@@ -111,10 +114,12 @@ class QuantumAnnealer:
             積分区間. ``t1 > t0``.
         method
             プロパゲータ. ``"m2"`` (固定 dt M2 中点則, Phase 1),
-            ``"trotter"`` (固定 dt Strang 2 次 Trotter, Phase 2), または
-            ``"trotter_suzuki4"`` (固定 dt Suzuki S_4 4 次 Trotter, Phase 2 末).
-            Trotter 系経路は Lanczos を呼ばないため ``m`` / ``krylov_tol``
-            は無視される.
+            ``"trotter"`` (固定 dt Strang 2 次 Trotter, Phase 2),
+            ``"trotter_suzuki4"`` (固定 dt Suzuki S_4 4 次 Trotter, Phase 2 末),
+            または ``"cfm4"`` (固定 dt CFM4:2 commutator-free Magnus,
+            Phase 3). Trotter 系経路は Lanczos を呼ばないため ``m`` /
+            ``krylov_tol`` は無視される. ``"cfm4"`` は M2 と同じく Lanczos を
+            介すので ``m`` / ``krylov_tol`` が有効.
         n_steps
             固定 step 数 (``n_steps >= 1``). 等間隔 ``dt = (t1 - t0) /
             n_steps`` で進める.
@@ -126,7 +131,7 @@ class QuantumAnnealer:
         -------
         QuantumResult
             ``psi_final`` / ``n_steps`` / ``n_matvec`` を持つ result.
-            Phase 1 / Phase 2 では ``t_history = None``,
+            Phase 1 / Phase 2 / Phase 3 では ``t_history = None``,
             ``observables_history = {}``. ``n_matvec`` は経路ごとに以下:
 
             * ``"m2"``: ``n_steps × m`` (Lanczos の matvec 見積もり).
@@ -134,6 +139,8 @@ class QuantumAnnealer:
               pass N の dim-walk 見積もり; ``docs/design.md`` §4.4 参照).
             * ``"trotter_suzuki4"``: ``n_steps × 5 × (N + 1)`` (5 sub-step
               × Strang per-step コスト).
+            * ``"cfm4"``: ``n_steps × 2m`` (CFM4:2 は 1 step あたり Lanczos
+              を 2 回呼ぶため M2 の 2 倍).
 
         Raises
         ------
@@ -141,16 +148,16 @@ class QuantumAnnealer:
             入力検証失敗 (``psi0`` の shape / dtype / 非正規化, ``n_steps <
             1``, ``t1 <= t0``).
         NotImplementedError
-            ``method`` が ``"m2"`` / ``"trotter"`` / ``"trotter_suzuki4"``
-            以外, または ``save_tlist`` が ``None`` でない場合.
+            ``method`` が ``"m2"`` / ``"trotter"`` / ``"trotter_suzuki4"`` /
+            ``"cfm4"`` 以外, または ``save_tlist`` が ``None`` でない場合.
         """
-        if method not in ("m2", "trotter", "trotter_suzuki4"):
+        if method not in ("m2", "trotter", "trotter_suzuki4", "cfm4"):
             raise NotImplementedError(
-                f"method={method!r} is not supported; only 'm2', 'trotter', and 'trotter_suzuki4' are available."
+                f"method={method!r} is not supported; only 'm2', 'trotter', 'trotter_suzuki4', and 'cfm4' are available."
             )
         if save_tlist is not None:
             raise NotImplementedError(
-                "save_tlist is reserved for Phase 5; pass None in Phase 1/Phase 2."
+                "save_tlist is reserved for Phase 5; pass None in Phase 1/Phase 2/Phase 3."
             )
 
         psi0_arr = self._validate_psi0(psi0)
@@ -176,7 +183,7 @@ class QuantumAnnealer:
                 t1=t1,
                 n_steps=n_steps,
             )
-        else:  # method == "trotter_suzuki4"
+        elif method == "trotter_suzuki4":
             psi_final, n_matvec = evolve_schedule_trotter_suzuki4(
                 h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
@@ -185,6 +192,18 @@ class QuantumAnnealer:
                 t0=t0,
                 t1=t1,
                 n_steps=n_steps,
+            )
+        else:  # method == "cfm4"
+            psi_final, n_matvec = evolve_schedule_cfm4(
+                h_x=self.problem.h_x,
+                h_p_diag=self.problem.H_p_diag,
+                schedule=self.schedule,
+                psi0=psi0_arr,
+                t0=t0,
+                t1=t1,
+                n_steps=n_steps,
+                m=self.m,
+                krylov_tol=self.krylov_tol,
             )
         return QuantumResult(
             psi_final=psi_final,

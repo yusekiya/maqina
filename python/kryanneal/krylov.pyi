@@ -21,9 +21,18 @@ Phase 2 で Trotter (Strang 2 次) 経路を追加:
 * ``_python_trotter_step``: 純 NumPy の Strang 1 step リファレンス
   (Rust 拡張 ``_rust.trotter_step_py`` と ``rel < 1e-13`` で一致する契約).
 
-Phase 3 で CFM4:2, Phase 4 で adaptive driver
-(``evolve_schedule_adaptive_m2`` / ``evolve_schedule_adaptive_richardson``)
-を追加する.
+Phase 3 で CFM4:2 (Alvermann-Fehske 2011) 経路を追加:
+
+* ``evolve_schedule_cfm4``: 固定 dt の CFM4:2 (4 次 commutator-free Magnus)
+  ドライバ. 各 step で Gauss-Legendre 2 点ノードでスケジュール係数を
+  pre-eval し, Rust ``_rust.cfm4_step_py`` (fast path) または
+  ``_python_cfm4_step`` (silent fallback) を呼ぶ.
+* ``_python_cfm4_step``: 純 NumPy の CFM4:2 1 step リファレンス
+  (``_python_lanczos_propagate`` を 2 回呼ぶ; Rust ``_rust.cfm4_step_py``
+  と ``rel < 1e-13`` で一致する契約).
+
+Phase 4 で adaptive driver (``evolve_schedule_adaptive_m2`` /
+``evolve_schedule_adaptive_richardson``) を追加する.
 
 Rust 拡張へのアクセスは ``kryanneal._rust`` を **遅延 import** で行う:
 ``_rust`` のロード失敗 (拡張未ビルド環境) を ``ImportError`` で捕捉して
@@ -37,7 +46,7 @@ from typing import Callable as Callable
 import numpy as np
 from kryanneal.schedule import Schedule as Schedule
 from typing import Any
-__all__ = ['evolve_schedule_m2', 'evolve_schedule_trotter', 'evolve_schedule_trotter_suzuki4']
+__all__ = ['evolve_schedule_cfm4', 'evolve_schedule_m2', 'evolve_schedule_trotter', 'evolve_schedule_trotter_suzuki4']
 
 def evolve_schedule_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, m: int=24, krylov_tol: float=1e-12) -> tuple[np.ndarray, int]:
     """固定 dt = (t1 - t0) / n_steps の M2 中点則ドライバ.
@@ -166,6 +175,55 @@ def evolve_schedule_trotter_suzuki4(h_x: np.ndarray, h_p_diag: np.ndarray, sched
         ``n_steps × 5 × (N + 1)`` (5 sub-step × ``phase pass 1 + bit-flip
         pass N``) を返す. ``QuantumResult.n_matvec`` の解釈は
         ``docs/design.md`` §4.4 (Trotter 注記) を参照.
+
+    Raises
+    ------
+    ValueError
+        ``n_steps < 1`` または ``t1 <= t0`` のとき.
+    """
+    ...
+
+def evolve_schedule_cfm4(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, m: int=24, krylov_tol: float=1e-12) -> tuple[np.ndarray, int]:
+    """固定 dt = (t1 - t0) / n_steps の CFM4:2 ドライバ.
+
+    各 step でガウス-ルジャンドル 2 点ノード ``t + c_1·dt`` / ``t + c_2·dt``
+    (``c_1, c_2 = 1/2 ∓ √3/6``) で ``schedule.coeffs_at`` を 2 回評価して
+    ``(a_s1, b_s1)`` / ``(a_s2, b_s2)`` を pre-eval し, ``cfm4_step`` を呼ぶ.
+    Rust 拡張が import 済なら ``_rust.cfm4_step_py`` を, そうでなければ
+    Python リファレンス ``_python_cfm4_step`` を使う (silent fallback).
+
+    Alvermann-Fehske (2011) の 4 次 commutator-free Magnus を 1 step ぶん
+    適用する. Lanczos を 2 回 / step 呼ぶ (per-step matvec は ``2m``) ので
+    M2 中点則 (per-step matvec ``m``) より 2 倍重いが, LTE が ``O(dt^5)`` で
+    2 オーダ高精度. 「長時間 / 高精度」要求では同精度比較で総コストが M2 を
+    下回るクロスオーバが発生する (``docs/design.md`` §5.3 / §12).
+
+    Parameters
+    ----------
+    h_x
+        shape ``(n,)`` float64. サイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64. Z 基底 problem 対角.
+    schedule
+        ``Schedule`` インスタンス. ``coeffs_at(t)`` から
+        ``(A(s(t)), B(s(t)))`` を取り出す.
+    psi0
+        shape ``(2**n,)`` complex128. 初期状態 (L2-normalize 済みであること).
+    t0, t1
+        積分区間 ``[t0, t1]``. ``t1 > t0`` を要求.
+    n_steps
+        固定 step 数 (``n_steps >= 1``).
+    m
+        Krylov 部分空間次元.
+    krylov_tol
+        Lanczos の β 打切り閾値.
+
+    Returns
+    -------
+    psi_final : np.ndarray
+        shape ``(2**n,)`` complex128 の終端状態.
+    n_matvec : int
+        累積 matvec 呼出回数 (Lanczos の ``2m`` 回 × ``n_steps`` の見積もり).
 
     Raises
     ------

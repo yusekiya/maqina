@@ -1,30 +1,32 @@
-"""per-step wall time benchmark (M2 / Trotter / Suzuki S_4).
+"""per-step wall time benchmark (M2 / Trotter / Suzuki S_4 / CFM4:2).
 
 ``QuantumAnnealer.run`` の 1 step あたりの実時間を, ``method`` ×
 ``n`` (スピン数 / Hilbert 空間次元 ``2^n``) で sweep して計測する.
-Phase 1 の DoD (issue #1) と Phase 2 の DoD (issue #18) で
-「``bench_per_step.py`` で M2 / Trotter / Suzuki S_4 の per-step 数値が
-記録され ``benchmarks/results/`` 配下に置かれている (クロスオーバ実測)」
-を満たすためのベンチエントリポイント.
+Phase 1 の DoD (issue #1) と Phase 2 の DoD (issue #18), Phase 3 の DoD
+(issue #30) で「``bench_per_step.py`` で M2 / Trotter / Suzuki S_4 / CFM4:2
+の per-step 数値が記録され ``benchmarks/results/`` 配下に置かれている
+(クロスオーバ実測)」を満たすためのベンチエントリポイント.
 
 設計規約は ``docs/design.md`` §10, 実行手順は ``benchmarks/README.md``,
 全体規約は ``CLAUDE.md`` 「ベンチマーク」節を参照する.
 
-サポート ``method`` (Phase 2 末時点):
+サポート ``method`` (Phase 3 末時点):
 
 * ``"m2"``: M2 中点則 + Lanczos (Phase 1).
 * ``"trotter"``: Strang 2 次 Trotter (Phase 2 C3).
 * ``"trotter_suzuki4"``: Suzuki S_4 4 次 Trotter (Phase 2 C4).
+* ``"cfm4"``: CFM4:2 commutator-free Magnus + Lanczos (Phase 3 C2).
 
 ``method`` ごとに per-step コストの内訳が異なる:
 
 * M2: per-step ``m·dim`` flops (Lanczos m matvec).
 * Trotter: per-step ``(N+1)·dim`` flops (phase 1 + bit-flip N).
 * Suzuki S_4: per-step ``5·(N+1)·dim`` flops (Strang 5 回).
+* CFM4:2: per-step ``2m·dim`` flops (Lanczos 2 回, M2 の 2 倍重い).
 
-LTE order も異なる (M2 / Strang は ``O(dt^3)``, Suzuki S_4 は ``O(dt^5)``)
-ので, 同じ ``n_steps`` での生 wall time 比較に加えて, 同じ精度を要求した
-ときの required ``n_steps`` のずれを別途見積もる必要がある.
+LTE order も異なる (M2 / Strang は ``O(dt^3)``, Suzuki S_4 / CFM4:2 は
+``O(dt^5)``) ので, 同じ ``n_steps`` での生 wall time 比較に加えて, 同じ
+精度を要求したときの required ``n_steps`` のずれを別途見積もる必要がある.
 
 出力:
 
@@ -55,8 +57,9 @@ overhead が支配して per-step 値がノイジーになる. machine-independe
 (自動 tuning) ので, 機種間比較を主張するときも明示的に thread 数を
 合わせる.
 
-CFM4 / Richardson 経路の追加は Phase 3 / Phase 4 で本ファイルに sweep を
-増やす予定 (``method="cfm4" / "cfm4_adaptive_richardson"`` を追加).
+Phase 3 で ``method="cfm4"`` の sweep を追加済 (issue #32 / #30 の DoD).
+Richardson 経路 (``method="cfm4_adaptive_richardson"``) の追加は Phase 4 で
+本ファイルに sweep を増やす予定.
 """
 
 from __future__ import annotations
@@ -81,8 +84,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "benchmarks" / "results"
 
 # サポートする method 一覧. ``QuantumAnnealer.run`` の Literal 型ヒントと
-# 揃える. CFM4 / Richardson 系は Phase 3 / Phase 4 で追加予定.
-_VALID_METHODS: tuple[str, ...] = ("m2", "trotter", "trotter_suzuki4")
+# 揃える. Richardson 系は Phase 4 で追加予定.
+_VALID_METHODS: tuple[str, ...] = ("m2", "trotter", "trotter_suzuki4", "cfm4")
 
 
 def _parse_int_list(text: str) -> list[int]:
@@ -115,8 +118,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(
         description=(
-            "kryanneal M2 per-step wall time benchmark "
-            "(Phase 1 baseline, see docs/design.md §10)"
+            "kryanneal per-step wall time benchmark "
+            "(M2 / Trotter / Suzuki S_4 / CFM4:2; "
+            "see docs/design.md §10)"
         )
     )
     parser.add_argument(
@@ -230,9 +234,11 @@ def time_method_run(
     壁時計のジッタを最小化するため, 1 試行で run 1 回ぶん計測する.
     ``n_steps`` 内のループは Python 側に閉じているため step 単位の
     overhead もそこそこ乗る. ``method`` ごとに :class:`QuantumAnnealer` の
-    コンストラクタ引数 (``m`` を渡すかどうか) が変わる: Trotter 系は
-    Lanczos を呼ばないため ``m`` は無視されるが, デフォルト値で渡しても
-    害は無いので統一的に渡す.
+    コンストラクタ引数 (``m`` を渡すかどうか) が変わる: Trotter 系
+    (``"trotter"`` / ``"trotter_suzuki4"``) は Lanczos を呼ばないため ``m``
+    は無視されるが, デフォルト値で渡しても害は無いので統一的に渡す.
+    ``"m2"`` / ``"cfm4"`` 経路は ``m`` がそのまま Lanczos 部分空間次元として
+    効く.
     """
     if method not in _VALID_METHODS:
         raise ValueError(f"unsupported method {method!r}; valid: {_VALID_METHODS!r}")
@@ -317,7 +323,7 @@ def write_outputs(
 
     md_path = out_dir / "bench_per_step.md"
     lines: list[str] = []
-    lines.append("# bench_per_step results (M2 / Trotter / Suzuki S_4)")
+    lines.append("# bench_per_step results (M2 / Trotter / Suzuki S_4 / CFM4:2)")
     lines.append("")
     lines.append("## Machine info")
     lines.append("")
