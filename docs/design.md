@@ -1,4 +1,4 @@
-# kryanneal: 設計書 (v0.1)
+# kryanneal: 設計書 (v0.2)
 
 横磁場イジングモデル (TFIM) の量子ダイナミクスを matrix-free に計算する
 Python パッケージ。Krylov 法 (Lanczos) で matvec を介した短時間プロパゲータ
