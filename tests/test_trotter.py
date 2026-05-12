@@ -1,6 +1,6 @@
-"""Strang 2 次 Trotter 経路 (Phase 2 C3) の等価性 / 性質テスト.
+"""Strang 2 次 / Suzuki 4 次 Trotter 経路 (Phase 2 C3 / C4) の等価性 / 性質テスト.
 
-issue #21 の acceptance:
+issue #21 (Strang) の acceptance:
 
 * ``_rust.trotter_step_py`` (Rust 経路) と ``_python_trotter_step``
   (純 NumPy 経路) が ``rel < 1e-13`` で一致する (ランダム ``h_x`` /
@@ -8,6 +8,15 @@ issue #21 の acceptance:
 * time-independent ``H`` に対して 1 step の local truncation error が
   ``O(dt^3)`` (dt 半減で err 比 ~ 8).
 * 全因子が unitary なので ``‖psi_new‖ = ‖psi‖`` が ``rel < 1e-13`` で保たれる.
+
+issue #22 (Suzuki S_4) の acceptance:
+
+* ``_rust.trotter_suzuki4_step_py`` (Rust 経路) と
+  ``_python_trotter_suzuki4_step`` (純 NumPy 経路) が ``rel < 1e-13`` で一致.
+* time-independent ``H`` に対して 1 step LTE が ``O(dt^5)`` (dt 半減で
+  err 比 ~ 32).
+* 全因子が unitary (5 サブステップの合成も unitary) で ``rel < 1e-13``.
+* 同じ ``n_steps`` で Strang より精度が高い.
 
 Rust 拡張が未ビルドの環境では Python リファレンス単独の性質テスト
 (unitarity, dt=0 で恒等, LTE) のみを検証する.
@@ -18,7 +27,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kryanneal.krylov import _python_trotter_step
+from kryanneal.krylov import (
+    _SUZUKI4_COEFFS,
+    _SUZUKI4_MID_OFFSETS,
+    _python_trotter_step,
+    _python_trotter_suzuki4_step,
+)
 
 try:
     from kryanneal import _rust as _rust_mod
@@ -121,9 +135,9 @@ def test_python_trotter_zero_h_x_reduces_to_diag_propagator() -> None:
     rng = np.random.default_rng(2027)
     h_x = np.zeros(n, dtype=np.float64)
     h_p_diag = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
-    psi = (rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)).astype(
-        np.complex128
-    )
+    psi = (
+        rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)
+    ).astype(np.complex128)
     psi = psi / np.linalg.norm(psi)
     a_mid = 0.7
     b_mid = -0.3
@@ -163,9 +177,9 @@ def test_python_trotter_time_independent_lte_order_3() -> None:
     rng = np.random.default_rng(2029)
     h_x = rng.uniform(-1.0, 1.0, size=n).astype(np.float64)
     h_p_diag = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
-    psi = (rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)).astype(
-        np.complex128
-    )
+    psi = (
+        rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)
+    ).astype(np.complex128)
     psi = psi / np.linalg.norm(psi)
     a_mid = 0.7
     b_mid = 0.9
@@ -175,7 +189,11 @@ def test_python_trotter_time_independent_lte_order_3() -> None:
     for dt in dts:
         expected = _dense_exp_minus_i_dt_h(h_x, h_p_diag, a_mid, b_mid, dt) @ psi
         actual = _python_trotter_step(psi, h_x, h_p_diag, a_mid, b_mid, dt)
-        errs.append(float(np.linalg.norm(actual - expected) / max(np.linalg.norm(expected), 1.0)))
+        errs.append(
+            float(
+                np.linalg.norm(actual - expected) / max(np.linalg.norm(expected), 1.0)
+            )
+        )
 
     # 単調減少 (符号 / 式の bug 粗検出).
     for i in range(1, len(errs)):
@@ -188,3 +206,204 @@ def test_python_trotter_time_independent_lte_order_3() -> None:
         assert 5.0 <= ratio <= 11.0, (
             f"dt {dts[i - 1]} -> {dts[i]}: ratio = {ratio} (expected ~8), errs = {errs}"
         )
+
+
+# ----------------------------------------------------------------------
+# Suzuki S_4 ケース (issue #22)
+# ----------------------------------------------------------------------
+
+
+def _constant_ab_lists(a: float, b: float) -> tuple[np.ndarray, np.ndarray]:
+    """time-independent H 用の長さ 5 サブステップ ``(a_list, b_list)``."""
+    return np.full(5, a, dtype=np.float64), np.full(5, b, dtype=np.float64)
+
+
+def test_suzuki4_coeffs_consistency() -> None:
+    """係数 ``[p, p, 1-4p, p, p]`` の和が 1, 中点 offset が ``t+dt/2`` を
+    中心に対称, p の解析値 (``1 / (4 - 4^{1/3})``) と一致.
+    """
+    p_expected = 1.0 / (4.0 - 4.0 ** (1.0 / 3.0))
+    assert abs(_SUZUKI4_COEFFS[0] - p_expected) < 1e-15
+    assert abs(sum(_SUZUKI4_COEFFS) - 1.0) < 1e-15
+
+    offsets = _SUZUKI4_MID_OFFSETS
+    # offsets[0] + offsets[4] = 1, offsets[1] + offsets[3] = 1, offsets[2] = 0.5
+    assert abs(offsets[0] + offsets[4] - 1.0) < 1e-15
+    assert abs(offsets[1] + offsets[3] - 1.0) < 1e-15
+    assert abs(offsets[2] - 0.5) < 1e-15
+
+
+@pytest.mark.skipif(not _HAS_RUST, reason="kryanneal._rust extension not built")
+@pytest.mark.parametrize("n", [2, 3, 4, 5])
+@pytest.mark.parametrize("seed", [11, 137, 8675309])
+def test_python_trotter_suzuki4_matches_rust(n: int, seed: int) -> None:
+    """``_python_trotter_suzuki4_step`` ↔ ``_rust.trotter_suzuki4_step_py``
+    が ``rel < 1e-13``. 5 sub-step の ``(a, b)`` をランダムに振り (実 driver
+    の中点フリーズが各 sub-step で異なる値になりうる状況を模擬), 同一入力で
+    両経路を比較する.
+    """
+    assert _rust_mod is not None
+    h_x, h_p_diag, psi, _, _ = _random_setup(n, seed)
+    rng = np.random.default_rng(seed + 1)
+    a_list = rng.uniform(-1.0, 1.0, size=5).astype(np.float64)
+    b_list = rng.uniform(-1.0, 1.0, size=5).astype(np.float64)
+    dt = 0.17
+
+    psi_py = _python_trotter_suzuki4_step(psi, h_x, h_p_diag, a_list, b_list, dt)
+    psi_rust = _rust_mod.trotter_suzuki4_step_py(
+        psi, h_x, h_p_diag, a_list, b_list, dt, n
+    )
+    rel = np.linalg.norm(psi_py - psi_rust) / max(np.linalg.norm(psi_rust), 1.0)
+    assert rel < 1e-13, f"suzuki4: n={n}, seed={seed}: rel = {rel}"
+
+
+def test_python_trotter_suzuki4_preserves_norm() -> None:
+    """5 sub-step の合成も unitary なので ``‖psi_new‖ = ‖psi‖`` が
+    ``rel < 1e-13`` で保たれる.
+    """
+    for n in [2, 3, 4]:
+        h_x, h_p_diag, psi, a_mid, b_mid = _random_setup(n, seed=3025 + n)
+        a_list, b_list = _constant_ab_lists(a_mid, b_mid)
+        for dt in [0.05, 0.3, 1.2]:
+            psi_new = _python_trotter_suzuki4_step(
+                psi, h_x, h_p_diag, a_list, b_list, dt
+            )
+            rel = abs(np.linalg.norm(psi_new) - np.linalg.norm(psi)) / max(
+                np.linalg.norm(psi), 1.0
+            )
+            assert rel < 1e-13, (
+                f"suzuki4: n={n}, dt={dt}: unitarity violated, rel = {rel}"
+            )
+
+
+def test_python_trotter_suzuki4_dt_zero_is_identity() -> None:
+    """``dt = 0`` で 5 sub-step すべてが identity, 合成も identity."""
+    n = 4
+    h_x, h_p_diag, psi, a_mid, b_mid = _random_setup(n, seed=3026)
+    a_list, b_list = _constant_ab_lists(a_mid, b_mid)
+    psi_new = _python_trotter_suzuki4_step(psi, h_x, h_p_diag, a_list, b_list, 0.0)
+    rel = np.linalg.norm(psi_new - psi) / max(np.linalg.norm(psi), 1.0)
+    assert rel < 1e-13, f"suzuki4: dt=0 identity violated: rel = {rel}"
+
+
+def test_python_trotter_suzuki4_zero_h_x_reduces_to_diag_propagator() -> None:
+    """``h_x = 0`` のとき S_4 は phase_p の合成のみ. 5 sub-step の phase が
+    連結して合計 ``dt`` の対角プロパゲータ ``exp(-i·b·diag·dt)`` と数値的に
+    一致する (``rel < 1e-13``).
+    """
+    n = 4
+    dim = 1 << n
+    rng = np.random.default_rng(3027)
+    h_x = np.zeros(n, dtype=np.float64)
+    h_p_diag = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
+    psi = (
+        rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)
+    ).astype(np.complex128)
+    psi = psi / np.linalg.norm(psi)
+    a_mid = 0.7
+    b_mid = -0.3
+    dt = 0.4
+    a_list, b_list = _constant_ab_lists(a_mid, b_mid)
+
+    psi_new = _python_trotter_suzuki4_step(psi, h_x, h_p_diag, a_list, b_list, dt)
+    expected = np.exp(-1j * b_mid * h_p_diag * dt) * psi
+    rel = np.linalg.norm(psi_new - expected) / max(np.linalg.norm(expected), 1.0)
+    assert rel < 1e-13, f"suzuki4: zero h_x rel = {rel}"
+
+
+def test_python_trotter_suzuki4_inverse_dt_negate() -> None:
+    """``S_4(dt) ∘ S_4(-dt) ≈ I``. Suzuki S_4 は time-symmetric なので
+    同じ sub-step リストを使って ``dt`` の符号だけ反転すれば inverse になる.
+    数値誤差は accumulated FP rounding のみ (``rel < 1e-12``).
+    """
+    n = 4
+    h_x, h_p_diag, psi, a_mid, b_mid = _random_setup(n, seed=3028)
+    a_list, b_list = _constant_ab_lists(a_mid, b_mid)
+    for dt in [0.05, 0.3, 1.5]:
+        psi_fwd = _python_trotter_suzuki4_step(psi, h_x, h_p_diag, a_list, b_list, dt)
+        psi_back = _python_trotter_suzuki4_step(
+            psi_fwd, h_x, h_p_diag, a_list, b_list, -dt
+        )
+        rel = np.linalg.norm(psi_back - psi) / max(np.linalg.norm(psi), 1.0)
+        assert rel < 1e-12, f"suzuki4: dt={dt}: inverse rel = {rel}"
+
+
+def test_python_trotter_suzuki4_time_independent_lte_order_5() -> None:
+    """time-independent ``H`` に対する 1 step LTE が ``O(dt^5)``.
+
+    ``dt`` を半減するごとに ``err`` が ~ ``1/32`` に減衰する.
+    dts = [0.4, 0.2, 0.1] で計測し, 各窓の比率を ``[16, 64]`` で許容する.
+    """
+    n = 3
+    dim = 1 << n
+    rng = np.random.default_rng(3029)
+    h_x = rng.uniform(-1.0, 1.0, size=n).astype(np.float64)
+    h_p_diag = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
+    psi = (
+        rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)
+    ).astype(np.complex128)
+    psi = psi / np.linalg.norm(psi)
+    a_mid = 0.7
+    b_mid = 0.9
+    a_list, b_list = _constant_ab_lists(a_mid, b_mid)
+
+    dts = [0.4, 0.2, 0.1]
+    errs: list[float] = []
+    for dt in dts:
+        expected = _dense_exp_minus_i_dt_h(h_x, h_p_diag, a_mid, b_mid, dt) @ psi
+        actual = _python_trotter_suzuki4_step(psi, h_x, h_p_diag, a_list, b_list, dt)
+        errs.append(
+            float(
+                np.linalg.norm(actual - expected) / max(np.linalg.norm(expected), 1.0)
+            )
+        )
+
+    for i in range(1, len(errs)):
+        assert errs[i] < errs[i - 1], (
+            f"suzuki4 errs not monotonically decreasing: {errs}"
+        )
+
+    for i in range(1, len(dts)):
+        ratio = errs[i - 1] / errs[i]
+        assert 16.0 <= ratio <= 64.0, (
+            f"suzuki4 dt {dts[i - 1]} -> {dts[i]}: ratio = {ratio} (expected ~32), errs = {errs}"
+        )
+
+
+def test_python_trotter_suzuki4_more_accurate_than_strang() -> None:
+    """同じ ``dt`` (= 1 step) で Suzuki S_4 が Strang より厳密に精度が高い.
+    LTE オーダ違い (dt^5 vs dt^3) なので dt = 0.2 程度で必ず差が出る.
+    ratio 下限は保守的に 5× で設定し, Suzuki 係数の数値オーダ依存性に
+    余裕を持たせる.
+    """
+    n = 3
+    dim = 1 << n
+    rng = np.random.default_rng(3030)
+    h_x = rng.uniform(-1.0, 1.0, size=n).astype(np.float64)
+    h_p_diag = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
+    psi = (
+        rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)
+    ).astype(np.complex128)
+    psi = psi / np.linalg.norm(psi)
+    a_mid = 0.7
+    b_mid = 0.9
+    a_list, b_list = _constant_ab_lists(a_mid, b_mid)
+    dt = 0.2
+
+    expected = _dense_exp_minus_i_dt_h(h_x, h_p_diag, a_mid, b_mid, dt) @ psi
+
+    psi_strang = _python_trotter_step(psi, h_x, h_p_diag, a_mid, b_mid, dt)
+    err_strang = float(
+        np.linalg.norm(psi_strang - expected) / max(np.linalg.norm(expected), 1.0)
+    )
+
+    psi_s4 = _python_trotter_suzuki4_step(psi, h_x, h_p_diag, a_list, b_list, dt)
+    err_s4 = float(
+        np.linalg.norm(psi_s4 - expected) / max(np.linalg.norm(expected), 1.0)
+    )
+
+    ratio = err_strang / err_s4
+    assert ratio > 5.0, (
+        f"expected S_4 to be more accurate than Strang, but err_strang / err_s4 = {ratio} "
+        f"(err_strang = {err_strang}, err_s4 = {err_s4})"
+    )

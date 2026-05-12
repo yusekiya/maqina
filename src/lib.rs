@@ -56,6 +56,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(krylov::lanczos_propagate_py, m)?)?;
     m.add_function(wrap_pyfunction!(cfm4::m2_midpoint_step_py, m)?)?;
     m.add_function(wrap_pyfunction!(trotter::trotter_step_py, m)?)?;
+    m.add_function(wrap_pyfunction!(trotter::trotter_suzuki4_step_py, m)?)?;
     // TODO(phase3): CFM4:2
     // m.add_function(wrap_pyfunction!(cfm4::cfm4_step, m)?)?;
     // TODO(phase4): adaptive estimators

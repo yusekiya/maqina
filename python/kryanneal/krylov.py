@@ -59,7 +59,31 @@ _rust_mod: ModuleType | None = _try_import_rust()
 __all__ = [
     "evolve_schedule_m2",
     "evolve_schedule_trotter",
+    "evolve_schedule_trotter_suzuki4",
 ]
+
+
+# Trotter-Suzuki S_4 のサブステップ係数係数 `p = 1 / (4 - 4^{1/3})`.
+# 5 サブステップの係数は `[p, p, 1 - 4p, p, p]` で和は `1`. 中央 sub-step
+# は `1 - 4p ≈ -0.658` で **逆向き**. 詳細は `docs/design.md` §5.3
+# (Trotter-Suzuki S_4 サブセクション) と `src/trotter.rs` 冒頭 docstring.
+_SUZUKI4_P: float = 1.0 / (4.0 - 4.0 ** (1.0 / 3.0))
+_SUZUKI4_COEFFS: tuple[float, float, float, float, float] = (
+    _SUZUKI4_P,
+    _SUZUKI4_P,
+    1.0 - 4.0 * _SUZUKI4_P,
+    _SUZUKI4_P,
+    _SUZUKI4_P,
+)
+# 各 sub-step の中点 offset (sub-step `k` を `[t + start_k·dt, t + end_k·dt]`
+# としたときの `(start_k + end_k) / 2`). `t + dt/2` を中心に対称.
+_SUZUKI4_MID_OFFSETS: tuple[float, float, float, float, float] = (
+    0.5 * _SUZUKI4_P,
+    1.5 * _SUZUKI4_P,
+    0.5,
+    1.0 - 1.5 * _SUZUKI4_P,
+    1.0 - 0.5 * _SUZUKI4_P,
+)
 
 
 def _python_lanczos_propagate(
@@ -522,4 +546,174 @@ def evolve_schedule_trotter(
             )
 
     n_matvec = int(n_steps) * (n + 1)
+    return psi, n_matvec
+
+
+def _python_trotter_suzuki4_step(
+    psi: np.ndarray,
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    a_t_list: np.ndarray,
+    b_t_list: np.ndarray,
+    dt: float,
+) -> np.ndarray:
+    """4 次 Suzuki Trotter 1 step の Python リファレンス実装.
+
+    Trotter-Suzuki S_4 公式
+
+    .. code-block:: text
+
+        S_4(dt) = S_2(p·dt) · S_2(p·dt) · S_2((1 - 4p)·dt) · S_2(p·dt) · S_2(p·dt)
+        p = 1 / (4 - 4^{1/3}) ≈ 0.41449
+
+    で Strang S_2 (``_python_trotter_step``) を 5 回適用する. 各 sub-step の
+    ``(a_t, b_t)`` は呼出側で **中点 offset** ``[p/2, 3p/2, 1/2, 1 - 3p/2,
+    1 - p/2]`` (``t + dt/2`` を中心に対称) で評価して長さ 5 の配列として
+    渡す前提. Rust 側 ``trotter_suzuki4_step`` と ``rel < 1e-13`` で一致する
+    のが契約 (``tests/test_trotter.py``).
+
+    全因子が unitary なので ``‖psi_new‖ = ‖psi‖`` が machine precision で
+    保たれる. LTE は ``O(dt^5)``.
+
+    Parameters
+    ----------
+    psi
+        shape ``(2**n,)`` complex128 の入力状態.
+    h_x
+        shape ``(n,)`` float64 のサイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64 の Z 基底 problem 対角.
+    a_t_list, b_t_list
+        shape ``(5,)`` float64. 各 sub-step の中点で評価された
+        ``A(s(·))`` / ``B(s(·))``.
+    dt
+        外側 1 step の時間刻み. 符号は任意 (``-dt`` で逆向き propagator).
+
+    Returns
+    -------
+    np.ndarray
+        shape ``(2**n,)`` complex128 の新状態.
+
+    Raises
+    ------
+    ValueError
+        ``a_t_list`` / ``b_t_list`` の長さが 5 でないとき, または
+        ``h_p_diag`` / ``psi`` の長さが ``2**len(h_x)`` と不整合のとき.
+    """
+    if a_t_list.shape != (5,):
+        raise ValueError(
+            f"a_t_list shape mismatch: expected (5,) for Suzuki S_4 sub-steps, got {a_t_list.shape}"
+        )
+    if b_t_list.shape != (5,):
+        raise ValueError(
+            f"b_t_list shape mismatch: expected (5,) for Suzuki S_4 sub-steps, got {b_t_list.shape}"
+        )
+    out = psi
+    for k in range(5):
+        out = _python_trotter_step(
+            out,
+            h_x,
+            h_p_diag,
+            float(a_t_list[k]),
+            float(b_t_list[k]),
+            _SUZUKI4_COEFFS[k] * float(dt),
+        )
+    return out
+
+
+def evolve_schedule_trotter_suzuki4(
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    schedule: Schedule,
+    psi0: np.ndarray,
+    t0: float,
+    t1: float,
+    n_steps: int,
+) -> tuple[np.ndarray, int]:
+    """固定 dt = (t1 - t0) / n_steps の Suzuki S_4 Trotter ドライバ.
+
+    各 step で 5 sub-step の中点 ``t + offset_k · dt`` (``offset_k ∈ [p/2,
+    3p/2, 1/2, 1 - 3p/2, 1 - p/2]``) で ``schedule.coeffs_at`` を評価し,
+    ``trotter_suzuki4_step`` (Rust) または ``_python_trotter_suzuki4_step``
+    (silent fallback) を呼ぶ.
+
+    Lanczos を介さない operator splitting 経路の 4 次版. LTE は ``O(dt^5)``
+    で CFM4:2 と同じ局所オーダだが, per-step は ``5·(N + 1)·dim`` 要素アクセス
+    (Strang S_2 の 5 倍, M2 の Lanczos m=24 と比べて N の係数次第).
+    詳細は ``docs/design.md`` §5.3 (Trotter-Suzuki S_4 サブセクション).
+
+    Parameters
+    ----------
+    h_x
+        shape ``(n,)`` float64. サイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64. Z 基底 problem 対角.
+    schedule
+        ``Schedule`` インスタンス.
+    psi0
+        shape ``(2**n,)`` complex128. 初期状態 (L2-normalize 済みであること).
+    t0, t1
+        積分区間 ``[t0, t1]``. ``t1 > t0`` を要求.
+    n_steps
+        固定 step 数 (``n_steps >= 1``).
+
+    Returns
+    -------
+    psi_final : np.ndarray
+        shape ``(2**n,)`` complex128 の終端状態.
+    n_matvec : int
+        Trotter 経路は Lanczos を呼ばないため真の matvec カウント概念は
+        無いが, Strang ドライバとの整合のため
+        ``n_steps × 5 × (N + 1)`` (5 sub-step × ``phase pass 1 + bit-flip
+        pass N``) を返す. ``QuantumResult.n_matvec`` の解釈は
+        ``docs/design.md`` §4.4 (Trotter 注記) を参照.
+
+    Raises
+    ------
+    ValueError
+        ``n_steps < 1`` または ``t1 <= t0`` のとき.
+    """
+    if n_steps < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps!r}")
+    if not (t1 > t0):
+        raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
+
+    dt = (float(t1) - float(t0)) / int(n_steps)
+    psi = np.ascontiguousarray(psi0, dtype=np.complex128)
+    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
+    h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
+    n = int(h_x_arr.shape[0])
+    offsets = np.asarray(_SUZUKI4_MID_OFFSETS, dtype=np.float64)
+
+    rust_mod = _rust_mod
+    for k in range(n_steps):
+        t_step_start = t0 + k * dt
+        a_list = np.empty(5, dtype=np.float64)
+        b_list = np.empty(5, dtype=np.float64)
+        for j in range(5):
+            t_mid = t_step_start + float(offsets[j]) * dt
+            a_mid, b_mid = schedule.coeffs_at(t_mid)
+            a_list[j] = a_mid
+            b_list[j] = b_mid
+        if rust_mod is not None:
+            psi = rust_mod.trotter_suzuki4_step_py(
+                psi,
+                h_x_arr,
+                h_p_diag_arr,
+                a_list,
+                b_list,
+                dt,
+                n,
+            )
+        else:
+            psi = _python_trotter_suzuki4_step(
+                psi,
+                h_x_arr,
+                h_p_diag_arr,
+                a_list,
+                b_list,
+                dt,
+            )
+
+    n_matvec = int(n_steps) * 5 * (n + 1)
     return psi, n_matvec

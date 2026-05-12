@@ -1,12 +1,14 @@
 """``QuantumAnnealer.run`` の end-to-end smoke test (Phase 1 / Phase 2).
 
-issue #8 / #21 の acceptance:
+issue #8 / #21 / #22 の acceptance:
 
 * ``QuantumAnnealer(prob, sched).run(psi0, 0, T, method="m2", n_steps=200)``
   の戻り値が ``QuantumResult`` で, 線形 schedule で十分長い ``T`` を取ると
   基底状態到達確率がしきい値以上.
 * ``method="trotter"`` 経路 (Phase 2 C3) でも同じ smoke を満たし,
   ``n_matvec = n_steps * (N + 1)`` の見積もりが返る.
+* ``method="trotter_suzuki4"`` 経路 (Phase 2 C4) でも同じ smoke を満たし,
+  ``n_matvec = n_steps * 5 * (N + 1)`` の見積もりが返る.
 * 公開 API (psi0 検証, method/save_tlist の NotImplementedError) が
   仕様どおりに raise する.
 """
@@ -132,8 +134,42 @@ def test_run_trotter_smoke_and_ground_state() -> None:
     assert p_gs > 0.95, f"ground state probability too low (trotter): {p_gs}"
 
 
+def test_run_trotter_suzuki4_smoke_and_ground_state() -> None:
+    """``method="trotter_suzuki4"`` の smoke + GS 到達確率テスト (Phase 2 C4).
+
+    n=4, T=10 linear schedule の強磁性 chain (縮退基底 ``|0000⟩`` /
+    ``|1111⟩``) で ``n_steps=200`` を取り, 終端波動関数の基底状態
+    合計確率が 0.95 を超えることを確認する. Suzuki S_4 は O(dt^5) LTE
+    なので Strang よりさらに精度が高い (M2/Strang と同じく十分到達).
+
+    あわせて ``n_matvec = n_steps × 5 × (N + 1)`` の Phase 2 C4 規約
+    (5 sub-step × Strang per-step コスト) を検証する.
+    """
+    n = 4
+    prob = IsingProblem(
+        n=n,
+        H_p_diag=_ferromagnetic_chain_h_p_diag(n),
+        h_x=np.ones(n, dtype=np.float64),
+    )
+    sched = Schedule.linear(T=10.0)
+    psi0 = uniform_superposition(n)
+    ann = QuantumAnnealer(prob, sched)
+    res = ann.run(psi0, 0.0, sched.T, method="trotter_suzuki4", n_steps=200)
+
+    assert isinstance(res, QuantumResult)
+    assert res.psi_final.shape == (1 << n,)
+    assert res.psi_final.dtype == np.complex128
+    assert res.n_steps == 200
+    # Suzuki S_4 規約: n_matvec = n_steps × 5 × (N + 1).
+    assert res.n_matvec == 200 * 5 * (n + 1)
+    assert abs(np.linalg.norm(res.psi_final) - 1.0) < 1e-10
+
+    p_gs = _ground_state_probability(res.psi_final, prob.H_p_diag)
+    assert p_gs > 0.95, f"ground state probability too low (trotter_suzuki4): {p_gs}"
+
+
 def test_run_rejects_unsupported_method() -> None:
-    """``method`` が ``"m2"`` / ``"trotter"`` 以外なら ``NotImplementedError``."""
+    """``method`` が ``"m2"`` / ``"trotter"`` / ``"trotter_suzuki4"`` 以外なら ``NotImplementedError``."""
     n = 3
     prob = IsingProblem(
         n=n,
