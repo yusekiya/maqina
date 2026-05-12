@@ -12,6 +12,12 @@ Phase 1 実装範囲
   リファレンス.
 * ``_python_m2_step``: 純 NumPy の M2 中点則 1 step リファレンス.
 
+Phase 2 で Trotter (Strang 2 次) 経路を追加:
+
+* ``evolve_schedule_trotter``: 固定 dt の Strang Trotter ドライバ.
+* ``_python_trotter_step``: 純 NumPy の Strang 1 step リファレンス
+  (Rust 拡張 ``_rust.trotter_step_py`` と ``rel < 1e-13`` で一致する契約).
+
 Phase 3 で CFM4:2, Phase 4 で adaptive driver
 (``evolve_schedule_adaptive_m2`` / ``evolve_schedule_adaptive_richardson``)
 を追加する.
@@ -52,6 +58,7 @@ _rust_mod: ModuleType | None = _try_import_rust()
 
 __all__ = [
     "evolve_schedule_m2",
+    "evolve_schedule_trotter",
 ]
 
 
@@ -333,4 +340,186 @@ def evolve_schedule_m2(
             )
 
     n_matvec = int(n_steps) * int(m)
+    return psi, n_matvec
+
+
+def _python_trotter_step(
+    psi: np.ndarray,
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    a_mid: float,
+    b_mid: float,
+    dt: float,
+) -> np.ndarray:
+    """Strang 2 次 Trotter 1 step の Python リファレンス実装.
+
+    Rust 側 ``trotter_step`` と同一アルゴリズム (``src/trotter.rs``):
+
+    .. code-block:: text
+
+        U(dt) ≈ phase_p(dt/2) · (Π_i R_i(dt)) · phase_p(dt/2)
+
+    各因子は
+
+    * ``phase_p(dt/2)``: 各 ``k`` に ``exp(-i · b_mid · h_p_diag[k] · dt/2)`` を乗算.
+    * ``R_i(dt)``: ``θ_i = +a_mid · h_x_i · dt`` の 2×2 ユニタリ
+      ``[cos θ, i·sin θ; i·sin θ, cos θ]`` を bit ``i`` 軸に in-place 適用.
+      符号 convention は ``src/trotter.rs`` 冒頭 docstring 参照 (``H_drv =
+      -Σ h_x_i X_i`` の負号は ``θ`` 側に巻き取らず ``apply_h_kryanneal``
+      の ``coeff = -a_t · h_x_i`` と統一).
+
+    全因子が unitary なので ``‖psi_new‖ = ‖psi‖`` が machine precision で
+    保たれる. ``(a_mid, b_mid)`` は呼出側で ``schedule.coeffs_at(t + dt/2)``
+    を評価して渡す前提 (中点採取則; Strang 2 次の対称性を保つために必須).
+
+    Parameters
+    ----------
+    psi
+        shape ``(2**n,)`` complex128 の入力状態.
+    h_x
+        shape ``(n,)`` float64 のサイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64 の Z 基底 problem 対角.
+    a_mid, b_mid
+        中点でフリーズ済の ``A(s(t+dt/2))``, ``B(s(t+dt/2))``.
+    dt
+        時刻刻み幅. 符号は任意 (``-dt`` で逆向きの propagator).
+
+    Returns
+    -------
+    np.ndarray
+        shape ``(2**n,)`` complex128 の新状態.
+
+    Raises
+    ------
+    ValueError
+        ``h_p_diag`` の長さが ``2**len(h_x)`` と一致しないとき.
+    """
+    n = int(h_x.shape[0])
+    dim = 1 << n
+    if h_p_diag.shape != (dim,):
+        raise ValueError(
+            f"h_p_diag shape mismatch: expected ({dim},), got {h_p_diag.shape}"
+        )
+    if psi.shape != (dim,):
+        raise ValueError(f"psi shape mismatch: expected ({dim},), got {psi.shape}")
+
+    half = 0.5 * float(dt)
+    # phase_p(dt/2): exp(-i · b_mid · h_p_diag · dt/2) を要素ごとに掛ける.
+    phase_half = np.exp(-1j * b_mid * h_p_diag.astype(np.float64, copy=False) * half)
+    out = phase_half * psi.astype(np.complex128, copy=True)
+
+    # Π_i R_i(dt): bit i 軸での 2×2 ユニタリ in-place 適用.
+    # k と k ^ (1 << i) のペアに対し
+    #   u = [[c, i·s], [i·s, c]],   c = cos θ_i, s = sin θ_i, θ_i = a_mid·h_x_i·dt
+    # を作用させる. 「bit i = 0 のインデックス集合」と
+    # 「bit i = 1 の対応インデックス集合」をペアにして一括計算.
+    idx = np.arange(dim, dtype=np.int64)
+    for i in range(n):
+        theta = float(a_mid) * float(h_x[i]) * float(dt)
+        c = np.cos(theta)
+        s = np.sin(theta)
+        mask = 1 << i
+        bit_zero = (idx & mask) == 0
+        idx0 = idx[bit_zero]
+        idx1 = idx0 ^ mask
+        a0 = out[idx0]
+        a1 = out[idx1]
+        out[idx0] = c * a0 + 1j * s * a1
+        out[idx1] = 1j * s * a0 + c * a1
+
+    # phase_p(dt/2) を再度掛ける.
+    out *= phase_half
+    return out
+
+
+def evolve_schedule_trotter(
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    schedule: Schedule,
+    psi0: np.ndarray,
+    t0: float,
+    t1: float,
+    n_steps: int,
+) -> tuple[np.ndarray, int]:
+    """固定 dt = (t1 - t0) / n_steps の Strang Trotter ドライバ.
+
+    各 step で ``schedule.coeffs_at(t + dt/2)`` を評価して
+    ``trotter_step`` を呼ぶ. Rust 拡張が import 済なら
+    ``_rust.trotter_step_py`` を, そうでなければ Python リファレンス
+    ``_python_trotter_step`` を使う (silent fallback).
+
+    Lanczos を介さず ``exp(-i·dt·H_drv) = Π_i R_i(dt)`` を閉形式で書く
+    operator splitting 経路. LTE は ``O(dt^3)`` で M2 と同じ局所オーダだが,
+    per-step コストは ``(N+1)·dim`` 要素アクセス (m=24 の Lanczos より軽い).
+    詳細は ``docs/design.md`` §5.3 の Trotter サブセクションを一次資料とする.
+
+    Parameters
+    ----------
+    h_x
+        shape ``(n,)`` float64. サイト依存横磁場振幅.
+    h_p_diag
+        shape ``(2**n,)`` float64. Z 基底 problem 対角.
+    schedule
+        ``Schedule`` インスタンス. ``coeffs_at(t)`` から
+        ``(A(s(t)), B(s(t)))`` を取り出す.
+    psi0
+        shape ``(2**n,)`` complex128. 初期状態 (L2-normalize 済みであること).
+    t0, t1
+        積分区間 ``[t0, t1]``. ``t1 > t0`` を要求.
+    n_steps
+        固定 step 数 (``n_steps >= 1``).
+
+    Returns
+    -------
+    psi_final : np.ndarray
+        shape ``(2**n,)`` complex128 の終端状態.
+    n_matvec : int
+        Trotter 経路は Lanczos を呼ばないため真の matvec カウント概念は
+        無いが, ``M2`` ドライバの ``n_steps × m`` と同様の「dim-walk
+        見積もり」として ``n_steps × (N + 1)`` (phase pass 1 + bit-flip
+        pass N の合計) を返す. ``QuantumResult.n_matvec`` の解釈は
+        ``docs/design.md`` §4.4 (Trotter 注記) を参照.
+
+    Raises
+    ------
+    ValueError
+        ``n_steps < 1`` または ``t1 <= t0`` のとき.
+    """
+    if n_steps < 1:
+        raise ValueError(f"n_steps must be >= 1, got {n_steps!r}")
+    if not (t1 > t0):
+        raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
+
+    dt = (float(t1) - float(t0)) / int(n_steps)
+    psi = np.ascontiguousarray(psi0, dtype=np.complex128)
+    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
+    h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
+    n = int(h_x_arr.shape[0])
+
+    rust_mod = _rust_mod
+    for k in range(n_steps):
+        t_mid = t0 + (k + 0.5) * dt
+        a_mid, b_mid = schedule.coeffs_at(t_mid)
+        if rust_mod is not None:
+            psi = rust_mod.trotter_step_py(
+                psi,
+                h_x_arr,
+                h_p_diag_arr,
+                a_mid,
+                b_mid,
+                dt,
+                n,
+            )
+        else:
+            psi = _python_trotter_step(
+                psi,
+                h_x_arr,
+                h_p_diag_arr,
+                a_mid,
+                b_mid,
+                dt,
+            )
+
+    n_matvec = int(n_steps) * (n + 1)
     return psi, n_matvec

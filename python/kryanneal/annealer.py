@@ -10,19 +10,21 @@
 Phase 1 では ``QuantumAnnealer`` のみ提供する (``AnnealingSimulator`` は
 Phase 5 で導入予定).
 
-Phase 1 仕様
-------------
-* ``method="m2"`` (固定 dt M2 中点則) のみサポート. それ以外は
-  ``NotImplementedError``.
+仕様 (Phase 1 + Phase 2)
+------------------------
+* サポート ``method``: ``"m2"`` (固定 dt M2 中点則, Phase 1), ``"trotter"``
+  (固定 dt Strang 2 次 Trotter, Phase 2). それ以外は ``NotImplementedError``.
 * ``save_tlist`` 引数は **API 互換性のために予約済み** だが本リリースでは
   ``None`` のみ受け付ける (非 ``None`` で ``NotImplementedError``).
   Phase 5 の ``QuantumResult.times`` / ``states`` 拡張と一緒に有効化する.
 * 観測量経路 (``observables=...``) も Phase 5 で追加予定. 現状は
   ``QuantumResult.observables_history = {}`` 固定.
 
-実装方針: ``kryanneal.krylov.evolve_schedule_m2`` (固定 dt M2 driver) を
-内部で呼ぶ薄いラッパ. 入力検証 (shape / dtype / L2-normalize) を本クラスで
-集中させ, krylov 層は数値計算に専念させる.
+実装方針: ``kryanneal.krylov.evolve_schedule_m2`` / ``evolve_schedule_trotter``
+(固定 dt driver) を内部で呼ぶ薄いラッパ. 入力検証 (shape / dtype /
+L2-normalize) を本クラスで集中させ, krylov 層は数値計算に専念させる.
+``m`` / ``krylov_tol`` は ``"m2"`` 経路でのみ意味を持ち, ``"trotter"`` 経路は
+Lanczos を使わないため両パラメータは無視される.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ from typing import Literal
 
 import numpy as np
 
-from kryanneal.krylov import evolve_schedule_m2
+from kryanneal.krylov import evolve_schedule_m2, evolve_schedule_trotter
 from kryanneal.problem import IsingProblem
 from kryanneal.result import QuantumResult
 from kryanneal.schedule import Schedule
@@ -88,7 +90,7 @@ class QuantumAnnealer:
         t0: float,
         t1: float,
         *,
-        method: Literal["m2"] = "m2",
+        method: Literal["m2", "trotter"] = "m2",
         n_steps: int,
         save_tlist: np.ndarray | None = None,
     ) -> QuantumResult:
@@ -102,7 +104,10 @@ class QuantumAnnealer:
         t0, t1
             積分区間. ``t1 > t0``.
         method
-            プロパゲータ. Phase 1 では ``"m2"`` のみ.
+            プロパゲータ. ``"m2"`` (固定 dt M2 中点則, Phase 1) または
+            ``"trotter"`` (固定 dt Strang 2 次 Trotter, Phase 2).
+            ``"trotter"`` 経路は Lanczos を呼ばないため ``m`` /
+            ``krylov_tol`` は無視される.
         n_steps
             固定 step 数 (``n_steps >= 1``). 等間隔 ``dt = (t1 - t0) /
             n_steps`` で進める.
@@ -114,7 +119,12 @@ class QuantumAnnealer:
         -------
         QuantumResult
             ``psi_final`` / ``n_steps`` / ``n_matvec`` を持つ result.
-            Phase 1 では ``t_history = None``, ``observables_history = {}``.
+            Phase 1 / Phase 2 では ``t_history = None``,
+            ``observables_history = {}``. ``n_matvec`` は経路ごとに以下:
+
+            * ``"m2"``: ``n_steps × m`` (Lanczos の matvec 見積もり).
+            * ``"trotter"``: ``n_steps × (N + 1)`` (phase pass 1 + bit-flip
+              pass N の dim-walk 見積もり; ``docs/design.md`` §4.4 参照).
 
         Raises
         ------
@@ -122,30 +132,41 @@ class QuantumAnnealer:
             入力検証失敗 (``psi0`` の shape / dtype / 非正規化, ``n_steps <
             1``, ``t1 <= t0``).
         NotImplementedError
-            ``method`` が ``"m2"`` 以外, または ``save_tlist`` が ``None``
-            でない場合.
+            ``method`` が ``"m2"`` / ``"trotter"`` 以外, または ``save_tlist``
+            が ``None`` でない場合.
         """
-        if method != "m2":
+        if method not in ("m2", "trotter"):
             raise NotImplementedError(
-                f"method={method!r} is not supported in Phase 1; only 'm2' is available."
+                f"method={method!r} is not supported; only 'm2' and 'trotter' are available."
             )
         if save_tlist is not None:
             raise NotImplementedError(
-                "save_tlist is reserved for Phase 5; pass None in Phase 1."
+                "save_tlist is reserved for Phase 5; pass None in Phase 1/Phase 2."
             )
 
         psi0_arr = self._validate_psi0(psi0)
-        psi_final, n_matvec = evolve_schedule_m2(
-            h_x=self.problem.h_x,
-            h_p_diag=self.problem.H_p_diag,
-            schedule=self.schedule,
-            psi0=psi0_arr,
-            t0=t0,
-            t1=t1,
-            n_steps=n_steps,
-            m=self.m,
-            krylov_tol=self.krylov_tol,
-        )
+        if method == "m2":
+            psi_final, n_matvec = evolve_schedule_m2(
+                h_x=self.problem.h_x,
+                h_p_diag=self.problem.H_p_diag,
+                schedule=self.schedule,
+                psi0=psi0_arr,
+                t0=t0,
+                t1=t1,
+                n_steps=n_steps,
+                m=self.m,
+                krylov_tol=self.krylov_tol,
+            )
+        else:  # method == "trotter"
+            psi_final, n_matvec = evolve_schedule_trotter(
+                h_x=self.problem.h_x,
+                h_p_diag=self.problem.H_p_diag,
+                schedule=self.schedule,
+                psi0=psi0_arr,
+                t0=t0,
+                t1=t1,
+                n_steps=n_steps,
+            )
         return QuantumResult(
             psi_final=psi_final,
             t_history=None,

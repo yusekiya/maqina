@@ -1,8 +1,13 @@
 """QuTiP ``sesolve`` を高精度 ODE 参照とした end-to-end fidelity テスト.
 
-issue #8 acceptance: 小規模 (n=4) で random ``H_p_diag`` / ``h_x`` /
-linear schedule に対し, ``QuantumAnnealer.run(method="m2", n_steps=500)`` と
-QuTiP ``sesolve`` の終端状態 fidelity が ``> 1 - 1e-6`` を満たす.
+issue #8 / #21 acceptance: 小規模 (n=4) で random ``H_p_diag`` / ``h_x``
+/ linear schedule に対し, ``QuantumAnnealer.run`` 各 method と QuTiP
+``sesolve`` の終端状態 fidelity を以下のしきい値で要求する:
+
+* ``method="m2"`` (n_steps=500): fidelity ``> 1 - 1e-6``.
+* ``method="trotter"`` (n_steps=500): fidelity ``> 1 - 1e-4``.
+  Strang 2 次は M2 と同じ ``O(dt^3)`` LTE オーダだが, 係数 / 中点採取の
+  対称性誤差で ``1e-6`` までは届かないので ``1e-4`` 設定 (issue #21).
 
 QuTiP は dev 依存のみで本番 wheel には入れない契約 (``docs/design.md``
 §8). 拡張未ビルド or QuTiP 未 install の環境では ``pytest.importorskip``
@@ -84,3 +89,39 @@ def test_quantum_annealer_matches_qutip_sesolve() -> None:
 
     fid = _fidelity(res.psi_final, psi_qutip)
     assert fid > 1 - 1e-6, f"fidelity too low: {fid} (1 - fid = {1 - fid})"
+
+
+def test_quantum_annealer_trotter_matches_qutip_sesolve() -> None:
+    """``method="trotter"`` で QuTiP との fidelity ``> 1 - 1e-4`` (Phase 2 C3).
+
+    M2 と同じ ``n=4`` random H / linear schedule / ``n_steps=500`` の
+    設定で Strang 2 次 Trotter を走らせ, QuTiP との fidelity しきい値を
+    issue #21 の規約に従って ``1 - 1e-4`` に設定する.
+    """
+    n = 4
+    dim = 1 << n
+    T = 5.0
+    rng = np.random.default_rng(20251112)
+
+    h_x = rng.uniform(0.5, 1.5, size=n).astype(np.float64)
+    h_p_diag = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
+
+    prob = IsingProblem(n=n, H_p_diag=h_p_diag, h_x=h_x)
+    sched = Schedule.linear(T=T)
+    psi0 = uniform_superposition(n)
+
+    ann = QuantumAnnealer(prob, sched)
+    res = ann.run(psi0, 0.0, T, method="trotter", n_steps=500)
+
+    h_t = _build_qutip_hamiltonian(h_x, h_p_diag, T)
+    psi0_q = qutip.Qobj(psi0.reshape(-1, 1))
+    sol = qutip.sesolve(
+        h_t,
+        psi0_q,
+        np.array([0.0, T]),
+        options={"atol": 1e-12, "rtol": 1e-10, "nsteps": 100000},
+    )
+    psi_qutip = sol.states[-1].full().ravel()
+
+    fid = _fidelity(res.psi_final, psi_qutip)
+    assert fid > 1 - 1e-4, f"fidelity too low (trotter): {fid} (1 - fid = {1 - fid})"

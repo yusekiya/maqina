@@ -13,24 +13,26 @@
 Phase 1 では ``QuantumAnnealer`` のみ提供する (``AnnealingSimulator`` は
 Phase 5 で導入予定).
 
-Phase 1 仕様
-------------
-* ``method="m2"`` (固定 dt M2 中点則) のみサポート. それ以外は
-  ``NotImplementedError``.
+仕様 (Phase 1 + Phase 2)
+------------------------
+* サポート ``method``: ``"m2"`` (固定 dt M2 中点則, Phase 1), ``"trotter"``
+  (固定 dt Strang 2 次 Trotter, Phase 2). それ以外は ``NotImplementedError``.
 * ``save_tlist`` 引数は **API 互換性のために予約済み** だが本リリースでは
   ``None`` のみ受け付ける (非 ``None`` で ``NotImplementedError``).
   Phase 5 の ``QuantumResult.times`` / ``states`` 拡張と一緒に有効化する.
 * 観測量経路 (``observables=...``) も Phase 5 で追加予定. 現状は
   ``QuantumResult.observables_history = {}`` 固定.
 
-実装方針: ``kryanneal.krylov.evolve_schedule_m2`` (固定 dt M2 driver) を
-内部で呼ぶ薄いラッパ. 入力検証 (shape / dtype / L2-normalize) を本クラスで
-集中させ, krylov 層は数値計算に専念させる.
+実装方針: ``kryanneal.krylov.evolve_schedule_m2`` / ``evolve_schedule_trotter``
+(固定 dt driver) を内部で呼ぶ薄いラッパ. 入力検証 (shape / dtype /
+L2-normalize) を本クラスで集中させ, krylov 層は数値計算に専念させる.
+``m`` / ``krylov_tol`` は ``"m2"`` 経路でのみ意味を持ち, ``"trotter"`` 経路は
+Lanczos を使わないため両パラメータは無視される.
 """
 from __future__ import annotations as annotations
 from typing import Literal as Literal
 import numpy as np
-from kryanneal.krylov import evolve_schedule_m2 as evolve_schedule_m2
+from kryanneal.krylov import evolve_schedule_m2 as evolve_schedule_m2, evolve_schedule_trotter as evolve_schedule_trotter
 from kryanneal.problem import IsingProblem as IsingProblem
 from kryanneal.result import QuantumResult as QuantumResult
 from kryanneal.schedule import Schedule as Schedule
@@ -66,7 +68,7 @@ class QuantumAnnealer:
     def __init__(self, problem: IsingProblem, schedule: Schedule, *, m: int=24, krylov_tol: float=1e-12) -> None:
         ...
 
-    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2']='m2', n_steps: int, save_tlist: np.ndarray | None=None) -> QuantumResult:
+    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter']='m2', n_steps: int, save_tlist: np.ndarray | None=None) -> QuantumResult:
         """``[t0, t1]`` 区間で時間発展を実行し ``QuantumResult`` を返す.
 
         Parameters
@@ -77,7 +79,10 @@ class QuantumAnnealer:
         t0, t1
             積分区間. ``t1 > t0``.
         method
-            プロパゲータ. Phase 1 では ``"m2"`` のみ.
+            プロパゲータ. ``"m2"`` (固定 dt M2 中点則, Phase 1) または
+            ``"trotter"`` (固定 dt Strang 2 次 Trotter, Phase 2).
+            ``"trotter"`` 経路は Lanczos を呼ばないため ``m`` /
+            ``krylov_tol`` は無視される.
         n_steps
             固定 step 数 (``n_steps >= 1``). 等間隔 ``dt = (t1 - t0) /
             n_steps`` で進める.
@@ -89,7 +94,12 @@ class QuantumAnnealer:
         -------
         QuantumResult
             ``psi_final`` / ``n_steps`` / ``n_matvec`` を持つ result.
-            Phase 1 では ``t_history = None``, ``observables_history = {}``.
+            Phase 1 / Phase 2 では ``t_history = None``,
+            ``observables_history = {}``. ``n_matvec`` は経路ごとに以下:
+
+            * ``"m2"``: ``n_steps × m`` (Lanczos の matvec 見積もり).
+            * ``"trotter"``: ``n_steps × (N + 1)`` (phase pass 1 + bit-flip
+              pass N の dim-walk 見積もり; ``docs/design.md`` §4.4 参照).
 
         Raises
         ------
@@ -97,7 +107,7 @@ class QuantumAnnealer:
             入力検証失敗 (``psi0`` の shape / dtype / 非正規化, ``n_steps <
             1``, ``t1 <= t0``).
         NotImplementedError
-            ``method`` が ``"m2"`` 以外, または ``save_tlist`` が ``None``
-            でない場合.
+            ``method`` が ``"m2"`` / ``"trotter"`` 以外, または ``save_tlist``
+            が ``None`` でない場合.
         """
         ...

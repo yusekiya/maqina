@@ -422,9 +422,13 @@ class QuantumAnnealer:
 + schedule に対して **異なる初期状態 / 異なる積分区間** で `run` を繰り返し
 呼べるようにするため (`QuantumAnnealer` 自身は問題定義のキャッシュ役).
 
-Phase 1 では `method="m2"` のみサポート (それ以外は `NotImplementedError`).
+Phase 1 では `method="m2"` のみサポート, Phase 2 で `method="trotter"`
+(固定 dt Strang 2 次 Trotter, §5.3) を追加. それ以外は `NotImplementedError`.
 `save_tlist` / `observables` / adaptive 関連引数も同様に Phase 5 以降で
 有効化する.
+
+`method="trotter"` は Lanczos を使わないため, コンストラクタ引数 `m` /
+`krylov_tol` は無視される (`"m2"` 経路でのみ意味を持つ).
 
 返り値 `QuantumResult`:
 
@@ -459,6 +463,17 @@ class Trajectory:
     t_history: np.ndarray
     observables_history: dict[str, np.ndarray]
 ```
+
+`n_matvec` の経路ごとの解釈:
+
+- `method="m2"`: `n_steps × m` (Lanczos の matvec 見積もり; 厳密な
+  内部 matvec 回数ではなく per-step 上限).
+- `method="trotter"`: `n_steps × (N + 1)` (Trotter は Lanczos を呼ばない
+  ため真の matvec カウント概念は無く, phase pass 1 + bit-flip pass N の
+  合計を「matvec 1 pass 相当」とみなした dim-walk 見積もり; §5.3 の
+  per-step コスト記述と一致). 別フィールド `n_passes` を切らずに
+  `n_matvec` を「dim-walk 見積もり」として両経路で再解釈する方針
+  (issue #21).
 
 追加予定のフィールド:
 
