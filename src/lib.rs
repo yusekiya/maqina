@@ -30,12 +30,19 @@
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
+// `blas-src` (BLAS feature) はリンカに BLAS シンボルを引かせるためだけに
+// 必要な「副作用 only」のクレート. 直接 import せずに済む API なので
+// `use blas_src as _;` で参照しておくことで, 未参照 crate と判定されて
+// build script の link 指示 (Accelerate / OpenBLAS) が落ちる事故を防ぐ.
+#[cfg(feature = "blas")]
+use blas_src as _;
+
+mod blas;
+mod krylov;
 mod matvec;
-// TODO(phase1): 以下を実装に合わせて有効化
-// mod krylov;
-// mod cfm4;
 mod tridiag;
-// mod blas;
+// TODO(phase1): cfm4 を実装したら有効化
+// mod cfm4;
 // TODO(phase2): Trotter 経路
 // mod trotter;
 
