@@ -83,7 +83,11 @@ pub(crate) fn m2_midpoint_step(
     let matvec = |v: &[Complex64], y: &mut [Complex64]| {
         apply_h_kryanneal(v, y, h_x, h_p_diag, a_mid, b_mid, n);
     };
-    lanczos_propagate(matvec, psi, dt, m, krylov_tol)
+    // C1 (issue #52): lanczos_propagate は (psi, m_eff) を返すが,
+    // m2_midpoint_step は固定 dt 経路 (adaptive ではない) なので m_eff を
+    // 露出する必要はない. ここでは destructure して psi のみ返す.
+    let (psi_new, _m_eff) = lanczos_propagate(matvec, psi, dt, m, krylov_tol)?;
+    Ok(psi_new)
 }
 
 /// `m2_midpoint_step` の Python wrap.
@@ -249,7 +253,10 @@ pub(crate) fn cfm4_step(
         let matvec = |v: &[Complex64], y: &mut [Complex64]| {
             apply_h_kryanneal(v, y, h_x, h_p_diag, c_drv_1, c_diag_1, n);
         };
-        lanczos_propagate(matvec, psi, dt, m, krylov_tol)?
+        // C1 (issue #52): m_eff は C2 で `cfm4_step` の戻り値タプルとして
+        // 露出するまでは destructure して discard.
+        let (psi_stage1, _m_eff_stage1) = lanczos_propagate(matvec, psi, dt, m, krylov_tol)?;
+        psi_stage1
     };
 
     // stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に
@@ -259,7 +266,8 @@ pub(crate) fn cfm4_step(
     let matvec = |v: &[Complex64], y: &mut [Complex64]| {
         apply_h_kryanneal(v, y, h_x, h_p_diag, c_drv_2, c_diag_2, n);
     };
-    lanczos_propagate(matvec, &psi_mid, dt, m, krylov_tol)
+    let (psi_new, _m_eff_stage2) = lanczos_propagate(matvec, &psi_mid, dt, m, krylov_tol)?;
+    Ok(psi_new)
 }
 
 /// `cfm4_step` の Python wrap.

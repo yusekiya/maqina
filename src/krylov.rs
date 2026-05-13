@@ -65,20 +65,22 @@ pub(crate) fn lanczos_propagate<F>(
     dt: f64,
     m: usize,
     tol: f64,
-) -> PyResult<Vec<Complex64>>
+) -> PyResult<(Vec<Complex64>, usize)>
 where
     F: FnMut(&[Complex64], &mut [Complex64]),
 {
     assert!(m >= 1, "m must be >= 1");
     let dim = psi.len();
     if dim == 0 {
-        return Ok(Vec::new());
+        // 空状態は m_eff=0 として扱う (Lanczos vector が 1 本も構築されない).
+        return Ok((Vec::new(), 0));
     }
 
-    // ‖ψ‖ が 0 のときは 0 ベクトルを返す.
+    // ‖ψ‖ が 0 のときは 0 ベクトルを返す. m_eff は 0 を返す (実 Krylov 部分空間
+    // 次元 0; tridiag 固有分解にも入らない). issue #52 A.
     let psi_norm = nrm2(psi);
     if psi_norm == 0.0 {
-        return Ok(vec![Complex64::new(0.0, 0.0); dim]);
+        return Ok((vec![Complex64::new(0.0, 0.0); dim], 0));
     }
 
     // V: column-major (dim × m). 各列が Lanczos vector v_0, v_1, ....
@@ -199,7 +201,7 @@ where
     let mut psi_new = vec![Complex64::new(0.0, 0.0); dim];
     gemv_col_major(&v_mat[..dim * m_eff], dim, m_eff, &c, &mut psi_new);
 
-    Ok(psi_new)
+    Ok((psi_new, m_eff))
 }
 
 /// `lanczos_propagate` の **テスト用 Python wrap**.
@@ -238,7 +240,7 @@ pub(crate) fn lanczos_propagate_py<'py>(
     dt: f64,
     m: usize,
     krylov_tol: f64,
-) -> PyResult<Bound<'py, PyArray1<Complex64>>> {
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, usize)> {
     let psi_slice = psi.as_slice()?;
     let h_x_slice = h_x.as_slice()?;
     let h_p_diag_slice = h_p_diag.as_slice()?;
@@ -267,8 +269,10 @@ pub(crate) fn lanczos_propagate_py<'py>(
     let matvec = |v: &[Complex64], y: &mut [Complex64]| {
         apply_h_kryanneal(v, y, h_x_slice, h_p_diag_slice, a_t, b_t, n);
     };
-    let psi_new = lanczos_propagate(matvec, psi_slice, dt, m, krylov_tol)?;
-    Ok(psi_new.into_pyarray(py))
+    // C1 (issue #52): lanczos_propagate は (psi, m_eff) を返す.
+    // Python テスト (`tests/test_krylov.py`) も対応する destructure に追従.
+    let (psi_new, m_eff) = lanczos_propagate(matvec, psi_slice, dt, m, krylov_tol)?;
+    Ok((psi_new.into_pyarray(py), m_eff))
 }
 
 #[cfg(test)]
@@ -392,12 +396,14 @@ mod tests {
         let matvec = |_v: &[Complex64], _y: &mut [Complex64]| {
             call_count += 1;
         };
-        let result = lanczos_propagate(matvec, &psi, 0.1, 8, 1e-12).expect("ok");
+        let (result, m_eff) = lanczos_propagate(matvec, &psi, 0.1, 8, 1e-12).expect("ok");
         assert_eq!(result.len(), dim);
         for &c in &result {
             assert_eq!(c, Complex64::new(0.0, 0.0));
         }
         assert_eq!(call_count, 0, "matvec must not be called on zero psi");
+        // ‖ψ‖=0 fast-path では m_eff=0 (Krylov 構築なし).
+        assert_eq!(m_eff, 0);
     }
 
     #[test]
@@ -411,7 +417,7 @@ mod tests {
                 *slot = Complex64::new(0.0, 0.0);
             }
         };
-        let result = lanczos_propagate(matvec, &psi, 0.37, 24, 1e-12).expect("ok");
+        let (result, _m_eff) = lanczos_propagate(matvec, &psi, 0.37, 24, 1e-12).expect("ok");
         let rel = relative_error(&result, &psi);
         assert!(rel < 1e-13, "H=0 case rel = {}", rel);
     }
@@ -433,7 +439,7 @@ mod tests {
         let matvec = |v: &[Complex64], y: &mut [Complex64]| {
             apply_h_kryanneal(v, y, &h_x, &h_p_diag, a_t, b_t, n);
         };
-        let result = lanczos_propagate(matvec, &psi, dt, 16, 1e-12).expect("ok");
+        let (result, _m_eff) = lanczos_propagate(matvec, &psi, dt, 16, 1e-12).expect("ok");
 
         let mut expected = vec![Complex64::new(0.0, 0.0); dim];
         for k in 0..dim {
@@ -462,7 +468,7 @@ mod tests {
         let matvec = |v: &[Complex64], y: &mut [Complex64]| {
             apply_h_kryanneal(v, y, &h_x, &h_p_diag, a_t, b_t, n);
         };
-        let result = lanczos_propagate(matvec, &psi, dt, 24, 1e-12).expect("ok");
+        let (result, _m_eff) = lanczos_propagate(matvec, &psi, dt, 24, 1e-12).expect("ok");
         let new_norm = nrm2(&result);
         let rel = (new_norm - psi_norm).abs() / psi_norm.max(1.0);
         assert!(
@@ -490,7 +496,7 @@ mod tests {
         };
         // dim 以上の m は意味が無いので min(24, dim).
         let m = std::cmp::min(24, dim);
-        let result = lanczos_propagate(matvec, &psi, dt, m, 1e-14).expect("ok");
+        let (result, _m_eff) = lanczos_propagate(matvec, &psi, dt, m, 1e-14).expect("ok");
 
         let h_real = build_dense_h_real(n, &h_x, &h_p_diag, a_t, b_t);
         let expected = reference_propagate_real_h(&h_real, &psi, dt);

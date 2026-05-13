@@ -116,7 +116,7 @@ def _python_lanczos_propagate(
     dt: float,
     m: int,
     tol: float,
-) -> np.ndarray:
+) -> tuple[np.ndarray, int]:
     """``exp(-i dt H) ψ`` の Lanczos + 三重対角固有分解による近似 (Python リファレンス).
 
     Rust 側 ``lanczos_propagate`` と同一アルゴリズム (Park-Light 1986,
@@ -139,8 +139,14 @@ def _python_lanczos_propagate(
 
     Returns
     -------
-    np.ndarray
+    psi_new : np.ndarray
         shape ``(dim,)`` complex128 の新状態 ``ψ_new``.
+    m_eff : int
+        実際に構築された Krylov 部分空間次元 (``β_k < tol`` 早期終了の
+        効力). ``m_eff <= m``. issue #52 A で adaptive Richardson driver の
+        ``QuantumResult.m_eff_stats`` 集計に使う. ``dim == 0`` または
+        ``‖ψ‖ == 0`` の縮退ケースでは ``m_eff = 0`` を返す
+        (Krylov 構築なし).
 
     Raises
     ------
@@ -151,11 +157,11 @@ def _python_lanczos_propagate(
         raise ValueError(f"m must be >= 1, got {m!r}")
     dim = psi.shape[0]
     if dim == 0:
-        return psi.copy()
+        return psi.copy(), 0
 
     psi_norm = float(np.linalg.norm(psi))
     if psi_norm == 0.0:
-        return np.zeros_like(psi)
+        return np.zeros_like(psi), 0
 
     # V: shape (dim, m), 各列が Lanczos vector v_0..v_{m-1}.
     v_mat = np.zeros((dim, m), dtype=np.complex128)
@@ -218,7 +224,7 @@ def _python_lanczos_propagate(
     phases = np.exp(-1j * dt * lam)
     coeff = psi_norm * (q @ (phases * q[0, :]))
     psi_new = v_mat[:, :m_eff] @ coeff
-    return psi_new
+    return psi_new, m_eff
 
 
 def _python_m2_step(
@@ -260,7 +266,10 @@ def _python_m2_step(
         shape ``(2**n,)`` complex128 の新状態.
     """
     matvec = _make_python_matvec(h_x, h_p_diag, a_mid, b_mid)
-    return _python_lanczos_propagate(matvec, psi, dt, m, krylov_tol)
+    # C1 (issue #52): _python_lanczos_propagate は (psi, m_eff) を返す.
+    # M2 経路は固定 dt で m_eff 露出不要のため discard.
+    psi_new, _m_eff = _python_lanczos_propagate(matvec, psi, dt, m, krylov_tol)
+    return psi_new
 
 
 def _make_python_matvec(
@@ -806,14 +815,18 @@ def _python_cfm4_step(
     c_drv_1 = _CFM4_A_HIGH * a_s1 + _CFM4_A_LOW * a_s2
     c_diag_1 = _CFM4_A_HIGH * b_s1 + _CFM4_A_LOW * b_s2
     matvec_1 = _make_python_matvec(h_x, h_p_diag, c_drv_1, c_diag_1)
-    psi_mid = _python_lanczos_propagate(matvec_1, psi, dt, m, krylov_tol)
+    # C1 (issue #52): _python_lanczos_propagate は (psi, m_eff) を返す.
+    # m_eff の集計は C2 で `_python_cfm4_step` の戻り値タプルとして
+    # 露出するまでは destructure して discard.
+    psi_mid, _m_eff_stage1 = _python_lanczos_propagate(matvec_1, psi, dt, m, krylov_tol)
 
     # stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に
     # 畳み込んで Lanczos もう 1 回.
     c_drv_2 = _CFM4_A_LOW * a_s1 + _CFM4_A_HIGH * a_s2
     c_diag_2 = _CFM4_A_LOW * b_s1 + _CFM4_A_HIGH * b_s2
     matvec_2 = _make_python_matvec(h_x, h_p_diag, c_drv_2, c_diag_2)
-    return _python_lanczos_propagate(matvec_2, psi_mid, dt, m, krylov_tol)
+    psi_new, _m_eff_stage2 = _python_lanczos_propagate(matvec_2, psi_mid, dt, m, krylov_tol)
+    return psi_new
 
 
 def evolve_schedule_cfm4(
