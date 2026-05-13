@@ -27,19 +27,24 @@ Phase 5 で導入予定).
 * 観測量経路 (``observables=...``) も Phase 5 で追加予定. 現状は
   ``QuantumResult.observables_history = {}`` 固定.
 * adaptive 経路では ``n_steps`` を渡さない (``None`` で良い). 代わりに
-  ``atol`` (PI 局所誤差閾値; driver の ``tol_step`` に map) と ``dt_init``
-  (初期 dt 提案; driver の ``dt0`` に map) を kw-only で受ける. どちらも
-  ``None`` のときは driver 既定値 (``tol_step=1e-8``, ``dt0=0.5``) を使う.
-  ``dt_init="auto"`` を渡すと linear schedule の Magnus 級数 T スケーリング
-  (s-space scaling invariance, ``docs/design.md`` §5.3) から導いた保守値
-  ``dt0 = max(min(c · T^β, T), floor)`` (既定 ``c=0.1, β=0.5, floor=1e-3``)
-  を使う. PI controller の warmup step (default 0.5 → optimal dt への成長)
-  を T 依存に削減する DX 改善 (issue #43 A).
-* ``dt_max="auto"`` を渡すと Gershgorin 上界
-  ``‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|`` から Lanczos capacity
-  自動見積もり ``dt_max = max(min(10·dt0, 4m / ‖H‖_est), dt0)`` で
-  ``dt · ‖H‖ ≲ 4m`` の安全領域にクランプする (issue #43 B). 大 N で
-  ``‖H‖ ∝ N`` が支配的になる領域で PI controller を守備に機能させる.
+  ``atol`` (PI 局所誤差閾値; driver の ``tol_step`` に map), ``dt_init``
+  (初期 dt 提案; driver の ``dt0`` に map), ``dt_max`` (dt 上限; driver の
+  ``dt_max`` に map) を kw-only で受ける. ``atol`` の ``None`` は driver
+  既定値 ``1e-8`` を使う. ``dt_init`` / ``dt_max`` の ``None`` は **問題
+  依存の auto resolution を実行** する (issue #54):
+
+  * ``dt_init = None`` → ``dt0 = max(min(c · T^β, T), floor)``
+    (既定 ``c=0.1, β=0.5, floor=1e-3``, T = ``t1 - t0``). linear schedule
+    の Magnus 級数 T スケーリング (s-space scaling invariance,
+    ``docs/design.md`` §5.3) から導いた保守値で PI controller の warmup
+    step を T 依存に削減する.
+  * ``dt_max = None`` → ``dt_max = max(min(10·dt0, 4m / ‖H‖_est), dt0)``,
+    ``‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|`` の Gershgorin 上界に
+    基づく Lanczos capacity 自動見積もり. 大 N で ``‖H‖ ∝ N`` が支配的に
+    なる領域で PI controller が暴走しないよう守備に機能させる.
+
+  float を明示するとどちらも一律に上書きする. 旧 ``"auto"`` リテラルは
+  issue #54 で廃止 (None default = 旧 ``"auto"`` 経路と等価).
 * ``m_max`` を渡すと adaptive Richardson 経路の Lanczos 部分空間次元の
   上限を ``self.m`` の代わりに ``m_max`` で上書きする (issue #43 C, 簡略
   scope). step-doubling Richardson 推定子が Lanczos breakdown も embedded
@@ -82,23 +87,34 @@ class QuantumAnnealer:
         Lanczos / Krylov 部分空間次元の既定値 (``run`` 内で使用).
         ``m >= 1``. 既定 ``24``.
     krylov_tol
-        Lanczos の β 打切り閾値. ``β_k < tol`` で部分空間を切る.
-        既定 ``1e-12``.
+        Lanczos の β 打切り閾値 (``β_k < tol`` で部分空間を切る).
+        ``None`` (既定) のとき経路ごとに自動解決する (issue #54):
+
+        * ``cfm4_adaptive_richardson`` (adaptive Richardson):
+          ``run`` 時の ``atol`` (実効 ``tol_step``) に対し
+          ``effective_krylov_tol = tol_step · _KRYLOV_TOL_ATOL_RATIO``
+          (既定 ``1e-3``). atol=1e-8 default で ``1e-11``.
+        * 固定 dt 経路 (``m2`` / ``cfm4``): ``atol`` を取らないため
+          ``1e-12`` フォールバック (``_KRYLOV_TOL_FIXED_DEFAULT``).
+
+        float を明示するとどの経路でも一律に上書きする (旧 ``1e-12``
+        固定 default を再現したい場合は明示的に ``krylov_tol=1e-12``
+        を渡す).
 
     Raises
     ------
     ValueError
-        ``m < 1`` または ``krylov_tol < 0`` の場合.
+        ``m < 1`` または ``krylov_tol`` が負値の場合.
     """
     problem: Any
     schedule: Any
     m: Any
     krylov_tol: Any
 
-    def __init__(self, problem: IsingProblem, schedule: Schedule, *, m: int=24, krylov_tol: float=1e-12) -> None:
+    def __init__(self, problem: IsingProblem, schedule: Schedule, *, m: int=24, krylov_tol: float | None=None) -> None:
         ...
 
-    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='m2', n_steps: int | None=None, atol: float | None=None, dt_init: float | Literal['auto'] | None=None, dt_max: float | Literal['auto'] | None=None, m_max: int | None=None, save_tlist: np.ndarray | None=None) -> QuantumResult:
+    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='m2', n_steps: int | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None, save_tlist: np.ndarray | None=None) -> QuantumResult:
         """``[t0, t1]`` 区間で時間発展を実行し ``QuantumResult`` を返す.
 
         Parameters
@@ -128,29 +144,30 @@ class QuantumAnnealer:
             固定 dt 経路では無視される.
         dt_init
             adaptive 経路の初期 dt 提案. driver の ``dt0`` に map される.
-            ``None`` のときは driver 既定値 ``0.5`` を使う. 固定 dt 経路
-            では無視される. ``"auto"`` を渡すと
+            ``None`` (既定) のとき
             ``dt0 = max(min(c · T^β, T), _AUTO_DT_INIT_FLOOR)``
-            (T = ``t1 - t0``, 既定 ``c=0.1, β=0.5, floor=1e-3``) で解決し,
-            PI controller の warmup step を T 依存で削減する
+            (T = ``t1 - t0``, 既定 ``c=0.1, β=0.5, floor=1e-3``) で auto
+            resolve し, PI controller の warmup step を T 依存で削減する
             (s-space scaling invariance, ``docs/design.md`` §5.3,
-            issue #43 A). 例えば ``T=100`` で ``dt0=1.0``, ``T=1`` で
-            ``dt0=0.1``, ``T=0.01`` で ``dt0=0.01`` (床値より大きいので
-            formula 値) → driver default ``0.5`` 比でいずれも warmup を
-            短縮する保守値となる.
+            issue #54 で None default 化, 旧 ``"auto"`` リテラル相当).
+            例えば ``T=100`` で ``dt0=1.0``, ``T=1`` で ``dt0=0.1``,
+            ``T=0.01`` で ``dt0=0.01`` (床値より大きいので formula 値).
+            float を明示すると一律に上書きする (旧 ``"auto"`` リテラルは
+            issue #54 で削除済み). 固定 dt 経路では無視される.
         dt_max
             adaptive 経路の最大 dt 上限. driver の ``dt_max`` に map される.
-            ``None`` のときは driver 既定値 ``10 · dt0`` を使う. 固定 dt
-            経路では無視される. ``"auto"`` を渡すと Gershgorin 上界による
-            Lanczos capacity 自動見積もり
+            ``None`` (既定) のとき Gershgorin 上界による Lanczos capacity
+            自動見積もり
             ``dt_max = max(min(10·dt0, 4m / ‖H‖_est), dt0)``,
-            ``‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|`` で解決し,
-            ``dt · ‖H‖ ≲ 4m`` の Lanczos safe 領域に強制クランプする
-            (issue #43 B, ``docs/design.md`` §5.3). 大 N で ``‖H‖ ∝ N``
-            が支配的になる領域で PI controller が暴走しないよう守備に
-            機能する. step-doubling Richardson が breakdown を検出する
-            ので fail-safe で動作する (Lanczos 容量を僅かに超えても
-            embedded error 経由で dt が縮む).
+            ``‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|`` で auto
+            resolve し, ``dt · ‖H‖ ≲ 4m`` の Lanczos safe 領域に強制
+            クランプする (issue #54 で None default 化, 旧 ``"auto"``
+            リテラル相当). 大 N で ``‖H‖ ∝ N`` が支配的になる領域で PI
+            controller が暴走しないよう守備に機能する. step-doubling
+            Richardson が breakdown を検出するので fail-safe で動作する
+            (Lanczos 容量を僅かに超えても embedded error 経由で dt が
+            縮む). float を明示すると一律に上書きする. 固定 dt 経路では
+            無視される.
         m_max
             adaptive Richardson 経路の Lanczos 部分空間次元の上限。
             ``None`` (default) のときは ``self.m`` (コンストラクタ既定 24)
