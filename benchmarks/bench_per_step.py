@@ -43,7 +43,9 @@ required ``n_steps`` のずれを別途見積もる必要がある.
 
 * ``benchmarks/results/<YYYYMMDD-HHMMSS>/bench_per_step.csv``: per-trial
   生データ (n, dim, method, trial, n_steps, dt, m, total_wall_sec,
-  per_step_sec, states_per_sec, n_steps_actual, final_err_vs_ref).
+  per_step_sec, states_per_sec, n_steps_actual, final_err_vs_ref,
+  m_eff_median, m_eff_max). 末尾 m_eff_* 列は adaptive 経路でのみ
+  実値が入る (issue #52 B).
 * ``benchmarks/results/<YYYYMMDD-HHMMSS>/bench_per_step.md``: 集計表
   (per-method summary + cross-method 比較表 + adaptive driver detail) +
   machine info. adaptive 経路 (``cfm4_adaptive_richardson`` 等) を含む
@@ -181,12 +183,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="number of driver steps per measurement (default: 50)",
     )
     parser.add_argument(
-        "--m",
-        type=int,
-        default=24,
+        "--m-values",
+        type=_parse_int_list,
+        default=[24],
         help=(
-            "Lanczos subspace dimension (default: 24). Only used by "
-            "method='m2'; Trotter methods do not invoke Lanczos."
+            "comma-separated sweep over Lanczos subspace dimension "
+            "(default: 24). Trotter methods ignore m; m2 / cfm4 / "
+            "cfm4_adaptive_richardson use it. issue #52 B: 列形式により "
+            "m=16,24,32 等の cell 比較が 1 run で取れる."
         ),
     )
     parser.add_argument(
@@ -263,7 +267,7 @@ def time_method_run(
     n_steps: int,
     method: str,
     m: int,
-) -> tuple[float, int, np.ndarray]:
+) -> tuple[float, int, np.ndarray, dict[str, int | float] | None]:
     """``QuantumAnnealer.run`` の wall time (秒) を ``time.perf_counter`` で計る.
 
     壁時計のジッタを最小化するため, 1 試行で run 1 回ぶん計測する.
@@ -289,6 +293,9 @@ def time_method_run(
         が決めた実 step 数を返す.
     psi_final : np.ndarray
         終端波動関数 (final_err_vs_ref の算出に使う). complex128.
+    m_eff_stats : dict[str, int | float] | None
+        adaptive Richardson 経路では ``QuantumResult.m_eff_stats`` を
+        そのまま返す (issue #52 A). 固定 dt 経路では ``None``.
     """
     if method not in _VALID_METHODS:
         raise ValueError(f"unsupported method {method!r}; valid: {_VALID_METHODS!r}")
@@ -313,7 +320,7 @@ def time_method_run(
         n_steps_eff = int(n_steps)
     # res を黒箱に積んでおいて dead code elimination されないようにする.
     _ = res.n_matvec
-    return t_end - t_start, n_steps_eff, np.asarray(res.psi_final)
+    return t_end - t_start, n_steps_eff, np.asarray(res.psi_final), res.m_eff_stats
 
 
 def _compute_reference_psi(
@@ -448,16 +455,16 @@ def write_outputs(
     for key, val in vars(args).items():
         lines.append(f"- **{key}**: {val}")
     lines.append("")
-    lines.append("## Summary (per-n × method)")
+    lines.append("## Summary (per-n × method × m)")
     lines.append("")
     lines.append(
-        "| n | dim | method | per-step (sec) min | per-step (sec) median | "
+        "| n | dim | method | m | per-step (sec) min | per-step (sec) median | "
         "states/sec (median) | trials |"
     )
-    lines.append("|---|---|---|---|---|---|---|")
+    lines.append("|---|---|---|---|---|---|---|---|")
     for row in summary:
         lines.append(
-            f"| {row['n']} | {row['dim']} | {row['method']} | "
+            f"| {row['n']} | {row['dim']} | {row['method']} | {row['m']} | "
             f"{row['per_step_sec_min']:.6e} | "
             f"{row['per_step_sec_median']:.6e} | "
             f"{row['states_per_sec_median']:.3e} | "
@@ -467,8 +474,11 @@ def write_outputs(
 
     # Cross-method 比較: 各 n で method ごとの median per-step を横並びに
     # 配置し, M2 を基準とした ratio (m2/method) を併記する.
+    # issue #52 B: m sweep がある場合は cell が重複するため cross-method 表は
+    # 出さない (代わりに Summary 表で m 列付き).
     methods_in_summary = sorted({str(s["method"]) for s in summary})
-    if len(methods_in_summary) > 1:
+    distinct_m_values = sorted({int(s["m"]) for s in summary})
+    if len(methods_in_summary) > 1 and len(distinct_m_values) == 1:
         lines.append("## Cross-method per-step median (sec)")
         lines.append("")
         header_cells = ["n", "dim", *methods_in_summary]
@@ -510,22 +520,27 @@ def write_outputs(
     if adaptive_summary:
         lines.append("## Adaptive driver detail")
         lines.append("")
+        # issue #52 B: m_eff_median / m_eff_max 列を追加. m sweep の cell
+        # ごとに per-step Lanczos 部分空間の実使用量を見られるようにする.
         lines.append(
-            "| n | dim | method | n_steps_actual (median) | "
+            "| n | dim | method | m | n_steps_actual (median) | "
             "n_steps_actual (min/max) | final_err_vs_ref (median) | "
+            "m_eff (median) | m_eff (max) | "
             "per_step (sec, median) | total_wall (sec, median) | "
             "reference_wall (sec) |"
         )
-        lines.append("|" + "|".join(["---"] * 9) + "|")
+        lines.append("|" + "|".join(["---"] * 12) + "|")
         for row in adaptive_summary:
             n_val = int(row["n"])
             ref_wall = reference_wall_by_n.get(n_val)
             ref_wall_str = f"{ref_wall:.3e}" if ref_wall is not None else "n/a"
             lines.append(
-                f"| {row['n']} | {row['dim']} | {row['method']} | "
+                f"| {row['n']} | {row['dim']} | {row['method']} | {row['m']} | "
                 f"{float(row['n_steps_actual_median']):.1f} | "
                 f"{int(row['n_steps_actual_min'])}/{int(row['n_steps_actual_max'])} | "
                 f"{float(row['final_err_vs_ref_median']):.6e} | "
+                f"{float(row['m_eff_median']):.2f} | "
+                f"{int(row['m_eff_max'])} | "
                 f"{float(row['per_step_sec_median']):.6e} | "
                 f"{float(row['total_wall_sec_median']):.6e} | "
                 f"{ref_wall_str} |"
@@ -576,115 +591,159 @@ def main(argv: list[str] | None = None) -> int:
         psi0 = uniform_superposition(n)
         dim = 1 << n
         print(
-            f"[n={n} dim={dim}] methods={args.methods}, "
+            f"[n={n} dim={dim}] methods={args.methods}, m_values={args.m_values}, "
             f"warmup={args.warmup}, repeat={args.repeat}"
         )
 
         # adaptive 経路がある場合のみ高精度参照解を 1 度だけ計算する.
+        # reference 計算自体は m に依存しない (β_k tol で早期打切が起きる
+        # 設定でも `_REFERENCE_METHOD="cfm4"` で多 step なため m=24 fixed
+        # で十分な精度が出る前提). issue #52 B では m sweep を入れたが
+        # reference は per-n 1 回固定で OK.
         needs_reference = any(m in _ADAPTIVE_METHODS for m in args.methods)
         psi_ref: np.ndarray | None = None
         if needs_reference:
             print(
                 f"  computing reference ψ ({_REFERENCE_METHOD},"
-                f" n_steps={_REFERENCE_N_STEPS})..."
+                f" n_steps={_REFERENCE_N_STEPS}, m={args.m_values[0]})..."
             )
             psi_ref, ref_wall = _compute_reference_psi(
-                problem, schedule, psi0, 0.0, args.T, args.m
+                problem, schedule, psi0, 0.0, args.T, args.m_values[0]
             )
             reference_wall_by_n[n] = ref_wall
             print(f"  reference ψ wall: {ref_wall:.3f}s")
 
-        for method in args.methods:
-            is_adaptive = method in _ADAPTIVE_METHODS
-            print(f"  method={method}")
-            for _ in range(args.warmup):
-                time_method_run(
-                    problem, schedule, psi0, 0.0, args.T, args.n_steps, method, args.m
-                )
+        # issue #52 B: m を sweep する外側ループ. 同じ method × m の cell
+        # ごとに summary / adaptive_summary を 1 行ずつ追加する.
+        for m_val in args.m_values:
+            for method in args.methods:
+                is_adaptive = method in _ADAPTIVE_METHODS
+                print(f"  method={method}, m={m_val}")
+                for _ in range(args.warmup):
+                    time_method_run(
+                        problem,
+                        schedule,
+                        psi0,
+                        0.0,
+                        args.T,
+                        args.n_steps,
+                        method,
+                        m_val,
+                    )
 
-            trial_times: list[float] = []
-            trial_n_steps_actual: list[int] = []
-            trial_final_err: list[float] = []
-            for trial in range(args.repeat):
-                wall, n_steps_actual, psi_final = time_method_run(
-                    problem,
-                    schedule,
-                    psi0,
-                    0.0,
-                    args.T,
-                    args.n_steps,
-                    method,
-                    args.m,
-                )
-                trial_times.append(wall)
-                trial_n_steps_actual.append(n_steps_actual)
-                steps_for_per_step = max(n_steps_actual, 1)
-                per_step = wall / steps_for_per_step
-                states_per_sec = dim / per_step if per_step > 0 else float("inf")
-                if is_adaptive and psi_ref is not None:
-                    final_err = float(np.linalg.norm(psi_final - psi_ref))
-                    trial_final_err.append(final_err)
-                    final_err_field = f"{final_err:.6e}"
-                else:
-                    final_err_field = "n/a"
-                rows.append(
+                trial_times: list[float] = []
+                trial_n_steps_actual: list[int] = []
+                trial_final_err: list[float] = []
+                trial_m_eff_stats: list[dict[str, int | float]] = []
+                for trial in range(args.repeat):
+                    wall, n_steps_actual, psi_final, m_eff_stats = time_method_run(
+                        problem,
+                        schedule,
+                        psi0,
+                        0.0,
+                        args.T,
+                        args.n_steps,
+                        method,
+                        m_val,
+                    )
+                    trial_times.append(wall)
+                    trial_n_steps_actual.append(n_steps_actual)
+                    if m_eff_stats is not None:
+                        trial_m_eff_stats.append(m_eff_stats)
+                    steps_for_per_step = max(n_steps_actual, 1)
+                    per_step = wall / steps_for_per_step
+                    states_per_sec = dim / per_step if per_step > 0 else float("inf")
+                    if is_adaptive and psi_ref is not None:
+                        final_err = float(np.linalg.norm(psi_final - psi_ref))
+                        trial_final_err.append(final_err)
+                        final_err_field = f"{final_err:.6e}"
+                    else:
+                        final_err_field = "n/a"
+                    m_eff_median_field = (
+                        f"{m_eff_stats['median']:.2f}"
+                        if m_eff_stats is not None
+                        else "n/a"
+                    )
+                    m_eff_max_field = (
+                        f"{int(m_eff_stats['max'])}"
+                        if m_eff_stats is not None
+                        else "n/a"
+                    )
+                    rows.append(
+                        {
+                            "n": n,
+                            "dim": dim,
+                            "method": method,
+                            "trial": trial,
+                            "n_steps": args.n_steps,
+                            "dt": args.T / args.n_steps,
+                            "m": m_val,
+                            "total_wall_sec": f"{wall:.9e}",
+                            "per_step_sec": f"{per_step:.9e}",
+                            "states_per_sec": f"{states_per_sec:.9e}",
+                            "n_steps_actual": n_steps_actual,
+                            "final_err_vs_ref": final_err_field,
+                            "m_eff_median": m_eff_median_field,
+                            "m_eff_max": m_eff_max_field,
+                        }
+                    )
+                    extra = (
+                        f", n_steps_actual={n_steps_actual}, err={final_err_field}"
+                        f", m_eff_median={m_eff_median_field}"
+                        if is_adaptive
+                        else ""
+                    )
+                    print(
+                        f"    trial {trial}: wall={wall:.4f}s, "
+                        f"per_step={per_step:.4e}s ({states_per_sec:.3e} states/sec)"
+                        f"{extra}"
+                    )
+
+                per_step_times = [
+                    t / max(s, 1)
+                    for t, s in zip(trial_times, trial_n_steps_actual, strict=True)
+                ]
+                summary.append(
                     {
                         "n": n,
                         "dim": dim,
                         "method": method,
-                        "trial": trial,
-                        "n_steps": args.n_steps,
-                        "dt": args.T / args.n_steps,
-                        "m": args.m,
-                        "total_wall_sec": f"{wall:.9e}",
-                        "per_step_sec": f"{per_step:.9e}",
-                        "states_per_sec": f"{states_per_sec:.9e}",
-                        "n_steps_actual": n_steps_actual,
-                        "final_err_vs_ref": final_err_field,
-                    }
-                )
-                extra = (
-                    f", n_steps_actual={n_steps_actual}, err={final_err_field}"
-                    if is_adaptive
-                    else ""
-                )
-                print(
-                    f"    trial {trial}: wall={wall:.4f}s, "
-                    f"per_step={per_step:.4e}s ({states_per_sec:.3e} states/sec)"
-                    f"{extra}"
-                )
-
-            per_step_times = [
-                t / max(s, 1)
-                for t, s in zip(trial_times, trial_n_steps_actual, strict=True)
-            ]
-            summary.append(
-                {
-                    "n": n,
-                    "dim": dim,
-                    "method": method,
-                    "trials": len(per_step_times),
-                    "per_step_sec_min": min(per_step_times),
-                    "per_step_sec_median": statistics.median(per_step_times),
-                    "states_per_sec_median": dim / statistics.median(per_step_times),
-                }
-            )
-            if is_adaptive and trial_final_err:
-                adaptive_summary.append(
-                    {
-                        "n": n,
-                        "dim": dim,
-                        "method": method,
-                        "n_steps_actual_median": statistics.median(
-                            trial_n_steps_actual
-                        ),
-                        "n_steps_actual_min": min(trial_n_steps_actual),
-                        "n_steps_actual_max": max(trial_n_steps_actual),
-                        "final_err_vs_ref_median": statistics.median(trial_final_err),
+                        "m": m_val,
+                        "trials": len(per_step_times),
+                        "per_step_sec_min": min(per_step_times),
                         "per_step_sec_median": statistics.median(per_step_times),
-                        "total_wall_sec_median": statistics.median(trial_times),
+                        "states_per_sec_median": dim
+                        / statistics.median(per_step_times),
                     }
                 )
+                if is_adaptive and trial_final_err:
+                    # m_eff_stats per-trial 統計を per-cell に集約.
+                    m_eff_medians = [s["median"] for s in trial_m_eff_stats]
+                    m_eff_maxes = [s["max"] for s in trial_m_eff_stats]
+                    adaptive_summary.append(
+                        {
+                            "n": n,
+                            "dim": dim,
+                            "method": method,
+                            "m": m_val,
+                            "n_steps_actual_median": statistics.median(
+                                trial_n_steps_actual
+                            ),
+                            "n_steps_actual_min": min(trial_n_steps_actual),
+                            "n_steps_actual_max": max(trial_n_steps_actual),
+                            "final_err_vs_ref_median": statistics.median(
+                                trial_final_err
+                            ),
+                            "per_step_sec_median": statistics.median(per_step_times),
+                            "total_wall_sec_median": statistics.median(trial_times),
+                            "m_eff_median": (
+                                statistics.median(m_eff_medians)
+                                if m_eff_medians
+                                else float("nan")
+                            ),
+                            "m_eff_max": (max(m_eff_maxes) if m_eff_maxes else 0),
+                        }
+                    )
 
     # reference 計算自体の総 wall time を machine info に併記する.
     # 大 n で reference 1 本に 1-2 時間かかる現実問題に対する透明性として,

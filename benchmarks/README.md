@@ -27,8 +27,12 @@ uv run python benchmarks/bench_per_step.py
   参照解 (fixed CFM4:2 ・ 多 step) を 1 回計算してから per-method 計測を
   回す.
 - `--n-steps K`: 各 `(n, method)` で時間発展する step 数 (default 50).
-- `--m M`: Lanczos 部分空間次元 (default 24). `method="m2"` のみで使用,
-  Trotter / Suzuki S_4 経路では Lanczos を呼ばないため無視される.
+- `--m-values M1,M2,...`: Lanczos 部分空間次元の sweep 列 (default `24`).
+  `m2` / `cfm4` / `cfm4_adaptive_richardson` で使用. Trotter / Suzuki S_4
+  経路では Lanczos を呼ばないため無視される. issue #52 B で列形式に拡張
+  され, `--m-values 16,24,32` で `m=16` / `m=24` / `m=32` の cell 比較を
+  1 run で取れる. m sweep を入れた場合 Cross-method 表は出力されない
+  (Summary 表で `m` 列付きの形になる).
 - `--repeat R`: 各設定で wall time を測る試行回数. CSV には全試行を残し,
   markdown には min/median を要約する (default 3).
 - `--warmup W`: 計測前に捨てる試行回数 (cache warm 用, default 1).
@@ -47,20 +51,26 @@ uv run python benchmarks/bench_per_step.py
 
 - `bench_per_step.csv`: 全試行の raw タイムスタンプ (n, dim, method,
   trial, n_steps, dt, m, total_wall_sec, per_step_sec, states_per_sec,
-  n_steps_actual, final_err_vs_ref). 末尾 2 列は adaptive 経路でのみ
-  実値が入り, 固定 dt 経路では `n_steps_actual=n_steps` / `final_err_vs_ref=n/a`.
-- `bench_per_step.md`: 集計表 (per-method summary + cross-method 比較表)
-  と machine info (uname / Python / numpy version / BLAS pool).
-  cross-method 表は M2 を基準にした ratio (`m2 / trotter` 等) を併記する.
+  n_steps_actual, final_err_vs_ref, m_eff_median, m_eff_max). 末尾 4 列は
+  adaptive 経路でのみ実値が入り, 固定 dt 経路では `n_steps_actual=n_steps`
+  / `final_err_vs_ref=n/a` / `m_eff_*=n/a`.
+- `bench_per_step.md`: 集計表 (per-method × m summary + cross-method 比較
+  表 + adaptive driver detail) と machine info (uname / Python / numpy
+  version / BLAS pool). cross-method 表は M2 を基準にした ratio
+  (`m2 / trotter` 等) を併記するが, `--m-values` で m sweep を入れた場合
+  は cell が重複するため出力されない (代わりに Summary 表で `m` 列付き).
   adaptive 経路 (`cfm4_adaptive_richardson` 等) を含む実行ではさらに
   `## Adaptive driver detail` 節を追加し, PI controller が accept した
   実 step 数 `n_steps_actual` (median + min/max) と参照解との
-  `final_err_vs_ref` (median) を per-n × method で並べる. これらは
-  adaptive driver の性能・精度評価で最重要な 2 値だが Summary 表からは
-  落ちるため別節で必ず出す. 参照解計算 (`_compute_reference_psi`) の
-  wall time は machine info の `reference_wall_sec_total` (合算) と
-  adaptive section の per-n `reference_wall (sec)` 列に記録する
-  (大 n で reference 1 本に 1-2 時間かかる現実問題に対する透明性).
+  `final_err_vs_ref` (median), per-step Lanczos 部分空間次元
+  `m_eff (median)` / `m_eff (max)` (issue #52 B で追加, β_k 早期打切の
+  実効分布; 早期打切なしで `6m`, ありで小さく出る) を per-n × method × m
+  で並べる. これらは adaptive driver の性能・精度評価で重要な指標
+  なので Summary 表に加えて別節で必ず出す. 参照解計算
+  (`_compute_reference_psi`) の wall time は machine info の
+  `reference_wall_sec_total` (合算) と adaptive section の per-n
+  `reference_wall (sec)` 列に記録する (大 n で reference 1 本に 1-2 時間
+  かかる現実問題に対する透明性).
 
 **重要**: 同じ `n_steps` での raw per-step 比較は LTE order の違い
 (M2 / Strang は `O(dt^3)`, Suzuki S_4 は `O(dt^5)`) を **無視している**
