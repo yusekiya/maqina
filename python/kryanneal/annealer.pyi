@@ -82,20 +82,31 @@ class QuantumAnnealer:
         Lanczos / Krylov 部分空間次元の既定値 (``run`` 内で使用).
         ``m >= 1``. 既定 ``24``.
     krylov_tol
-        Lanczos の β 打切り閾値. ``β_k < tol`` で部分空間を切る.
-        既定 ``1e-12``.
+        Lanczos の β 打切り閾値 (``β_k < tol`` で部分空間を切る).
+        ``None`` (既定) のとき経路ごとに自動解決する (issue #54):
+
+        * ``cfm4_adaptive_richardson`` (adaptive Richardson):
+          ``run`` 時の ``atol`` (実効 ``tol_step``) に対し
+          ``effective_krylov_tol = tol_step · _KRYLOV_TOL_ATOL_RATIO``
+          (既定 ``1e-3``). atol=1e-8 default で ``1e-11``.
+        * 固定 dt 経路 (``m2`` / ``cfm4``): ``atol`` を取らないため
+          ``1e-12`` フォールバック (``_KRYLOV_TOL_FIXED_DEFAULT``).
+
+        float を明示するとどの経路でも一律に上書きする (旧 ``1e-12``
+        固定 default を再現したい場合は明示的に ``krylov_tol=1e-12``
+        を渡す).
 
     Raises
     ------
     ValueError
-        ``m < 1`` または ``krylov_tol < 0`` の場合.
+        ``m < 1`` または ``krylov_tol`` が負値の場合.
     """
     problem: Any
     schedule: Any
     m: Any
     krylov_tol: Any
 
-    def __init__(self, problem: IsingProblem, schedule: Schedule, *, m: int=24, krylov_tol: float=1e-12) -> None:
+    def __init__(self, problem: IsingProblem, schedule: Schedule, *, m: int=24, krylov_tol: float | None=None) -> None:
         ...
 
     def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='m2', n_steps: int | None=None, atol: float | None=None, dt_init: float | Literal['auto'] | None=None, dt_max: float | Literal['auto'] | None=None, m_max: int | None=None, save_tlist: np.ndarray | None=None) -> QuantumResult:

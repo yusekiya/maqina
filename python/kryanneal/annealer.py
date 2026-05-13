@@ -79,6 +79,25 @@ __all__ = ["QuantumAnnealer"]
 
 _PSI_NORM_TOL: float = 1e-10
 
+# ``krylov_tol`` を adaptive 経路で ``atol`` に連動させる既定係数 (issue #54).
+#
+# ``krylov_tol = None`` のとき, adaptive Richardson 経路では
+# ``effective_krylov_tol = tol_step · _KRYLOV_TOL_ATOL_RATIO`` を採用する.
+# 既定 ``tol_step = 1e-8`` に対し effective ``1e-11`` 相当. 旧 default
+# ``1e-12`` は ``tol_step`` 比で 4 桁過剰タイトで Lanczos β_k 早期打切が
+# 全く効かない (m_eff = 6·m_max が常時続く) ことが PR #53 後の bench で
+# 判明したため, atol 比 ``1e-3`` (= 1 桁余裕 + Richardson 推定子の局所
+# 誤差規模) を default に採用する. 1e-4 / 5e-4 / 5e-3 の境界は実機 bench
+# で再評価可能だが, 経験則として "atol より 3 桁タイトに取れば 1 step の
+# Lanczos 内誤差が PI controller の embedded error 推定を支配しない" と
+# いう感覚値. 固定 dt 経路 (m2 / cfm4) では ``atol`` が無いため None →
+# ``1e-12`` フォールバック (旧 default 維持).
+_KRYLOV_TOL_ATOL_RATIO: float = 1e-3
+# 固定 dt 経路で ``krylov_tol = None`` のとき採用する static fallback.
+# adaptive 経路と同じ ``atol · 1e-3`` を使えないため (atol を取らないので)
+# 旧 default を維持する.
+_KRYLOV_TOL_FIXED_DEFAULT: float = 1e-12
+
 # ``dt_init="auto"`` の T-dep 推定パラメータ. issue #43 A.
 #
 # 線形 schedule では Magnus 級数の T スケーリング (s-space scaling
@@ -181,13 +200,24 @@ class QuantumAnnealer:
         Lanczos / Krylov 部分空間次元の既定値 (``run`` 内で使用).
         ``m >= 1``. 既定 ``24``.
     krylov_tol
-        Lanczos の β 打切り閾値. ``β_k < tol`` で部分空間を切る.
-        既定 ``1e-12``.
+        Lanczos の β 打切り閾値 (``β_k < tol`` で部分空間を切る).
+        ``None`` (既定) のとき経路ごとに自動解決する (issue #54):
+
+        * ``cfm4_adaptive_richardson`` (adaptive Richardson):
+          ``run`` 時の ``atol`` (実効 ``tol_step``) に対し
+          ``effective_krylov_tol = tol_step · _KRYLOV_TOL_ATOL_RATIO``
+          (既定 ``1e-3``). atol=1e-8 default で ``1e-11``.
+        * 固定 dt 経路 (``m2`` / ``cfm4``): ``atol`` を取らないため
+          ``1e-12`` フォールバック (``_KRYLOV_TOL_FIXED_DEFAULT``).
+
+        float を明示するとどの経路でも一律に上書きする (旧 ``1e-12``
+        固定 default を再現したい場合は明示的に ``krylov_tol=1e-12``
+        を渡す).
 
     Raises
     ------
     ValueError
-        ``m < 1`` または ``krylov_tol < 0`` の場合.
+        ``m < 1`` または ``krylov_tol`` が負値の場合.
     """
 
     def __init__(
@@ -196,17 +226,19 @@ class QuantumAnnealer:
         schedule: Schedule,
         *,
         m: int = 24,
-        krylov_tol: float = 1e-12,
+        krylov_tol: float | None = None,
     ) -> None:
         if not isinstance(m, (int, np.integer)) or m < 1:
             raise ValueError(f"m must be a positive integer, got {m!r}")
-        if krylov_tol < 0.0:
-            raise ValueError(f"krylov_tol must be >= 0, got {krylov_tol!r}")
+        if krylov_tol is not None and krylov_tol < 0.0:
+            raise ValueError(f"krylov_tol must be >= 0 or None, got {krylov_tol!r}")
 
         self.problem: IsingProblem = problem
         self.schedule: Schedule = schedule
         self.m: int = int(m)
-        self.krylov_tol: float = float(krylov_tol)
+        self.krylov_tol: float | None = (
+            float(krylov_tol) if krylov_tol is not None else None
+        )
 
     def run(
         self,
@@ -349,6 +381,12 @@ class QuantumAnnealer:
             # NOTE: 既定値は driver (``evolve_schedule_adaptive_richardson``)
             # 側と一致させること. driver 側を変えたら本ファイルも追従する.
             tol_step = float(atol) if atol is not None else 1e-8
+            # issue #54: ``krylov_tol = None`` のとき adaptive Richardson 経路は
+            # ``tol_step · _KRYLOV_TOL_ATOL_RATIO`` に解決する.
+            if self.krylov_tol is not None:
+                effective_krylov_tol = self.krylov_tol
+            else:
+                effective_krylov_tol = tol_step * _KRYLOV_TOL_ATOL_RATIO
             if isinstance(dt_init, str):
                 if dt_init != "auto":
                     raise ValueError(
@@ -398,7 +436,7 @@ class QuantumAnnealer:
                 t0=t0,
                 t1=t1,
                 m=m_eff_param,
-                krylov_tol=self.krylov_tol,
+                krylov_tol=effective_krylov_tol,
                 tol_step=tol_step,
                 dt0=dt0,
                 dt_max=dt_max_resolved,
@@ -444,6 +482,13 @@ class QuantumAnnealer:
             )
         n_steps_int = int(n_steps)
 
+        # issue #54: 固定 dt 経路は ``atol`` を取らないため None → 旧 default
+        # ``1e-12`` に static fallback (adaptive 経路の atol 連動とは別扱い).
+        if self.krylov_tol is not None:
+            effective_krylov_tol = self.krylov_tol
+        else:
+            effective_krylov_tol = _KRYLOV_TOL_FIXED_DEFAULT
+
         if method == "m2":
             psi_final, n_matvec = evolve_schedule_m2(
                 h_x=self.problem.h_x,
@@ -454,7 +499,7 @@ class QuantumAnnealer:
                 t1=t1,
                 n_steps=n_steps_int,
                 m=self.m,
-                krylov_tol=self.krylov_tol,
+                krylov_tol=effective_krylov_tol,
             )
         elif method == "trotter":
             psi_final, n_matvec = evolve_schedule_trotter(
@@ -486,7 +531,7 @@ class QuantumAnnealer:
                 t1=t1,
                 n_steps=n_steps_int,
                 m=self.m,
-                krylov_tol=self.krylov_tol,
+                krylov_tol=effective_krylov_tol,
             )
         return QuantumResult(
             psi_final=psi_final,
