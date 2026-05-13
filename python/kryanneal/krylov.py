@@ -763,7 +763,7 @@ def _python_cfm4_step(
     dt: float,
     m: int,
     krylov_tol: float,
-) -> np.ndarray:
+) -> tuple[np.ndarray, int]:
     """CFM4:2 (Alvermann-Fehske 2011) 1 step の Python リファレンス実装.
 
     Rust 側 ``cfm4_step`` (``src/cfm4.rs``) と同一アルゴリズム:
@@ -807,26 +807,27 @@ def _python_cfm4_step(
 
     Returns
     -------
-    np.ndarray
+    psi_new : np.ndarray
         shape ``(2**n,)`` complex128 の新状態.
+    m_eff_sum : int
+        2 stage の Lanczos 部分空間次元 ``m_eff`` の合計 (issue #52 A).
+        adaptive Richardson driver が per-step `m_eff_total` に集計する.
+        ``m_eff_sum <= 2 · m`` を満たす.
     """
     # stage 1: B_1 = a_high · H_1 + a_low · H_2 を (c_drv_1, c_diag_1) に
     # 畳み込んで Lanczos 1 回.
     c_drv_1 = _CFM4_A_HIGH * a_s1 + _CFM4_A_LOW * a_s2
     c_diag_1 = _CFM4_A_HIGH * b_s1 + _CFM4_A_LOW * b_s2
     matvec_1 = _make_python_matvec(h_x, h_p_diag, c_drv_1, c_diag_1)
-    # C1 (issue #52): _python_lanczos_propagate は (psi, m_eff) を返す.
-    # m_eff の集計は C2 で `_python_cfm4_step` の戻り値タプルとして
-    # 露出するまでは destructure して discard.
-    psi_mid, _m_eff_stage1 = _python_lanczos_propagate(matvec_1, psi, dt, m, krylov_tol)
+    psi_mid, m_eff_stage1 = _python_lanczos_propagate(matvec_1, psi, dt, m, krylov_tol)
 
     # stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に
     # 畳み込んで Lanczos もう 1 回.
     c_drv_2 = _CFM4_A_LOW * a_s1 + _CFM4_A_HIGH * a_s2
     c_diag_2 = _CFM4_A_LOW * b_s1 + _CFM4_A_HIGH * b_s2
     matvec_2 = _make_python_matvec(h_x, h_p_diag, c_drv_2, c_diag_2)
-    psi_new, _m_eff_stage2 = _python_lanczos_propagate(matvec_2, psi_mid, dt, m, krylov_tol)
-    return psi_new
+    psi_new, m_eff_stage2 = _python_lanczos_propagate(matvec_2, psi_mid, dt, m, krylov_tol)
+    return psi_new, m_eff_stage1 + m_eff_stage2
 
 
 def evolve_schedule_cfm4(
@@ -905,7 +906,10 @@ def evolve_schedule_cfm4(
         a_s1, b_s1 = schedule.coeffs_at(t_s1)
         a_s2, b_s2 = schedule.coeffs_at(t_s2)
         if rust_mod is not None:
-            psi = rust_mod.cfm4_step_py(
+            # C2 (issue #52): cfm4_step_py は (psi, m_eff_sum) を返す.
+            # 固定 dt cfm4 経路 (adaptive ではない) では m_eff 露出が不要なので
+            # discard する.
+            psi, _m_eff_sum = rust_mod.cfm4_step_py(
                 psi,
                 h_x_arr,
                 h_p_diag_arr,
@@ -918,7 +922,7 @@ def evolve_schedule_cfm4(
                 krylov_tol,
             )
         else:
-            psi = _python_cfm4_step(
+            psi, _m_eff_sum = _python_cfm4_step(
                 psi,
                 h_x_arr,
                 h_p_diag_arr,
@@ -1000,7 +1004,10 @@ def _python_cfm4_step_with_m2_estimate(
         ``‖ψ_cfm4 - ψ_m2‖_2`` (real, non-negative). PI controller が
         accept/reject 判定に使う.
     """
-    psi_cfm4 = _python_cfm4_step(
+    # C2 (issue #52): _python_cfm4_step は (psi, m_eff_sum) を返す.
+    # M2 estimate 経路は adaptive M2 driver でのみ使われ adaptive Richardson
+    # driver (本 issue の主対象) では使わない. m_eff_sum は discard する.
+    psi_cfm4, _m_eff_sum = _python_cfm4_step(
         psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol
     )
     psi_m2 = _python_m2_step(psi, h_x, h_p_diag, a_mid, b_mid, dt, m, krylov_tol)
@@ -1028,7 +1035,7 @@ def _python_cfm4_step_with_richardson_estimate(
     m: int,
     krylov_tol: float,
     extrapolate: bool,
-) -> tuple[np.ndarray, float]:
+) -> tuple[np.ndarray, float, int]:
     """CFM4:2 + step-doubling Richardson 推定子の Python リファレンス実装.
 
     Rust 側 ``cfm4_step_with_richardson_estimate`` (``src/cfm4.rs``) と
@@ -1099,11 +1106,16 @@ def _python_cfm4_step_with_richardson_estimate(
     err : float
         ``‖ψ_full - ψ_h2‖_2`` (real, non-negative). ``extrapolate`` フラグに
         依らず常に同一の値を返す.
+    m_eff_sum : int
+        full + half×2 の 3 cfm4_step (= 6 Lanczos 呼出) の ``m_eff`` 合計
+        (issue #52 A). adaptive Richardson driver が per-step
+        ``m_eff_total`` に集計する. ``m_eff_sum <= 6 · m`` を満たす.
     """
     half_dt = 0.5 * float(dt)
 
-    # 1) full-step CFM4:2 (dt)
-    psi_full = _python_cfm4_step(
+    # 1) full-step CFM4:2 (dt). C2 (issue #52): cfm4_step は (psi, m_eff_sum)
+    # を返す. 3 stage の m_eff を合計して戻り値 3-tuple の末尾に乗せる.
+    psi_full, m_eff_full = _python_cfm4_step(
         psi,
         h_x,
         h_p_diag,
@@ -1117,7 +1129,7 @@ def _python_cfm4_step_with_richardson_estimate(
     )
 
     # 2) 前半 half-step CFM4:2 (dt/2)
-    psi_mid = _python_cfm4_step(
+    psi_mid, m_eff_h1 = _python_cfm4_step(
         psi,
         h_x,
         h_p_diag,
@@ -1131,7 +1143,7 @@ def _python_cfm4_step_with_richardson_estimate(
     )
 
     # 3) 後半 half-step CFM4:2 (dt/2), 前半の出口状態を入口に取る.
-    psi_h2 = _python_cfm4_step(
+    psi_h2, m_eff_h2 = _python_cfm4_step(
         psi_mid,
         h_x,
         h_p_diag,
@@ -1151,7 +1163,7 @@ def _python_cfm4_step_with_richardson_estimate(
         psi_new = (16.0 * psi_h2 - psi_full) / 15.0
     else:
         psi_new = psi_h2
-    return psi_new, err
+    return psi_new, err, m_eff_full + m_eff_h1 + m_eff_h2
 
 
 def _adaptive_dispatch_m2_estimate(
@@ -1205,10 +1217,17 @@ def _adaptive_dispatch_richardson_estimate(
     m: int,
     krylov_tol: float,
     extrapolate: bool,
-) -> tuple[np.ndarray, float]:
-    """``rust_mod`` 可否に応じて Rust / Python の Richardson 推定子を呼ぶ."""
+) -> tuple[np.ndarray, float, int]:
+    """``rust_mod`` 可否に応じて Rust / Python の Richardson 推定子を呼ぶ.
+
+    C2 (issue #52): Rust / Python ref 双方が ``(psi_new, err, m_eff_sum)``
+    を返すよう拡張. m_eff_sum は full + half×2 の 3 cfm4_step (= 6 Lanczos
+    call) の m_eff 合計. adaptive Richardson driver
+    (``evolve_schedule_adaptive_richardson``) が per-step ``m_eff_total`` に
+    集計する.
+    """
     if rust_mod is not None:
-        psi_new, err = rust_mod.cfm4_step_with_richardson_estimate_py(
+        psi_new, err, m_eff_sum = rust_mod.cfm4_step_with_richardson_estimate_py(
             psi,
             h_x,
             h_p_diag,
@@ -1229,7 +1248,7 @@ def _adaptive_dispatch_richardson_estimate(
             krylov_tol,
             extrapolate,
         )
-        return psi_new, float(err)
+        return psi_new, float(err), int(m_eff_sum)
     return _python_cfm4_step_with_richardson_estimate(
         psi,
         h_x,
@@ -1591,7 +1610,10 @@ def evolve_schedule_adaptive_richardson(
         a_s1_h2, b_s1_h2 = schedule.coeffs_at(t_s1_h2)
         a_s2_h2, b_s2_h2 = schedule.coeffs_at(t_s2_h2)
 
-        psi_new, err = _adaptive_dispatch_richardson_estimate(
+        # C2 (issue #52): dispatcher は (psi_new, err, m_eff_sum) を返す.
+        # driver の戻り値タプル拡張 (m_eff 累積) は C3 で行うため, ここでは
+        # destructure して m_eff は一旦 discard.
+        psi_new, err, _m_eff_sum = _adaptive_dispatch_richardson_estimate(
             rust_mod,
             psi,
             h_x_arr,

@@ -241,7 +241,7 @@ pub(crate) fn cfm4_step(
     m: usize,
     krylov_tol: f64,
     n: usize,
-) -> PyResult<Vec<Complex64>> {
+) -> PyResult<(Vec<Complex64>, usize)> {
     let a_high = cfm4_a_high();
     let a_low = cfm4_a_low();
 
@@ -249,14 +249,11 @@ pub(crate) fn cfm4_step(
     // 畳み込んで Lanczos 1 回.
     let c_drv_1 = a_high * a_s1 + a_low * a_s2;
     let c_diag_1 = a_high * b_s1 + a_low * b_s2;
-    let psi_mid = {
+    let (psi_mid, m_eff_stage1) = {
         let matvec = |v: &[Complex64], y: &mut [Complex64]| {
             apply_h_kryanneal(v, y, h_x, h_p_diag, c_drv_1, c_diag_1, n);
         };
-        // C1 (issue #52): m_eff は C2 で `cfm4_step` の戻り値タプルとして
-        // 露出するまでは destructure して discard.
-        let (psi_stage1, _m_eff_stage1) = lanczos_propagate(matvec, psi, dt, m, krylov_tol)?;
-        psi_stage1
+        lanczos_propagate(matvec, psi, dt, m, krylov_tol)?
     };
 
     // stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に
@@ -266,8 +263,10 @@ pub(crate) fn cfm4_step(
     let matvec = |v: &[Complex64], y: &mut [Complex64]| {
         apply_h_kryanneal(v, y, h_x, h_p_diag, c_drv_2, c_diag_2, n);
     };
-    let (psi_new, _m_eff_stage2) = lanczos_propagate(matvec, &psi_mid, dt, m, krylov_tol)?;
-    Ok(psi_new)
+    let (psi_new, m_eff_stage2) = lanczos_propagate(matvec, &psi_mid, dt, m, krylov_tol)?;
+    // C2 (issue #52): 2 stage の m_eff 合計を返す. adaptive Richardson driver
+    // が per-step m_eff_total に集計する.
+    Ok((psi_new, m_eff_stage1 + m_eff_stage2))
 }
 
 /// `cfm4_step` の Python wrap.
@@ -299,7 +298,7 @@ pub(crate) fn cfm4_step_py<'py>(
     dt: f64,
     m: usize,
     krylov_tol: f64,
-) -> PyResult<Bound<'py, PyArray1<Complex64>>> {
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, usize)> {
     let psi_slice = psi.as_slice()?;
     let h_x_slice = h_x.as_slice()?;
     let h_p_diag_slice = h_p_diag.as_slice()?;
@@ -325,7 +324,7 @@ pub(crate) fn cfm4_step_py<'py>(
         return Err(PyValueError::new_err("m must be >= 1"));
     }
 
-    let psi_new = cfm4_step(
+    let (psi_new, m_eff_sum) = cfm4_step(
         psi_slice,
         h_x_slice,
         h_p_diag_slice,
@@ -338,7 +337,7 @@ pub(crate) fn cfm4_step_py<'py>(
         krylov_tol,
         n,
     )?;
-    Ok(psi_new.into_pyarray(py))
+    Ok((psi_new.into_pyarray(py), m_eff_sum))
 }
 
 /// CFM4:2 step を `cfm4_step` と同一の Hamiltonian / dt / Lanczos パラメータで
@@ -400,7 +399,11 @@ pub(crate) fn cfm4_step_with_m2_estimate(
     // 新規 Vec を返す所有権モデルなので, 明示 clone は不要 (内部の Lanczos が
     // 各々 ワークバッファ を確保する). 同じ `psi` を 2 度 immutable に
     // 借りる形で「同じ入口 ψ」契約を満たす.
-    let psi_cfm4 = cfm4_step(
+    // C2 (issue #52): cfm4_step は (psi, m_eff_sum) を返すようになったが,
+    // この M2 embedded estimator 経路は adaptive Richardson driver (本 issue
+    // の主対象) では使われない (adaptive M2 driver は将来の Phase 4 follow-up
+    // で扱う). 戻り値 signature を保ち m_eff は discard する.
+    let (psi_cfm4, _m_eff_sum) = cfm4_step(
         psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol, n,
     )?;
     let psi_m2 = m2_midpoint_step(psi, h_x, h_p_diag, a_mid, b_mid, dt, m, krylov_tol, n)?;
@@ -578,14 +581,17 @@ pub(crate) fn cfm4_step_with_richardson_estimate(
     krylov_tol: f64,
     n: usize,
     extrapolate: bool,
-) -> PyResult<f64> {
+) -> PyResult<(f64, usize)> {
     // 1) full-step CFM4:2 (dt) を同じ入口 ψ から走らせる.
-    let psi_full = cfm4_step(
+    // C2 (issue #52): cfm4_step は (psi, m_eff_sum) を返す. Richardson
+    // estimator は full + half + half の 3 cfm4_step (= 6 lanczos) を走らせる
+    // ので, m_eff_total は 3 stage の合計値.
+    let (psi_full, m_eff_full) = cfm4_step(
         psi, h_x, h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, dt, m, krylov_tol, n,
     )?;
 
     // 2) 前半 half-step CFM4:2 (dt/2) を同じ入口 ψ から走らせる.
-    let psi_mid = cfm4_step(
+    let (psi_mid, m_eff_h1) = cfm4_step(
         psi,
         h_x,
         h_p_diag,
@@ -600,7 +606,7 @@ pub(crate) fn cfm4_step_with_richardson_estimate(
     )?;
 
     // 3) 後半 half-step CFM4:2 (dt/2) を前半の出口状態から走らせる.
-    let psi_h2 = cfm4_step(
+    let (psi_h2, m_eff_h2) = cfm4_step(
         &psi_mid,
         h_x,
         h_p_diag,
@@ -613,6 +619,7 @@ pub(crate) fn cfm4_step_with_richardson_estimate(
         krylov_tol,
         n,
     )?;
+    let m_eff_total = m_eff_full + m_eff_h1 + m_eff_h2;
 
     // 4) err = ‖ψ_full - ψ_h2‖_2. 差ベクトルを一度組んで `blas::nrm2` を通すと
     //    BLAS feature on/off いずれの経路でも同一実装で算出できる
@@ -638,7 +645,7 @@ pub(crate) fn cfm4_step_with_richardson_estimate(
         psi.copy_from_slice(&psi_h2);
     }
 
-    Ok(err)
+    Ok((err, m_eff_total))
 }
 
 /// `cfm4_step_with_richardson_estimate` の Python wrap.
@@ -688,7 +695,7 @@ pub(crate) fn cfm4_step_with_richardson_estimate_py<'py>(
     m: usize,
     krylov_tol: f64,
     extrapolate: bool,
-) -> PyResult<(Bound<'py, PyArray1<Complex64>>, f64)> {
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, f64, usize)> {
     let psi_slice = psi.as_slice()?;
     let h_x_slice = h_x.as_slice()?;
     let h_p_diag_slice = h_p_diag.as_slice()?;
@@ -715,7 +722,7 @@ pub(crate) fn cfm4_step_with_richardson_estimate_py<'py>(
     }
 
     let mut psi_owned: Vec<Complex64> = psi_slice.to_vec();
-    let err = cfm4_step_with_richardson_estimate(
+    let (err, m_eff_total) = cfm4_step_with_richardson_estimate(
         &mut psi_owned,
         h_x_slice,
         h_p_diag_slice,
@@ -737,7 +744,7 @@ pub(crate) fn cfm4_step_with_richardson_estimate_py<'py>(
         n,
         extrapolate,
     )?;
-    Ok((psi_owned.into_pyarray(py), err))
+    Ok((psi_owned.into_pyarray(py), err, m_eff_total))
 }
 
 #[cfg(test)]
@@ -945,7 +952,7 @@ mod tests {
         let (a_s1, b_s1) = (rng.signed(), rng.signed());
         let (a_s2, b_s2) = (rng.signed(), rng.signed());
 
-        let result = cfm4_step(
+        let (result, _m_eff) = cfm4_step(
             &psi, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, 0.0, 24, 1e-12, n,
         )
         .expect("ok");
@@ -968,7 +975,7 @@ mod tests {
         let (a_s2, b_s2) = (0.7_f64, 0.3_f64);
         let dt = 0.25_f64;
 
-        let result = cfm4_step(
+        let (result, _m_eff) = cfm4_step(
             &psi, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, 24, 1e-12, n,
         )
         .expect("ok");
@@ -1007,8 +1014,9 @@ mod tests {
 
         let mut psi = psi0.clone();
         for _ in 0..n_steps {
-            psi =
+            let (psi_new, _m_eff) =
                 cfm4_step(&psi, &h_x, &h_p_diag, a_t, b_t, a_t, b_t, dt, 24, 1e-14, n).expect("ok");
+            psi = psi_new;
         }
 
         let h_real = build_dense_h_real(n, &h_x, &h_p_diag, a_t, b_t);
@@ -1081,10 +1089,11 @@ mod tests {
                 let b_s1 = b_base * f(s_1);
                 let a_s2 = a_base * f(s_2);
                 let b_s2 = b_base * f(s_2);
-                psi = cfm4_step(
+                let (psi_new, _m_eff) = cfm4_step(
                     &psi, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol, n,
                 )
                 .expect("ok");
+                psi = psi_new;
             }
             psi
         };
@@ -1146,7 +1155,7 @@ mod tests {
             let t_k = k as f64 * dt;
             let s_1 = t_k + c_1 * dt;
             let s_2 = t_k + c_2 * dt;
-            psi_cfm4 = cfm4_step(
+            let (psi_new, _m_eff) = cfm4_step(
                 &psi_cfm4,
                 &h_x,
                 &h_p_diag,
@@ -1160,6 +1169,7 @@ mod tests {
                 n,
             )
             .expect("ok");
+            psi_cfm4 = psi_new;
         }
 
         let mut psi_m2 = psi0.clone();
@@ -1319,7 +1329,7 @@ mod tests {
         let m = 24_usize;
         let krylov_tol = 1e-12_f64;
 
-        let psi_expected = cfm4_step(
+        let (psi_expected, _m_eff_expected) = cfm4_step(
             &psi0, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol, n,
         )
         .expect("ok");
@@ -1404,7 +1414,7 @@ mod tests {
         let (a_s2_h2, b_s2_h2) = (rng.signed(), rng.signed());
 
         let mut psi = psi0.clone();
-        let err = cfm4_step_with_richardson_estimate(
+        let (err, _m_eff_total) = cfm4_step_with_richardson_estimate(
             &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
             b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, 0.0, 24, 1e-12, n,
             false,
@@ -1471,12 +1481,13 @@ mod tests {
             let b_s2_h2 = b_base * f(t0 + 0.5 * dt + c_2 * dt * 0.5);
 
             let mut psi = psi0.clone();
-            cfm4_step_with_richardson_estimate(
+            let (err, _m_eff_total) = cfm4_step_with_richardson_estimate(
                 &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
                 b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, dt, m, krylov_tol,
                 n, false,
             )
-            .expect("ok")
+            .expect("ok");
+            err
         };
 
         let dt_coarse = 0.05_f64;
@@ -1621,7 +1632,7 @@ mod tests {
         let krylov_tol = 1e-12_f64;
 
         // reference: cfm4_step を dt/2 で 2 回叩く.
-        let psi_mid_expected = cfm4_step(
+        let (psi_mid_expected, _m_eff_mid) = cfm4_step(
             &psi0,
             &h_x,
             &h_p_diag,
@@ -1635,7 +1646,7 @@ mod tests {
             n,
         )
         .expect("ok");
-        let psi_expected = cfm4_step(
+        let (psi_expected, _m_eff_h2) = cfm4_step(
             &psi_mid_expected,
             &h_x,
             &h_p_diag,
@@ -1652,7 +1663,7 @@ mod tests {
 
         // actual: Richardson 経路を extrapolate=false で実行.
         let mut psi_actual = psi0.clone();
-        let _err = cfm4_step_with_richardson_estimate(
+        let (_err, _m_eff_total) = cfm4_step_with_richardson_estimate(
             &mut psi_actual,
             &h_x,
             &h_p_diag,

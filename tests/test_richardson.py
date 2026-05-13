@@ -118,7 +118,9 @@ def test_python_richardson_matches_rust(n: int, seed: int, extrapolate: bool) ->
         (a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2),
     ) = _full_h1_h2_nodes(0.5, dt)
 
-    psi_py, err_py = _python_cfm4_step_with_richardson_estimate(
+    # issue #52 A: Rust / Python ref とも (psi, err, m_eff_sum) を返す.
+    # m_eff_sum (6 Lanczos 呼出の合計) も完全一致が新契約.
+    psi_py, err_py, m_eff_py = _python_cfm4_step_with_richardson_estimate(
         psi,
         h_x,
         h_p_diag,
@@ -139,7 +141,7 @@ def test_python_richardson_matches_rust(n: int, seed: int, extrapolate: bool) ->
         krylov_tol,
         extrapolate,
     )
-    psi_rust, err_rust = _rust_mod.cfm4_step_with_richardson_estimate_py(
+    psi_rust, err_rust, m_eff_rust = _rust_mod.cfm4_step_with_richardson_estimate_py(
         psi,
         h_x,
         h_p_diag,
@@ -159,6 +161,9 @@ def test_python_richardson_matches_rust(n: int, seed: int, extrapolate: bool) ->
         m,
         krylov_tol,
         extrapolate,
+    )
+    assert m_eff_py == m_eff_rust, (
+        f"m_eff_sum mismatch: py={m_eff_py}, rust={m_eff_rust}"
     )
     rel_psi = np.linalg.norm(psi_py - psi_rust) / max(np.linalg.norm(psi_rust), 1.0)
     rel_err = abs(err_py - err_rust) / max(abs(err_rust), 1.0)
@@ -188,7 +193,7 @@ def test_python_richardson_err_scaling_dt_fifth() -> None:
             (a_s1_h1, b_s1_h1, a_s2_h1, b_s2_h1),
             (a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2),
         ) = _full_h1_h2_nodes(0.3, dt)
-        _, err = _python_cfm4_step_with_richardson_estimate(
+        _, err, _m_eff = _python_cfm4_step_with_richardson_estimate(
             psi,
             h_x,
             h_p_diag,
@@ -286,7 +291,7 @@ def test_python_richardson_extrapolate_improves_accuracy() -> None:
             b_s1_h2 = b_base * f(half + _CFM4_C1 * half)
             a_s2_h2 = a_base * f(half + _CFM4_C2 * half)
             b_s2_h2 = b_base * f(half + _CFM4_C2 * half)
-            psi_new, _ = _python_cfm4_step_with_richardson_estimate(
+            psi_new, _err, _m_eff = _python_cfm4_step_with_richardson_estimate(
                 psi,
                 h_x,
                 h_p_diag,
@@ -338,7 +343,7 @@ def test_python_richardson_dt_zero_err_zero() -> None:
     h_x, h_p_diag, psi = _random_setup(n, seed=4096)
     # ノード係数は任意 (dt=0 で identity).
     for extrapolate in (False, True):
-        psi_new, err = _python_cfm4_step_with_richardson_estimate(
+        psi_new, err, _m_eff = _python_cfm4_step_with_richardson_estimate(
             psi,
             h_x,
             h_p_diag,
@@ -381,7 +386,7 @@ def test_python_richardson_psi_h2_matches_two_step_cfm4() -> None:
         (a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2),
     ) = _full_h1_h2_nodes(0.7, dt)
 
-    psi_new, _ = _python_cfm4_step_with_richardson_estimate(
+    psi_new, _err, _m_eff = _python_cfm4_step_with_richardson_estimate(
         psi,
         h_x,
         h_p_diag,
@@ -402,10 +407,10 @@ def test_python_richardson_psi_h2_matches_two_step_cfm4() -> None:
         1e-12,
         False,
     )
-    psi_mid = _python_cfm4_step(
+    psi_mid, _m_eff_mid = _python_cfm4_step(
         psi, h_x, h_p_diag, a_s1_h1, b_s1_h1, a_s2_h1, b_s2_h1, 0.5 * dt, 24, 1e-12
     )
-    psi_h2_ref = _python_cfm4_step(
+    psi_h2_ref, _m_eff_h2 = _python_cfm4_step(
         psi_mid,
         h_x,
         h_p_diag,
