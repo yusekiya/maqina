@@ -382,20 +382,28 @@ class QuantumAnnealer:
                         f"m_max must be a positive integer or None, got {m_max!r}"
                     )
                 m_eff_param = int(m_max)
-            psi_final, _t_history, dt_history, _n_rejects = (
-                evolve_schedule_adaptive_richardson(
-                    h_x=self.problem.h_x,
-                    h_p_diag=self.problem.H_p_diag,
-                    schedule=self.schedule,
-                    psi0=psi0_arr,
-                    t0=t0,
-                    t1=t1,
-                    m=m_eff_param,
-                    krylov_tol=self.krylov_tol,
-                    tol_step=tol_step,
-                    dt0=dt0,
-                    dt_max=dt_max_resolved,
-                )
+            # C3 (issue #52 A): driver は 5-tuple
+            # `(psi, t_hist, dt_hist, n_rejects, m_eff_hist)` を返す.
+            # C4 で m_eff_hist から `QuantumResult.m_eff_stats` を計算するが,
+            # 本コミット (C3) では destructure して一旦 discard.
+            (
+                psi_final,
+                _t_history,
+                dt_history,
+                _n_rejects,
+                _m_eff_history,
+            ) = evolve_schedule_adaptive_richardson(
+                h_x=self.problem.h_x,
+                h_p_diag=self.problem.H_p_diag,
+                schedule=self.schedule,
+                psi0=psi0_arr,
+                t0=t0,
+                t1=t1,
+                m=m_eff_param,
+                krylov_tol=self.krylov_tol,
+                tol_step=tol_step,
+                dt0=dt0,
+                dt_max=dt_max_resolved,
             )
             n_steps_actual = int(dt_history.shape[0])
             n_matvec = n_steps_actual * 6 * m_eff_param

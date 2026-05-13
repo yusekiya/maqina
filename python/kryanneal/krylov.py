@@ -1510,7 +1510,7 @@ def evolve_schedule_adaptive_richardson(
     max_rejects: int = 50,
     richardson_extrapolate: bool = False,
     save_tlist: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray]:
     """CFM4:2 + step-doubling Richardson 推定子による adaptive dt ドライバ.
 
     PI controller (``docs/design.md`` §5.3) で local error を ``tol_step``
@@ -1552,6 +1552,14 @@ def evolve_schedule_adaptive_richardson(
         shape ``(K-1,)`` float64. 各 accept された step の dt.
     n_rejects : int
         累積 reject 回数.
+    m_eff_history : np.ndarray
+        shape ``(K-1,)`` int64. 各 accept された step の Lanczos 部分空間
+        次元 ``m_eff`` の合計 (full + half×2 = 6 Lanczos 呼出, ``m_eff_sum
+        <= 6m``). issue #52 A で adaptive driver の per-step 実コストを
+        ``QuantumResult.m_eff_stats`` (median / min / max / mean) に集計
+        するため. β_k 早期打切により ``m_eff < m`` になる step では
+        ``m_eff_sum`` が ``6m`` 未満になり, ``n_matvec`` 推定 (現状
+        ``n_steps_actual · 6m``) より実コストは小さい.
 
     Raises
     ------
@@ -1593,6 +1601,12 @@ def evolve_schedule_adaptive_richardson(
     n_consecutive_rejects = 0
     t_hist: list[float] = [t]
     dt_hist: list[float] = []
+    # C3 (issue #52 A): accept された step の m_eff_sum を積み上げる.
+    # per-step Lanczos 次元合計 (= 6 Lanczos 呼出の m_eff 合計; 早期打切
+    # なしで 6m, ありで 6m 未満). reject された step の m_eff は
+    # cumulative cost の観点では sunk だが本 history には含めない
+    # (PI accept ステップ数とインデックスを揃える設計).
+    m_eff_hist: list[int] = []
     while t < t_end:
         dt_try = min(dt, t_end - t)
         half_dt = 0.5 * dt_try
@@ -1610,10 +1624,9 @@ def evolve_schedule_adaptive_richardson(
         a_s1_h2, b_s1_h2 = schedule.coeffs_at(t_s1_h2)
         a_s2_h2, b_s2_h2 = schedule.coeffs_at(t_s2_h2)
 
-        # C2 (issue #52): dispatcher は (psi_new, err, m_eff_sum) を返す.
-        # driver の戻り値タプル拡張 (m_eff 累積) は C3 で行うため, ここでは
-        # destructure して m_eff は一旦 discard.
-        psi_new, err, _m_eff_sum = _adaptive_dispatch_richardson_estimate(
+        # C3 (issue #52): dispatcher は (psi_new, err, m_eff_sum) を返す.
+        # accept された step のみ m_eff_sum を m_eff_hist に積む.
+        psi_new, err, m_eff_sum = _adaptive_dispatch_richardson_estimate(
             rust_mod,
             psi,
             h_x_arr,
@@ -1642,6 +1655,7 @@ def evolve_schedule_adaptive_richardson(
             t = t + dt_try
             t_hist.append(t)
             dt_hist.append(dt_try)
+            m_eff_hist.append(int(m_eff_sum))
             n_consecutive_rejects = 0
             dt = _pi_dt_next(
                 dt_try,
@@ -1669,4 +1683,5 @@ def evolve_schedule_adaptive_richardson(
         np.asarray(t_hist, dtype=np.float64),
         np.asarray(dt_hist, dtype=np.float64),
         int(n_rejects),
+        np.asarray(m_eff_hist, dtype=np.int64),
     )

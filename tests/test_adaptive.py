@@ -131,15 +131,18 @@ def test_adaptive_richardson_matches_qutip() -> None:
     sched = Schedule.linear(T=T)
     psi0 = uniform_superposition(n)
 
-    psi_final, t_history, dt_history, n_rejects = evolve_schedule_adaptive_richardson(
-        h_x=prob.h_x,
-        h_p_diag=prob.H_p_diag,
-        schedule=sched,
-        psi0=psi0,
-        t0=0.0,
-        t1=T,
-        tol_step=1e-8,
-        dt0=0.1,
+    # issue #52 A: driver は 5-tuple (psi, t_hist, dt_hist, n_rejects, m_eff_hist).
+    psi_final, t_history, dt_history, n_rejects, m_eff_history = (
+        evolve_schedule_adaptive_richardson(
+            h_x=prob.h_x,
+            h_p_diag=prob.H_p_diag,
+            schedule=sched,
+            psi0=psi0,
+            t0=0.0,
+            t1=T,
+            tol_step=1e-8,
+            dt0=0.1,
+        )
     )
     psi_ref = _qutip_reference(prob.h_x, prob.H_p_diag, T)
     fid = _fidelity(psi_final, psi_ref)
@@ -151,6 +154,9 @@ def test_adaptive_richardson_matches_qutip() -> None:
     assert dt_history.shape[0] == t_history.shape[0] - 1
     assert n_rejects >= 0
     assert abs(np.linalg.norm(psi_final) - 1.0) < 1e-10
+    # m_eff_history は accept された step 数と同じ長さ, 各値は 6m 以下.
+    assert m_eff_history.shape == dt_history.shape
+    assert int(np.max(m_eff_history)) <= 6 * 24  # default m=24
 
 
 def test_adaptive_pi_dt_grows_with_loose_tolerance() -> None:
@@ -169,7 +175,7 @@ def test_adaptive_pi_dt_grows_with_loose_tolerance() -> None:
     sched = Schedule(T=T, A=lambda s: 0.5, B=lambda s: 0.5)
     psi0 = uniform_superposition(n)
 
-    _, _, dt_history, _ = evolve_schedule_adaptive_richardson(
+    _, _, dt_history, _, _ = evolve_schedule_adaptive_richardson(
         h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
@@ -199,7 +205,7 @@ def test_adaptive_rejects_oversized_dt0() -> None:
     sched = Schedule.linear(T=T)
     psi0 = uniform_superposition(n)
 
-    _, _, _, n_rejects = evolve_schedule_adaptive_richardson(
+    _, _, _, n_rejects, _ = evolve_schedule_adaptive_richardson(
         h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
@@ -471,7 +477,7 @@ def test_auto_dt_max_facade_caps_dt_history() -> None:
     # cap を超えないこと, かつ PI が dt0=0.5 から伸びていることを driver
     # 直接呼出で dt_history を見て確認 (QuantumResult は dt_history を
     # 公開しないので driver layer に降りる).
-    _, _, dt_history, _ = evolve_schedule_adaptive_richardson(
+    _, _, dt_history, _, _ = evolve_schedule_adaptive_richardson(
         h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
