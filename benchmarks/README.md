@@ -8,7 +8,7 @@
 
 | スクリプト | 内容 | 導入 Phase |
 |---|---|---|
-| `bench_per_step.py` | M2 / Trotter / Suzuki S_4 (Phase 1-2) の per-step wall time を `(method, n)` で sweep. CFM4 (Phase 3) / Richardson (Phase 4) は将来追加 | Phase 1 (M2) → Phase 2 (Trotter / Suzuki S_4 追加) |
+| `bench_per_step.py` | M2 / Trotter / Suzuki S_4 / CFM4:2 / CFM4 adaptive Richardson の per-step wall time を `(method, n)` で sweep. adaptive 経路は `n_steps_actual` (PI controller が accept した実 step 数) と `final_err_vs_ref` (高精度参照解との state 差) も併記 | Phase 1 (M2) → Phase 2 (Trotter / Suzuki S_4) → Phase 3 (CFM4:2) → Phase 4 C3 (adaptive Richardson) |
 | `bench_blas_compare.py` | BLAS feature on/off の同一マシン比較 | Phase 6 予定 |
 | `bench_vs_qutip.py` | QuTiP `sesolve` との fidelity vs wall time | Phase 3 以降予定 |
 
@@ -22,7 +22,10 @@ uv run python benchmarks/bench_per_step.py
 
 - `--n-values N1,N2,...`: sweep するスピン数の列 (default `4,8,12,16`).
 - `--methods M1,M2,...`: 計測する propagator method の列
-  (`m2` / `trotter` / `trotter_suzuki4` から選ぶ, default 全て).
+  (`m2` / `trotter` / `trotter_suzuki4` / `cfm4` / `cfm4_adaptive_richardson`
+  から選ぶ, default 全て). adaptive 経路を含む場合は同 `n` で高精度
+  参照解 (fixed CFM4:2 ・ 多 step) を 1 回計算してから per-method 計測を
+  回す.
 - `--n-steps K`: 各 `(n, method)` で時間発展する step 数 (default 50).
 - `--m M`: Lanczos 部分空間次元 (default 24). `method="m2"` のみで使用,
   Trotter / Suzuki S_4 経路では Lanczos を呼ばないため無視される.
@@ -43,10 +46,21 @@ uv run python benchmarks/bench_per_step.py
 `benchmarks/results/<YYYYMMDD-HHMMSS>/` を作り, 以下を書く:
 
 - `bench_per_step.csv`: 全試行の raw タイムスタンプ (n, dim, method,
-  trial, n_steps, dt, m, total_wall_sec, per_step_sec, states_per_sec).
+  trial, n_steps, dt, m, total_wall_sec, per_step_sec, states_per_sec,
+  n_steps_actual, final_err_vs_ref). 末尾 2 列は adaptive 経路でのみ
+  実値が入り, 固定 dt 経路では `n_steps_actual=n_steps` / `final_err_vs_ref=n/a`.
 - `bench_per_step.md`: 集計表 (per-method summary + cross-method 比較表)
   と machine info (uname / Python / numpy version / BLAS pool).
   cross-method 表は M2 を基準にした ratio (`m2 / trotter` 等) を併記する.
+  adaptive 経路 (`cfm4_adaptive_richardson` 等) を含む実行ではさらに
+  `## Adaptive driver detail` 節を追加し, PI controller が accept した
+  実 step 数 `n_steps_actual` (median + min/max) と参照解との
+  `final_err_vs_ref` (median) を per-n × method で並べる. これらは
+  adaptive driver の性能・精度評価で最重要な 2 値だが Summary 表からは
+  落ちるため別節で必ず出す. 参照解計算 (`_compute_reference_psi`) の
+  wall time は machine info の `reference_wall_sec_total` (合算) と
+  adaptive section の per-n `reference_wall (sec)` 列に記録する
+  (大 n で reference 1 本に 1-2 時間かかる現実問題に対する透明性).
 
 **重要**: 同じ `n_steps` での raw per-step 比較は LTE order の違い
 (M2 / Strang は `O(dt^3)`, Suzuki S_4 は `O(dt^5)`) を **無視している**
