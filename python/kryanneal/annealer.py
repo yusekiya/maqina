@@ -27,6 +27,11 @@ Phase 5 で導入予定).
   ``atol`` (PI 局所誤差閾値; driver の ``tol_step`` に map) と ``dt_init``
   (初期 dt 提案; driver の ``dt0`` に map) を kw-only で受ける. どちらも
   ``None`` のときは driver 既定値 (``tol_step=1e-8``, ``dt0=0.5``) を使う.
+  ``dt_init="auto"`` を渡すと linear schedule の Magnus 級数 T スケーリング
+  (s-space scaling invariance, ``docs/design.md`` §5.3) から導いた保守値
+  ``dt0 = max(min(c · T^β, T), floor)`` (既定 ``c=0.1, β=0.5, floor=1e-3``)
+  を使う. PI controller の warmup step (default 0.5 → optimal dt への成長)
+  を T 依存に削減する DX 改善 (issue #43 A).
 
 実装方針: ``kryanneal.krylov.evolve_schedule_m2`` /
 ``evolve_schedule_trotter`` / ``evolve_schedule_trotter_suzuki4`` /
@@ -59,6 +64,42 @@ __all__ = ["QuantumAnnealer"]
 
 
 _PSI_NORM_TOL: float = 1e-10
+
+# ``dt_init="auto"`` の T-dep 推定パラメータ. issue #43 A.
+#
+# 線形 schedule では Magnus 級数の T スケーリング (s-space scaling
+# invariance) から最適 dt が ``dt* ~ c · T^{3/4}`` で伸びる. 理論最適は
+# ``β=0.75`` だが ``β=0.5`` でも warmup step の大部分は削減できる保守値
+# として既定採用. ``c=0.1`` は driver default ``dt0=0.5`` を ``T=1`` で
+# 5 倍下回る程度に絞り, schedule が非線形でも安全側に倒す.
+_AUTO_DT_INIT_C: float = 0.1
+_AUTO_DT_INIT_BETA: float = 0.5
+# ``T < 1`` (T 自体が小さい) ケースの床値. ``c · T^β`` が driver の
+# ``dt_min`` (default ``1e-4``) を下回る範囲では床値が支配する.
+# ``1e-3`` は実用 atol ``1e-8`` での PI controller が 1-2 step で再評価
+# できる最低粒度として選んだ (driver dt_min との安全マージン).
+_AUTO_DT_INIT_FLOOR: float = 1e-3
+
+
+def _resolve_dt_init_auto(t0: float, t1: float) -> float:
+    """``dt_init="auto"`` の解決値 ``c · T^β`` を返す (T = ``t1 - t0``).
+
+    ``T < 1`` で値が極端に小さくなることを防ぐ床値 ``_AUTO_DT_INIT_FLOOR``
+    と, ``dt_init`` が interval ``T`` を超えないようにする上限を同時に張る
+    (driver 側の step ループでも ``min(dt, t_end - t)`` で再クランプされる
+    が, 初期値で interval を超えないこと自体は driver 入力検証
+    ``dt_max >= dt0`` の自然性を保つ).
+
+    issue #43 A の motivation: 線形 schedule では Magnus 級数の T
+    スケーリング (s-space scaling invariance, ``docs/design.md`` §5.3)
+    から最適 dt が T 依存で伸びるため, ``dt_init`` を T 依存に取れば
+    PI controller の warmup step (default ``0.5`` → optimal dt への成長)
+    を削減できる. 既定 ``c=0.1``, ``β=0.5`` は理論最適 ``β=0.75`` より
+    保守的だが warmup の大部分を削減できる中庸値 (issue 本文参照).
+    """
+    T = float(t1) - float(t0)
+    dt_auto = _AUTO_DT_INIT_C * (T**_AUTO_DT_INIT_BETA)
+    return min(max(dt_auto, _AUTO_DT_INIT_FLOOR), T)
 
 
 class QuantumAnnealer:
@@ -112,7 +153,7 @@ class QuantumAnnealer:
         ] = "m2",
         n_steps: int | None = None,
         atol: float | None = None,
-        dt_init: float | None = None,
+        dt_init: float | Literal["auto"] | None = None,
         save_tlist: np.ndarray | None = None,
     ) -> QuantumResult:
         """``[t0, t1]`` 区間で時間発展を実行し ``QuantumResult`` を返す.
@@ -145,7 +186,15 @@ class QuantumAnnealer:
         dt_init
             adaptive 経路の初期 dt 提案. driver の ``dt0`` に map される.
             ``None`` のときは driver 既定値 ``0.5`` を使う. 固定 dt 経路
-            では無視される.
+            では無視される. ``"auto"`` を渡すと
+            ``dt0 = max(min(c · T^β, T), _AUTO_DT_INIT_FLOOR)``
+            (T = ``t1 - t0``, 既定 ``c=0.1, β=0.5, floor=1e-3``) で解決し,
+            PI controller の warmup step を T 依存で削減する
+            (s-space scaling invariance, ``docs/design.md`` §5.3,
+            issue #43 A). 例えば ``T=100`` で ``dt0=1.0``, ``T=1`` で
+            ``dt0=0.1``, ``T=0.01`` で ``dt0=0.01`` (床値より大きいので
+            formula 値) → driver default ``0.5`` 比でいずれも warmup を
+            短縮する保守値となる.
         save_tlist
             観測時刻列 (Phase 5 で実装予定). 現状は ``None`` 以外を
             渡すと ``NotImplementedError``.
@@ -204,7 +253,16 @@ class QuantumAnnealer:
             # NOTE: 既定値は driver (``evolve_schedule_adaptive_richardson``)
             # 側と一致させること. driver 側を変えたら本ファイルも追従する.
             tol_step = float(atol) if atol is not None else 1e-8
-            dt0 = float(dt_init) if dt_init is not None else 0.5
+            if isinstance(dt_init, str):
+                if dt_init != "auto":
+                    raise ValueError(
+                        f"dt_init must be 'auto', a float, or None; got {dt_init!r}"
+                    )
+                dt0 = _resolve_dt_init_auto(t0, t1)
+            elif dt_init is None:
+                dt0 = 0.5
+            else:
+                dt0 = float(dt_init)
             psi_final, _t_history, dt_history, _n_rejects = (
                 evolve_schedule_adaptive_richardson(
                     h_x=self.problem.h_x,

@@ -1066,6 +1066,52 @@ def evolve_schedule_adaptive_richardson(
 `QuantumAnnealer.run(method="cfm4_adaptive_richardson", ...)` はこれを
 内部で呼ぶ薄いラッパ。
 
+#### adaptive driver の DX 改善 (Phase 4 follow-up, issue #43)
+
+`m` / `dt_init` / `dt_max` の手動チューニングを段階的に自動化する
+follow-up 群 (issue #43)。バージョンは `0.4.x` 系の patch リリースで
+取り込む (公開 API の破壊的変更なし; シグネチャ拡張のみ)。
+
+##### A. `dt_init="auto"` (issue #43 A, v0.4.x で導入)
+
+`QuantumAnnealer.run(method="cfm4_adaptive_richardson", dt_init="auto")`
+を渡すと, facade 側で線形 schedule の Magnus 級数 T スケーリング
+(s-space scaling invariance) から導いた保守値を `dt0` に解決する:
+
+```
+dt0 = min(max(c · T^β, _AUTO_DT_INIT_FLOOR), T)
+       (T = t1 - t0, 既定 c = 0.1, β = 0.5, floor = 1e-3)
+```
+
+理論最適は `β = 3/4` (Magnus 切断誤差 `~ K · dt^5`, `K ~ ‖[H_drv, H_p]‖²`
+の T 依存と `T = (t1 - t0)` 区間長から導出, `docs/design.md` §5.3 内
+PI controller 既定値の議論と整合) だが, schedule 非線形性や問題依存性に
+対するロバスト性を取って `β = 0.5` を既定とした (issue 本文の motivation
+参照)。`T < 1` の小 T ケースで `c · T^β` が driver の `dt_min` (default
+`1e-4`) を下回らないよう床値 `1e-3` を, 逆に `dt0 > T` で driver 入力
+検証 `dt_max >= dt0` (`dt_max = 10 · dt0` default) を満たさなくなる退化
+ケースを避けるため上限 `T` を同時に張る。
+
+resolution は facade 層 (`python/kryanneal/annealer.py`) で行い, driver
+(`evolve_schedule_adaptive_richardson`) は受け取った `dt0` をそのまま
+使う。これにより driver 単体テスト (`tests/test_adaptive.py` 既存) は
+変更不要で, facade 層のテスト (同ファイル末尾に追加) で `"auto"`
+解決後の挙動と PI controller との接続を smoke 検証する。
+
+##### B. `dt_max` の Lanczos capacity 自動見積もり (issue #43 B, 未着手)
+
+Gershgorin 上界 `‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|` から
+`dt_max = min(default_dt_max, 4m / ‖H‖_est)` で Lanczos safe 領域に
+クランプする予定。詳細は本リリース時点では未確定。
+
+##### C. `m` の adaptive 化 (issue #43 C, 未着手)
+
+Lanczos 内で `β_k < krylov_tol` 早期打切を extend し, `m_init=16,
+m_max=32` で adaptive に切り上げる予定。`m_eff` の累積統計を
+`QuantumResult` に保存し, 同一問題で `m=adaptive` と `m=24 fixed` の
+終端 ψ が `rel < 1e-12` で一致することを契約とする。詳細は本リリース
+時点では未確定。
+
 ### 5.4 Python リファレンス実装
 
 `python/kryanneal/krylov.py` に `_python_lanczos_propagate` /
