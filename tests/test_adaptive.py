@@ -380,6 +380,150 @@ def test_auto_dt_init_invalid_string_raises() -> None:
         )
 
 
+def test_auto_dt_max_resolves_to_formula() -> None:
+    """``dt_max="auto"`` の解決値が ``max(min(10·dt0, 4m/‖H‖_est), dt0)`` と一致.
+
+    helper 単体で:
+    - 通常域 (cap < default < 大): cap が支配
+    - cap > default: default (10·dt0) が支配
+    - cap < dt0: dt0 floor が支配
+    の 3 パターンを機械精度で確認する.
+    """
+    from kryanneal.annealer import _gershgorin_norm_upper_bound, _resolve_dt_max_auto
+
+    # 案件: 大 N で cap が支配する設定. h_x=1·n=20, H_p_diag in [-1, 1].
+    n = 20
+    rng = np.random.default_rng(0)
+    h_p = rng.uniform(-1.0, 1.0, size=1 << n).astype(np.float64)
+    h_x = np.ones(n, dtype=np.float64)
+    prob = IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
+    norm_h = _gershgorin_norm_upper_bound(prob)
+    # h_x の合計 20 + max|H_p_diag| ≈ 1 → ‖H‖_est ≈ 21.
+    assert 20.5 < norm_h < 21.5
+
+    # cap = 4·24/21 ≈ 4.57, default_dt_max = 10·0.5 = 5.0 → cap が支配.
+    val = _resolve_dt_max_auto(prob, m=24, dt0=0.5)
+    expected_cap = 4.0 * 24.0 / norm_h
+    assert val == pytest.approx(expected_cap, rel=1e-15)
+    assert val < 5.0  # default を下回る
+
+    # default 支配域: dt0=0.1 → default=1.0, cap=4.57 → default が支配.
+    val_default = _resolve_dt_max_auto(prob, m=24, dt0=0.1)
+    assert val_default == pytest.approx(1.0, rel=1e-15)
+
+    # floor 支配域: dt0=10 → default=100, cap=4.57 → cap < dt0 → floor (dt0=10).
+    val_floor = _resolve_dt_max_auto(prob, m=24, dt0=10.0)
+    assert val_floor == pytest.approx(10.0, rel=1e-15)
+
+
+def test_auto_dt_max_facade_caps_dt_history() -> None:
+    """``dt_max="auto"`` で driver 出力が ``dt_max=<auto-resolved float>`` と
+    ビット一致し, dt が cap を超えないこと, かつ PI が dt0 から成長する
+    ことを確認する.
+
+    n=10, h_x=5·ones (‖H‖_est ≈ 50+1) で cap = 4·24/51 ≈ 1.88. Richardson
+    自体が breakdown を embedded error で検出するため実 dt は cap よりも
+    手前 (~ dt0·growth_max) で頭打ちになることが多いが, "cap を超えない"
+    という上界保証が本テストの主目的.
+    """
+    from kryanneal import QuantumAnnealer
+    from kryanneal.annealer import _gershgorin_norm_upper_bound, _resolve_dt_max_auto
+
+    n = 10
+    T = 5.0
+    rng = np.random.default_rng(20260513)
+    h_p = rng.uniform(-1.0, 1.0, size=1 << n).astype(np.float64)
+    h_x = 5.0 * np.ones(n, dtype=np.float64)
+    prob = IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
+    norm_h = _gershgorin_norm_upper_bound(prob)
+    expected_cap = _resolve_dt_max_auto(prob, m=24, dt0=0.5)
+    # cap = 4·24/51 ≈ 1.88, default 10·0.5 = 5.0 → cap が支配.
+    assert expected_cap == pytest.approx(4.0 * 24.0 / norm_h, rel=1e-15)
+    assert expected_cap < 5.0
+
+    sched = Schedule(T=T, A=lambda s: 0.5, B=lambda s: 0.5)
+    psi0 = uniform_superposition(n)
+
+    ann = QuantumAnnealer(prob, sched)
+    res_auto = ann.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=1e-6,
+        dt_init=0.5,
+        dt_max="auto",
+    )
+    res_manual = ann.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=1e-6,
+        dt_init=0.5,
+        dt_max=expected_cap,
+    )
+    # auto 経路と「auto-resolved float を手動で渡す」がビット一致
+    # (PI controller は決定論的なので, 同じ入力で同じ出力になる).
+    np.testing.assert_array_equal(res_auto.psi_final, res_manual.psi_final)
+    assert res_auto.n_steps_actual == res_manual.n_steps_actual
+
+    # cap を超えないこと, かつ PI が dt0=0.5 から伸びていることを driver
+    # 直接呼出で dt_history を見て確認 (QuantumResult は dt_history を
+    # 公開しないので driver layer に降りる).
+    _, _, dt_history, _ = evolve_schedule_adaptive_richardson(
+        h_x=prob.h_x,
+        h_p_diag=prob.H_p_diag,
+        schedule=sched,
+        psi0=psi0,
+        t0=0.0,
+        t1=T,
+        tol_step=1e-6,
+        dt0=0.5,
+        dt_max=expected_cap,
+    )
+    # accept された全 dt が cap 以下 (floating tolerance を許容).
+    assert float(np.max(dt_history)) <= expected_cap * (1.0 + 1e-12)
+    # PI が dt0=0.5 から少なくとも成長していること (cap が動作していても
+    # 成長余地はある).
+    assert float(np.max(dt_history)) > 0.5
+
+
+def test_auto_dt_max_invalid_string_raises() -> None:
+    """``dt_max`` に ``"auto"`` 以外の文字列を渡すと ``ValueError``."""
+    from kryanneal import QuantumAnnealer
+
+    n = 3
+    prob = _make_random_problem(n, seed=11)
+    sched = Schedule.linear(T=1.0)
+    psi0 = uniform_superposition(n)
+
+    ann = QuantumAnnealer(prob, sched)
+    with pytest.raises(ValueError, match="dt_max"):
+        ann.run(
+            psi0,
+            0.0,
+            1.0,
+            method="cfm4_adaptive_richardson",
+            dt_max="bogus",  # type: ignore[arg-type]
+        )
+
+
+def test_auto_dt_max_zero_hamiltonian_falls_back_to_default() -> None:
+    """h_x=0 かつ H_p_diag=0 の縮退で ``_resolve_dt_max_auto`` は default を返す.
+
+    Gershgorin 上界が 0 になるケースの fallback path カバレッジ.
+    """
+    from kryanneal.annealer import _resolve_dt_max_auto
+
+    n = 3
+    h_p = np.zeros(1 << n, dtype=np.float64)
+    h_x = np.zeros(n, dtype=np.float64)
+    prob = IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
+    val = _resolve_dt_max_auto(prob, m=24, dt0=0.5)
+    assert val == pytest.approx(5.0, rel=1e-15)  # 10·dt0
+
+
 def test_adaptive_save_tlist_not_implemented() -> None:
     """``save_tlist is not None`` で ``NotImplementedError`` (Phase 5)."""
     n = 3

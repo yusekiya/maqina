@@ -35,6 +35,11 @@ Phase 5 で導入予定).
   ``dt0 = max(min(c · T^β, T), floor)`` (既定 ``c=0.1, β=0.5, floor=1e-3``)
   を使う. PI controller の warmup step (default 0.5 → optimal dt への成長)
   を T 依存に削減する DX 改善 (issue #43 A).
+* ``dt_max="auto"`` を渡すと Gershgorin 上界
+  ``‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|`` から Lanczos capacity
+  自動見積もり ``dt_max = max(min(10·dt0, 4m / ‖H‖_est), dt0)`` で
+  ``dt · ‖H‖ ≲ 4m`` の安全領域にクランプする (issue #43 B). 大 N で
+  ``‖H‖ ∝ N`` が支配的になる領域で PI controller を守備に機能させる.
 
 実装方針: ``kryanneal.krylov.evolve_schedule_m2`` /
 ``evolve_schedule_trotter`` / ``evolve_schedule_trotter_suzuki4`` /
@@ -84,7 +89,7 @@ class QuantumAnnealer:
     def __init__(self, problem: IsingProblem, schedule: Schedule, *, m: int=24, krylov_tol: float=1e-12) -> None:
         ...
 
-    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='m2', n_steps: int | None=None, atol: float | None=None, dt_init: float | Literal['auto'] | None=None, save_tlist: np.ndarray | None=None) -> QuantumResult:
+    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='m2', n_steps: int | None=None, atol: float | None=None, dt_init: float | Literal['auto'] | None=None, dt_max: float | Literal['auto'] | None=None, save_tlist: np.ndarray | None=None) -> QuantumResult:
         """``[t0, t1]`` 区間で時間発展を実行し ``QuantumResult`` を返す.
 
         Parameters
@@ -124,6 +129,19 @@ class QuantumAnnealer:
             ``dt0=0.1``, ``T=0.01`` で ``dt0=0.01`` (床値より大きいので
             formula 値) → driver default ``0.5`` 比でいずれも warmup を
             短縮する保守値となる.
+        dt_max
+            adaptive 経路の最大 dt 上限. driver の ``dt_max`` に map される.
+            ``None`` のときは driver 既定値 ``10 · dt0`` を使う. 固定 dt
+            経路では無視される. ``"auto"`` を渡すと Gershgorin 上界による
+            Lanczos capacity 自動見積もり
+            ``dt_max = max(min(10·dt0, 4m / ‖H‖_est), dt0)``,
+            ``‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|`` で解決し,
+            ``dt · ‖H‖ ≲ 4m`` の Lanczos safe 領域に強制クランプする
+            (issue #43 B, ``docs/design.md`` §5.3). 大 N で ``‖H‖ ∝ N``
+            が支配的になる領域で PI controller が暴走しないよう守備に
+            機能する. step-doubling Richardson が breakdown を検出する
+            ので fail-safe で動作する (Lanczos 容量を僅かに超えても
+            embedded error 経由で dt が縮む).
         save_tlist
             観測時刻列 (Phase 5 で実装予定). 現状は ``None`` 以外を
             渡すと ``NotImplementedError``.

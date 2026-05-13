@@ -32,6 +32,11 @@ Phase 5 で導入予定).
   ``dt0 = max(min(c · T^β, T), floor)`` (既定 ``c=0.1, β=0.5, floor=1e-3``)
   を使う. PI controller の warmup step (default 0.5 → optimal dt への成長)
   を T 依存に削減する DX 改善 (issue #43 A).
+* ``dt_max="auto"`` を渡すと Gershgorin 上界
+  ``‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|`` から Lanczos capacity
+  自動見積もり ``dt_max = max(min(10·dt0, 4m / ‖H‖_est), dt0)`` で
+  ``dt · ‖H‖ ≲ 4m`` の安全領域にクランプする (issue #43 B). 大 N で
+  ``‖H‖ ∝ N`` が支配的になる領域で PI controller を守備に機能させる.
 
 実装方針: ``kryanneal.krylov.evolve_schedule_m2`` /
 ``evolve_schedule_trotter`` / ``evolve_schedule_trotter_suzuki4`` /
@@ -79,6 +84,58 @@ _AUTO_DT_INIT_BETA: float = 0.5
 # ``1e-3`` は実用 atol ``1e-8`` での PI controller が 1-2 step で再評価
 # できる最低粒度として選んだ (driver dt_min との安全マージン).
 _AUTO_DT_INIT_FLOOR: float = 1e-3
+
+
+# ``dt_max="auto"`` の Lanczos capacity 上界係数. issue #43 B.
+#
+# Lanczos m 部分空間で `exp(-i dt H) |ψ⟩` を ``rel < tol`` で再現できる
+# 安全領域は経験的に ``dt · ‖H‖ ≲ 4 m`` (cv_ising と同方針, hand-rolled
+# Lanczos の collapsed safe radius). ``‖H‖`` は Gershgorin 上界
+# (closed form, overhead ゼロ) で見積もる:
+#
+#     ‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|
+#
+# Power method で spectral radius を取れば tighter になるが Lanczos
+# 5–10 step ぶんの overhead がかかるため, Phase 4 follow-up では
+# closed form を採用する (issue #43 B 案 1).
+_LANCZOS_DT_NORM_COEFF: float = 4.0
+
+
+def _gershgorin_norm_upper_bound(problem: IsingProblem) -> float:
+    """``‖H(t)‖`` の Gershgorin 上界 (closed form, t 非依存).
+
+    ``H(t) = A(s) · H_driver + B(s) · H_problem``, ``|A|, |B| ≤ 1`` の前提下で
+    ``‖H(t)‖ ≤ Σ_i |h_x_i| + max_k |H_p_diag[k]|`` が成立する
+    (Gershgorin による行和上界 + ``H_problem`` の対角成分絶対最大).
+    schedule の coefficient norm `≤ 1` を仮定するため, 一般 schedule で
+    係数が大きい場合は別途倍率を掛ける必要があるが, ``Schedule.linear``
+    既定では係数は ``[0, 1]`` に収まり安全側.
+    """
+    return float(np.sum(np.abs(problem.h_x))) + float(np.max(np.abs(problem.H_p_diag)))
+
+
+def _resolve_dt_max_auto(problem: IsingProblem, m: int, dt0: float) -> float:
+    """``dt_max="auto"`` の解決値. Lanczos capacity と default の min, dt0 で floor.
+
+    式: ``dt_max = max(min(default_dt_max, 4m / ‖H‖_est), dt0)``,
+    ``default_dt_max = 10 · dt0`` (driver default と一致).
+
+    最後の ``max(_, dt0)`` は driver 入力検証 ``dt_max >= dt0`` を満たす
+    ための floor. Lanczos cap が ``dt0`` を下回る場合 (``dt0`` が Lanczos
+    safe radius を超えているケース) は floor が支配するが, step-doubling
+    Richardson 推定子が breakdown を検出して PI controller が dt を
+    縮めるので driver 動作自体は安全 (issue #43 B の motivation:
+    ``Richardson estimator は Lanczos breakdown も embedded error として
+    検出されるので m 自動化 / dt_max 自動化が fail-safe で成立する``).
+    """
+    norm_h = _gershgorin_norm_upper_bound(problem)
+    default_dt_max = 10.0 * dt0
+    if norm_h <= 0.0:
+        # 完全 0 Hamiltonian (h_x=0 かつ H_p_diag=0). Lanczos cap は無限
+        # 大なので default をそのまま返す.
+        return default_dt_max
+    cap = _LANCZOS_DT_NORM_COEFF * float(m) / norm_h
+    return max(min(default_dt_max, cap), dt0)
 
 
 def _resolve_dt_init_auto(t0: float, t1: float) -> float:
@@ -154,6 +211,7 @@ class QuantumAnnealer:
         n_steps: int | None = None,
         atol: float | None = None,
         dt_init: float | Literal["auto"] | None = None,
+        dt_max: float | Literal["auto"] | None = None,
         save_tlist: np.ndarray | None = None,
     ) -> QuantumResult:
         """``[t0, t1]`` 区間で時間発展を実行し ``QuantumResult`` を返す.
@@ -195,6 +253,19 @@ class QuantumAnnealer:
             ``dt0=0.1``, ``T=0.01`` で ``dt0=0.01`` (床値より大きいので
             formula 値) → driver default ``0.5`` 比でいずれも warmup を
             短縮する保守値となる.
+        dt_max
+            adaptive 経路の最大 dt 上限. driver の ``dt_max`` に map される.
+            ``None`` のときは driver 既定値 ``10 · dt0`` を使う. 固定 dt
+            経路では無視される. ``"auto"`` を渡すと Gershgorin 上界による
+            Lanczos capacity 自動見積もり
+            ``dt_max = max(min(10·dt0, 4m / ‖H‖_est), dt0)``,
+            ``‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|`` で解決し,
+            ``dt · ‖H‖ ≲ 4m`` の Lanczos safe 領域に強制クランプする
+            (issue #43 B, ``docs/design.md`` §5.3). 大 N で ``‖H‖ ∝ N``
+            が支配的になる領域で PI controller が暴走しないよう守備に
+            機能する. step-doubling Richardson が breakdown を検出する
+            ので fail-safe で動作する (Lanczos 容量を僅かに超えても
+            embedded error 経由で dt が縮む).
         save_tlist
             観測時刻列 (Phase 5 で実装予定). 現状は ``None`` 以外を
             渡すと ``NotImplementedError``.
@@ -263,6 +334,18 @@ class QuantumAnnealer:
                 dt0 = 0.5
             else:
                 dt0 = float(dt_init)
+            if isinstance(dt_max, str):
+                if dt_max != "auto":
+                    raise ValueError(
+                        f"dt_max must be 'auto', a float, or None; got {dt_max!r}"
+                    )
+                dt_max_resolved: float | None = _resolve_dt_max_auto(
+                    self.problem, self.m, dt0
+                )
+            elif dt_max is None:
+                dt_max_resolved = None
+            else:
+                dt_max_resolved = float(dt_max)
             psi_final, _t_history, dt_history, _n_rejects = (
                 evolve_schedule_adaptive_richardson(
                     h_x=self.problem.h_x,
@@ -275,6 +358,7 @@ class QuantumAnnealer:
                     krylov_tol=self.krylov_tol,
                     tol_step=tol_step,
                     dt0=dt0,
+                    dt_max=dt_max_resolved,
                 )
             )
             n_steps_actual = int(dt_history.shape[0])

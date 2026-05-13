@@ -1098,11 +1098,36 @@ resolution は facade 層 (`python/kryanneal/annealer.py`) で行い, driver
 変更不要で, facade 層のテスト (同ファイル末尾に追加) で `"auto"`
 解決後の挙動と PI controller との接続を smoke 検証する。
 
-##### B. `dt_max` の Lanczos capacity 自動見積もり (issue #43 B, 未着手)
+##### B. `dt_max` の Lanczos capacity 自動見積もり (issue #43 B, v0.4.x で導入)
 
-Gershgorin 上界 `‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|` から
-`dt_max = min(default_dt_max, 4m / ‖H‖_est)` で Lanczos safe 領域に
-クランプする予定。詳細は本リリース時点では未確定。
+`QuantumAnnealer.run(method="cfm4_adaptive_richardson", dt_max="auto")` を
+渡すと, facade 側で Gershgorin 上界による Lanczos capacity 自動見積もりを
+`dt_max` に解決する:
+
+```
+‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|
+dt_max  = max(min(10·dt0, 4m / ‖H‖_est), dt0)
+```
+
+Lanczos m 部分空間で `exp(-i dt H) |ψ⟩` を `rel < tol` で再現できる
+安全領域は経験的に `dt · ‖H‖ ≲ 4 m` (cv_ising 流, hand-rolled Lanczos の
+collapsed safe radius)。`‖H‖` は Gershgorin 上界で closed form に
+見積もる (Power method で 5–10 step 走らせる案 2 もあるが overhead が
+あるので Phase 4 follow-up では closed form を採用)。最後の
+`max(_, dt0)` は driver 入力検証 `dt_max >= dt0` を満たすための floor で,
+`dt0` が Lanczos cap を超える縮退ケースでは Richardson 推定子が breakdown
+を embedded error として検出し PI controller が dt を縮めるため
+fail-safe で成立する (issue #43 B の motivation と整合)。
+
+大 N で `‖H‖ ∝ N` が支配的になる領域では `4m/‖H‖` が default
+`10·dt0` を下回り cap が効く。例えば m=24, dt0=0.5, n=10 (h_x=1·10),
+H_p_diag in [-1, 1] では `‖H‖_est = 10 + 1 = 11` → cap = 4·24/11 ≈ 8.7,
+default 5.0 が支配。n=50 では `‖H‖_est ≈ 51`, cap ≈ 1.88, default 5.0
+より cap が支配。
+
+resolution は facade 層 (`python/kryanneal/annealer.py`) で行い, driver
+は既存 `dt_max=` パラメータをそのまま受ける (driver 内部の入力検証で
+`dt_max >= dt0` を担保)。
 
 ##### C. `m` の adaptive 化 (issue #43 C, 未着手)
 
