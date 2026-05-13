@@ -101,6 +101,14 @@ class QuantumAnnealer:
         固定 default を再現したい場合は明示的に ``krylov_tol=1e-12``
         を渡す).
 
+        **設計方針**: default (atol 連動 = 1e-11) は accuracy 優先で,
+        Lanczos β_k 早期打切は実用問題サイズでは発火しない (= 旧
+        ``1e-12`` 固定 default とほぼ同等の robust 挙動). 早期打切に
+        よる高速化が欲しい場合は user が opt-in で発動する:
+        ``atol`` を緩める (例 ``atol=1e-5`` → effective ``1e-8``) か,
+        ``krylov_tol`` を明示的に緩める (例 ``krylov_tol=1e-6``).
+        詳細は ``docs/design.md`` §5.3 follow-up 節 E 参照.
+
     Raises
     ------
     ValueError

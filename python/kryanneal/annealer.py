@@ -88,14 +88,30 @@ _PSI_NORM_TOL: float = 1e-10
 #
 # ``krylov_tol = None`` のとき, adaptive Richardson 経路では
 # ``effective_krylov_tol = tol_step · _KRYLOV_TOL_ATOL_RATIO`` を採用する.
-# 既定 ``tol_step = 1e-8`` に対し effective ``1e-11`` 相当. 旧 default
-# ``1e-12`` は ``tol_step`` 比で 4 桁過剰タイトで Lanczos β_k 早期打切が
-# 全く効かない (m_eff = 6·m_max が常時続く) ことが PR #53 後の bench で
-# 判明したため, atol 比 ``1e-3`` (= 1 桁余裕 + Richardson 推定子の局所
-# 誤差規模) を default に採用する. 1e-4 / 5e-4 / 5e-3 の境界は実機 bench
-# で再評価可能だが, 経験則として "atol より 3 桁タイトに取れば 1 step の
-# Lanczos 内誤差が PI controller の embedded error 推定を支配しない" と
-# いう感覚値. 固定 dt 経路 (m2 / cfm4) では ``atol`` が無いため None →
+# 既定 ``tol_step = 1e-8`` に対し effective ``1e-11`` 相当.
+#
+# 設計方針 (issue #54): **default は accuracy 優先**, Lanczos β_k 早期
+# 打切は **opt-in** で user が明示的に許容したときのみ機能する.
+# 具体的には,
+#
+# - default `atol=1e-8` → effective `1e-11` は実用問題サイズで Lanczos
+#   が部分空間を使い切る (`m_eff = 6·m_max`) ことが多く, **早期打切は
+#   default では発火しない**. これは旧 `1e-12` 固定 default と挙動上
+#   ほぼ同等 (atol=1e-8 比で 3 桁マージンは確保するが β_k がそこまで
+#   落ちないため). default の "未指定なら robust に動く" 性質を維持.
+# - user が大きめの error を許容して打切速度を取りたい場合は
+#   `atol` を緩める (e.g. `atol=1e-5` → effective `1e-8`) か,
+#   `krylov_tol` を直接緩める (e.g. `1e-6`) ことで opt-in できる.
+#   このとき β_k がより早く tol に到達して `m_eff < 6·m_max` の
+#   早期打切が発火し per-step が短縮される.
+#
+# 係数 `1e-3` の根拠: adaptive Richardson の embedded error 推定を
+# Lanczos 内誤差が支配しないよう "atol より 3 桁タイト" にしておく
+# 経験則. opt-in 動作の予測可能性 (user が atol を緩めれば段階的に
+# 打切が発火) を担保する係数として選定. 1e-4 / 5e-4 / 5e-3 等への
+# 調整は user 側 bench で必要時に検討可能 (本定数を変えるだけ).
+#
+# 固定 dt 経路 (m2 / cfm4) では ``atol`` が無いため None →
 # ``1e-12`` フォールバック (旧 default 維持).
 _KRYLOV_TOL_ATOL_RATIO: float = 1e-3
 # 固定 dt 経路で ``krylov_tol = None`` のとき採用する static fallback.
@@ -222,6 +238,14 @@ class QuantumAnnealer:
         float を明示するとどの経路でも一律に上書きする (旧 ``1e-12``
         固定 default を再現したい場合は明示的に ``krylov_tol=1e-12``
         を渡す).
+
+        **設計方針**: default (atol 連動 = 1e-11) は accuracy 優先で,
+        Lanczos β_k 早期打切は実用問題サイズでは発火しない (= 旧
+        ``1e-12`` 固定 default とほぼ同等の robust 挙動). 早期打切に
+        よる高速化が欲しい場合は user が opt-in で発動する:
+        ``atol`` を緩める (例 ``atol=1e-5`` → effective ``1e-8``) か,
+        ``krylov_tol`` を明示的に緩める (例 ``krylov_tol=1e-6``).
+        詳細は ``docs/design.md`` §5.3 follow-up 節 E 参照.
 
     Raises
     ------
