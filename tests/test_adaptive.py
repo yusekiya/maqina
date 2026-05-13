@@ -732,3 +732,147 @@ def test_adaptive_save_tlist_not_implemented() -> None:
             t1=1.0,
             save_tlist=np.array([0.5]),
         )
+
+
+def test_krylov_tol_none_resolves_to_atol_ratio_bit_exact() -> None:
+    """``krylov_tol=None`` (issue #54 で導入) と
+    ``krylov_tol = atol · _KRYLOV_TOL_ATOL_RATIO`` を明示的に渡す経路で
+    driver 出力 (psi_final / n_steps_actual / n_matvec) がビット一致する.
+
+    facade None → ``effective_krylov_tol = tol_step · 1e-3`` の resolution
+    が driver の ``krylov_tol`` に正しく流れていることの bit-exact 確認.
+    """
+    from kryanneal import QuantumAnnealer
+    from kryanneal.annealer import _KRYLOV_TOL_ATOL_RATIO
+
+    n = 4
+    T = 5.0
+    atol = 1e-8
+    prob = _make_random_problem(n, seed=20260514)
+    sched = Schedule.linear(T=T)
+    psi0 = uniform_superposition(n)
+
+    expected_resolved = atol * _KRYLOV_TOL_ATOL_RATIO  # = 1e-11
+
+    ann_none = QuantumAnnealer(prob, sched)  # krylov_tol=None default
+    res_none = ann_none.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=atol,
+    )
+
+    ann_explicit = QuantumAnnealer(prob, sched, krylov_tol=expected_resolved)
+    res_explicit = ann_explicit.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=atol,
+    )
+
+    np.testing.assert_array_equal(res_none.psi_final, res_explicit.psi_final)
+    assert res_none.n_steps_actual == res_explicit.n_steps_actual
+    assert res_none.n_matvec == res_explicit.n_matvec
+
+
+def test_krylov_tol_none_vs_explicit_1e12_same_accuracy() -> None:
+    """同一問題で ``krylov_tol=None`` (新 default, atol·1e-3 = 1e-11 に解決)
+    と ``krylov_tol=1e-12`` (旧 default) の終端 ψ が ``rel < 1e-9`` 程度で
+    一致する (issue #54 acceptance: 新 default が旧 default の accuracy を
+    維持していることの担保).
+
+    精度差の上界は β_k 早期打切による Lanczos 内打切誤差の差で支配される.
+    `1e-11` でも atol=1e-8 に対し 3 桁マージンが残るため終端 ψ は機械精度
+    近くで一致する.
+    """
+    from kryanneal import QuantumAnnealer
+
+    n = 4
+    T = 5.0
+    atol = 1e-8
+    prob = _make_random_problem(n, seed=20260514)
+    sched = Schedule.linear(T=T)
+    psi0 = uniform_superposition(n)
+
+    ann_default = QuantumAnnealer(prob, sched)  # krylov_tol=None → 1e-11
+    res_default = ann_default.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=atol,
+    )
+
+    ann_tight = QuantumAnnealer(prob, sched, krylov_tol=1e-12)
+    res_tight = ann_tight.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=atol,
+    )
+
+    rel = float(
+        np.linalg.norm(res_default.psi_final - res_tight.psi_final)
+        / max(np.linalg.norm(res_tight.psi_final), 1.0)
+    )
+    assert rel < 1e-9, (
+        f"krylov_tol=None (1e-11) vs 1e-12 mismatch: rel={rel} (expected < 1e-9)"
+    )
+
+
+def test_krylov_tol_atol_ratio_constant_is_1e_minus_3() -> None:
+    """``_KRYLOV_TOL_ATOL_RATIO`` の default 値を 1e-3 で lock-down する
+    (issue #54 で採用された経験値; 変更時は docs/design.md §5.3 E 節と
+    bench 結果の更新も必要).
+    """
+    from kryanneal.annealer import _KRYLOV_TOL_ATOL_RATIO
+
+    assert _KRYLOV_TOL_ATOL_RATIO == 1e-3
+
+
+def test_dt_init_invalid_string_still_raises_at_runtime() -> None:
+    """``dt_init`` に非数値文字列を渡すと runtime で ``ValueError``
+    (issue #54 で `Literal["auto"]` を削除し explicit guard を廃止した
+    あとも, ``float(s)`` 経由で型不整合を弾く保護が残ることの確認).
+    """
+    from kryanneal import QuantumAnnealer
+
+    n = 3
+    prob = _make_random_problem(n, seed=11)
+    sched = Schedule.linear(T=1.0)
+    psi0 = uniform_superposition(n)
+
+    ann = QuantumAnnealer(prob, sched)
+    with pytest.raises(ValueError):
+        ann.run(
+            psi0,
+            0.0,
+            1.0,
+            method="cfm4_adaptive_richardson",
+            dt_init="auto",  # type: ignore[arg-type]
+        )
+
+
+def test_dt_max_invalid_string_still_raises_at_runtime() -> None:
+    """``dt_max`` に非数値文字列を渡すと runtime で ``ValueError``
+    (``dt_init`` 同様, `Literal` 削除後の自然な float 変換失敗で弾かれる).
+    """
+    from kryanneal import QuantumAnnealer
+
+    n = 3
+    prob = _make_random_problem(n, seed=11)
+    sched = Schedule.linear(T=1.0)
+    psi0 = uniform_superposition(n)
+
+    ann = QuantumAnnealer(prob, sched)
+    with pytest.raises(ValueError):
+        ann.run(
+            psi0,
+            0.0,
+            1.0,
+            method="cfm4_adaptive_richardson",
+            dt_max="auto",  # type: ignore[arg-type]
+        )
