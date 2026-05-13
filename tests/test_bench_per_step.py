@@ -71,6 +71,9 @@ def test_adaptive_section_appears_in_md(tmp_path: Path) -> None:
     assert "n_steps_actual (min/max)" in md_text
     assert "final_err_vs_ref (median)" in md_text
     assert "reference_wall (sec)" in md_text
+    # issue #52 B: m_eff 列の追加検証.
+    assert "m_eff (median)" in md_text
+    assert "m_eff (max)" in md_text
     # reference 計算の総 wall time が machine info に併記されていること.
     assert "reference_wall_sec_total" in md_text
 
@@ -80,8 +83,12 @@ def test_adaptive_section_appears_in_md(tmp_path: Path) -> None:
         first_row = next(reader)
     assert "n_steps_actual" in first_row
     assert "final_err_vs_ref" in first_row
-    # adaptive trial では final_err_vs_ref が n/a ではない実数文字列になる.
+    # issue #52 B: m_eff 列も CSV に出ること.
+    assert "m_eff_median" in first_row
+    assert "m_eff_max" in first_row
+    # adaptive trial では final_err_vs_ref / m_eff_* が n/a ではない実数文字列.
     assert first_row["final_err_vs_ref"] != "n/a"
+    assert first_row["m_eff_median"] != "n/a"
 
 
 def test_no_adaptive_section_when_only_fixed_methods(tmp_path: Path) -> None:
@@ -110,6 +117,46 @@ def test_no_adaptive_section_when_only_fixed_methods(tmp_path: Path) -> None:
     md_text = (out_dir / "bench_per_step.md").read_text(encoding="utf-8")
     assert "## Adaptive driver detail" not in md_text
     assert "reference_wall_sec_total" not in md_text
+
+
+def test_m_values_sweep_creates_multiple_summary_rows(tmp_path: Path) -> None:
+    """``--m-values 16,24`` で同じ method × n に対し m 別の Summary 行が出る
+    (issue #52 B).
+    """
+    bps = _import_bench_per_step()
+    out_dir = tmp_path / "bench_out_msweep"
+    rc = bps.main(
+        [
+            "--n-values",
+            "4",
+            "--methods",
+            "cfm4_adaptive_richardson",
+            "--m-values",
+            "16,24",
+            "--n-steps",
+            "8",
+            "--T",
+            "0.5",
+            "--repeat",
+            "1",
+            "--warmup",
+            "0",
+            "--results-dir",
+            str(out_dir),
+        ]
+    )
+    assert rc == 0
+    md_text = (out_dir / "bench_per_step.md").read_text(encoding="utf-8")
+    # Summary 表の列ヘッダに m が含まれる.
+    assert "Summary (per-n × method × m)" in md_text
+    # Adaptive section に m=16 / m=24 の両セルが出る.
+    csv_path = out_dir / "bench_per_step.csv"
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    distinct_ms = {row["m"] for row in rows}
+    assert distinct_ms == {"16", "24"}, (
+        f"expected m sweep over {{16, 24}}, got {distinct_ms!r}"
+    )
 
 
 if __name__ == "__main__":

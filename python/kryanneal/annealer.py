@@ -382,23 +382,48 @@ class QuantumAnnealer:
                         f"m_max must be a positive integer or None, got {m_max!r}"
                     )
                 m_eff_param = int(m_max)
-            psi_final, _t_history, dt_history, _n_rejects = (
-                evolve_schedule_adaptive_richardson(
-                    h_x=self.problem.h_x,
-                    h_p_diag=self.problem.H_p_diag,
-                    schedule=self.schedule,
-                    psi0=psi0_arr,
-                    t0=t0,
-                    t1=t1,
-                    m=m_eff_param,
-                    krylov_tol=self.krylov_tol,
-                    tol_step=tol_step,
-                    dt0=dt0,
-                    dt_max=dt_max_resolved,
-                )
+            # C3/C4 (issue #52 A): driver は 5-tuple
+            # `(psi, t_hist, dt_hist, n_rejects, m_eff_hist)` を返す.
+            (
+                psi_final,
+                _t_history,
+                dt_history,
+                _n_rejects,
+                m_eff_history,
+            ) = evolve_schedule_adaptive_richardson(
+                h_x=self.problem.h_x,
+                h_p_diag=self.problem.H_p_diag,
+                schedule=self.schedule,
+                psi0=psi0_arr,
+                t0=t0,
+                t1=t1,
+                m=m_eff_param,
+                krylov_tol=self.krylov_tol,
+                tol_step=tol_step,
+                dt0=dt0,
+                dt_max=dt_max_resolved,
             )
             n_steps_actual = int(dt_history.shape[0])
-            n_matvec = n_steps_actual * 6 * m_eff_param
+            # C4 (issue #52 A): per-step `m_eff_sum` (= 6 Lanczos call の合計)
+            # の集計を `QuantumResult.m_eff_stats` に格納する. accept された
+            # step 数 == m_eff_history.shape[0] == n_steps_actual (driver 仕様).
+            # n_steps_actual == 0 の縮退ケース (t1 == t0 を許さない driver
+            # 入力検証で実用上は通らないが念のため) は空 history なので
+            # stats を空 dict ではなく None として扱う.
+            if m_eff_history.size > 0:
+                m_eff_stats: dict[str, int | float] | None = {
+                    "total": int(np.sum(m_eff_history)),
+                    "mean": float(np.mean(m_eff_history)),
+                    "median": float(np.median(m_eff_history)),
+                    "min": int(np.min(m_eff_history)),
+                    "max": int(np.max(m_eff_history)),
+                }
+                # 実 matvec 数を m_eff_sum の累積で正確に出す (旧推定
+                # `n_steps_actual · 6m` は upper bound; 早期打切で乖離する).
+                n_matvec = int(np.sum(m_eff_history))
+            else:
+                m_eff_stats = None
+                n_matvec = n_steps_actual * 6 * m_eff_param
             return QuantumResult(
                 psi_final=psi_final,
                 t_history=None,
@@ -408,6 +433,7 @@ class QuantumAnnealer:
                 success=True,
                 method=method,
                 n_steps_actual=n_steps_actual,
+                m_eff_stats=m_eff_stats,
             )
 
         # 固定 dt 経路は n_steps が必須.

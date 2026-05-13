@@ -82,7 +82,9 @@ def test_python_lanczos_matches_dense_propagator(n: int, seed: int) -> None:
     matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
 
     dim = 1 << n
-    psi_lanczos = _python_lanczos_propagate(matvec, psi, dt, m=dim, tol=1e-14)
+    # issue #52 A: _python_lanczos_propagate は (psi, m_eff) を返す.
+    psi_lanczos, m_eff = _python_lanczos_propagate(matvec, psi, dt, m=dim, tol=1e-14)
+    assert 1 <= m_eff <= dim
 
     u_full = _dense_exp_minus_i_dt_h(h_x, h_p_diag, a_t, b_t, dt)
     psi_expected = u_full @ psi
@@ -110,8 +112,14 @@ def test_rust_lanczos_matches_python_reference(n: int, seed: int) -> None:
     tol = 1e-12
 
     matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
-    psi_py = _python_lanczos_propagate(matvec, psi, dt, m, tol)
-    psi_rust = _rust_mod.lanczos_propagate_py(psi, h_x, h_p_diag, a_t, b_t, dt, m, tol)
+    # issue #52 A: Rust も Python ref も (psi, m_eff) を返す. m_eff も
+    # 完全一致するのが新しい契約 (BLAS feature on/off も同様, β_k 早期打切
+    # 条件が決定論的なため).
+    psi_py, m_eff_py = _python_lanczos_propagate(matvec, psi, dt, m, tol)
+    psi_rust, m_eff_rust = _rust_mod.lanczos_propagate_py(
+        psi, h_x, h_p_diag, a_t, b_t, dt, m, tol
+    )
+    assert m_eff_py == m_eff_rust, f"m_eff mismatch: py={m_eff_py}, rust={m_eff_rust}"
 
     rel = np.linalg.norm(psi_py - psi_rust) / max(np.linalg.norm(psi_rust), 1.0)
     assert rel < 1e-13, f"n={n}, seed={seed}: rel = {rel}"
@@ -147,7 +155,7 @@ def test_python_lanczos_preserves_norm() -> None:
     h_x, h_p_diag, psi, a_t, b_t = _random_hermitian_setup(n, seed=2025)
     dt = 0.23
     matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
-    psi_new = _python_lanczos_propagate(matvec, psi, dt, m=24, tol=1e-12)
+    psi_new, _m_eff = _python_lanczos_propagate(matvec, psi, dt, m=24, tol=1e-12)
     rel = abs(np.linalg.norm(psi_new) - np.linalg.norm(psi)) / max(
         np.linalg.norm(psi), 1.0
     )
@@ -159,6 +167,6 @@ def test_python_lanczos_dt_zero_is_identity() -> None:
     n = 4
     h_x, h_p_diag, psi, a_t, b_t = _random_hermitian_setup(n, seed=2026)
     matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
-    psi_new = _python_lanczos_propagate(matvec, psi, 0.0, m=24, tol=1e-12)
+    psi_new, _m_eff = _python_lanczos_propagate(matvec, psi, 0.0, m=24, tol=1e-12)
     rel = np.linalg.norm(psi_new - psi) / max(np.linalg.norm(psi), 1.0)
     assert rel < 1e-13, f"dt=0 identity violated: rel = {rel}"
