@@ -286,11 +286,12 @@ def test_auto_dt_init_resolves_to_formula() -> None:
     assert val_cap == pytest.approx(0.005, rel=1e-15)
 
 
-def test_auto_dt_init_facade_smoke() -> None:
-    """``QuantumAnnealer.run(..., dt_init="auto")`` smoke: linear schedule で
-    QuTiP との fidelity が ``> 1 - 1e-6``, かつ ``dt_init="auto"`` と
-    ``dt_init=<auto-resolved float>`` で driver 出力がビット一致する
-    (auto path が driver の ``dt0`` に正しく流れていることの確認).
+def test_dt_init_none_facade_smoke() -> None:
+    """``QuantumAnnealer.run(..., dt_init=None)`` (issue #54 で旧 ``"auto"``
+    リテラルを置換) smoke: linear schedule で QuTiP fidelity ``> 1 - 1e-6``
+    かつ ``dt_init=None`` と ``dt_init=<auto-resolved float>`` で driver 出力
+    がビット一致する (None resolution が driver の ``dt0`` に正しく流れて
+    いることの確認).
     """
     from kryanneal import QuantumAnnealer
     from kryanneal.annealer import _resolve_dt_init_auto
@@ -308,18 +309,18 @@ def test_auto_dt_init_facade_smoke() -> None:
         T,
         method="cfm4_adaptive_richardson",
         atol=1e-8,
-        dt_init="auto",
+        dt_init=None,
     )
     psi_ref = _qutip_reference(prob.h_x, prob.H_p_diag, T)
     fid = _fidelity(res_auto.psi_final, psi_ref)
-    assert fid > 1 - 1e-6, f"auto dt_init fidelity too low: {fid} (1-fid={1 - fid})"
+    assert fid > 1 - 1e-6, (
+        f"dt_init=None auto resolution fidelity too low: {fid} (1-fid={1 - fid})"
+    )
     assert res_auto.success
     assert res_auto.n_steps_actual is not None and res_auto.n_steps_actual >= 1
 
-    # auto path と「手動で auto 解決値を float で渡した」が driver 入力として
-    # 等価であることをビット一致で確認 (PI controller は決定論的なので
-    # 同じ dt0 / tol_step / problem / psi0 で psi_final / n_steps_actual が
-    # 厳密一致するはず).
+    # None resolution と「手動で auto 解決値を float で渡した」が driver
+    # 入力として等価であることをビット一致で確認 (PI controller は決定論的).
     dt0_resolved = _resolve_dt_init_auto(0.0, T)
     res_manual = ann.run(
         psi0,
@@ -333,8 +334,9 @@ def test_auto_dt_init_facade_smoke() -> None:
     assert res_auto.n_steps_actual == res_manual.n_steps_actual
 
 
-def test_auto_dt_init_small_T_completes() -> None:
-    """``T < 1`` の小 T ケースで ``dt_init="auto"`` でも driver が正常完了する.
+def test_dt_init_none_small_T_completes() -> None:
+    """``T < 1`` の小 T ケースで ``dt_init=None`` (auto resolution) でも
+    driver が正常完了する.
 
     床値 / 上限の境界処理が正しく動き, driver 入力検証
     (``dt_min <= dt0 <= dt_max``) に違反しないことを確認する.
@@ -354,36 +356,12 @@ def test_auto_dt_init_small_T_completes() -> None:
         T,
         method="cfm4_adaptive_richardson",
         atol=1e-8,
-        dt_init="auto",
+        dt_init=None,
     )
     assert res.success
     assert res.n_steps_actual is not None and res.n_steps_actual >= 1
     # unitary 性確認.
     assert abs(np.linalg.norm(res.psi_final) - 1.0) < 1e-10
-
-
-def test_auto_dt_init_invalid_string_raises() -> None:
-    """``dt_init`` に ``"auto"`` 以外の文字列を渡すと ``ValueError``.
-
-    ``Literal["auto"]`` は型レベルでは弾けるが, runtime では ``isinstance(str)``
-    + 明示比較で検証する (cv_ising 流 fail-fast)。
-    """
-    from kryanneal import QuantumAnnealer
-
-    n = 3
-    prob = _make_random_problem(n, seed=11)
-    sched = Schedule.linear(T=1.0)
-    psi0 = uniform_superposition(n)
-
-    ann = QuantumAnnealer(prob, sched)
-    with pytest.raises(ValueError, match="dt_init"):
-        ann.run(
-            psi0,
-            0.0,
-            1.0,
-            method="cfm4_adaptive_richardson",
-            dt_init="bogus",  # type: ignore[arg-type]
-        )
 
 
 def test_auto_dt_max_resolves_to_formula() -> None:
@@ -422,10 +400,10 @@ def test_auto_dt_max_resolves_to_formula() -> None:
     assert val_floor == pytest.approx(10.0, rel=1e-15)
 
 
-def test_auto_dt_max_facade_caps_dt_history() -> None:
-    """``dt_max="auto"`` で driver 出力が ``dt_max=<auto-resolved float>`` と
-    ビット一致し, dt が cap を超えないこと, かつ PI が dt0 から成長する
-    ことを確認する.
+def test_dt_max_none_facade_caps_dt_history() -> None:
+    """``dt_max=None`` (issue #54 で旧 ``"auto"`` リテラルを置換) で driver
+    出力が ``dt_max=<auto-resolved float>`` とビット一致し, dt が cap を
+    超えないこと, かつ PI が dt0 から成長することを確認する.
 
     n=10, h_x=5·ones (‖H‖_est ≈ 50+1) で cap = 4·24/51 ≈ 1.88. Richardson
     自体が breakdown を embedded error で検出するため実 dt は cap よりも
@@ -458,7 +436,7 @@ def test_auto_dt_max_facade_caps_dt_history() -> None:
         method="cfm4_adaptive_richardson",
         atol=1e-6,
         dt_init=0.5,
-        dt_max="auto",
+        dt_max=None,
     )
     res_manual = ann.run(
         psi0,
@@ -469,7 +447,7 @@ def test_auto_dt_max_facade_caps_dt_history() -> None:
         dt_init=0.5,
         dt_max=expected_cap,
     )
-    # auto 経路と「auto-resolved float を手動で渡す」がビット一致
+    # None resolution 経路と「auto-resolved float を手動で渡す」がビット一致
     # (PI controller は決定論的なので, 同じ入力で同じ出力になる).
     np.testing.assert_array_equal(res_auto.psi_final, res_manual.psi_final)
     assert res_auto.n_steps_actual == res_manual.n_steps_actual
@@ -493,26 +471,6 @@ def test_auto_dt_max_facade_caps_dt_history() -> None:
     # PI が dt0=0.5 から少なくとも成長していること (cap が動作していても
     # 成長余地はある).
     assert float(np.max(dt_history)) > 0.5
-
-
-def test_auto_dt_max_invalid_string_raises() -> None:
-    """``dt_max`` に ``"auto"`` 以外の文字列を渡すと ``ValueError``."""
-    from kryanneal import QuantumAnnealer
-
-    n = 3
-    prob = _make_random_problem(n, seed=11)
-    sched = Schedule.linear(T=1.0)
-    psi0 = uniform_superposition(n)
-
-    ann = QuantumAnnealer(prob, sched)
-    with pytest.raises(ValueError, match="dt_max"):
-        ann.run(
-            psi0,
-            0.0,
-            1.0,
-            method="cfm4_adaptive_richardson",
-            dt_max="bogus",  # type: ignore[arg-type]
-        )
 
 
 def test_auto_dt_max_zero_hamiltonian_falls_back_to_default() -> None:
