@@ -826,7 +826,9 @@ def _python_cfm4_step(
     c_drv_2 = _CFM4_A_LOW * a_s1 + _CFM4_A_HIGH * a_s2
     c_diag_2 = _CFM4_A_LOW * b_s1 + _CFM4_A_HIGH * b_s2
     matvec_2 = _make_python_matvec(h_x, h_p_diag, c_drv_2, c_diag_2)
-    psi_new, m_eff_stage2 = _python_lanczos_propagate(matvec_2, psi_mid, dt, m, krylov_tol)
+    psi_new, m_eff_stage2 = _python_lanczos_propagate(
+        matvec_2, psi_mid, dt, m, krylov_tol
+    )
     return psi_new, m_eff_stage1 + m_eff_stage2
 
 

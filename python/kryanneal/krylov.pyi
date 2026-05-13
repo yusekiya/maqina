@@ -304,7 +304,7 @@ def evolve_schedule_adaptive_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule:
     """
     ...
 
-def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, save_tlist: np.ndarray | None=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, save_tlist: np.ndarray | None=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray]:
     """CFM4:2 + step-doubling Richardson 推定子による adaptive dt ドライバ.
 
     PI controller (``docs/design.md`` §5.3) で local error を ``tol_step``
@@ -346,6 +346,14 @@ def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, s
         shape ``(K-1,)`` float64. 各 accept された step の dt.
     n_rejects : int
         累積 reject 回数.
+    m_eff_history : np.ndarray
+        shape ``(K-1,)`` int64. 各 accept された step の Lanczos 部分空間
+        次元 ``m_eff`` の合計 (full + half×2 = 6 Lanczos 呼出, ``m_eff_sum
+        <= 6m``). issue #52 A で adaptive driver の per-step 実コストを
+        ``QuantumResult.m_eff_stats`` (median / min / max / mean) に集計
+        するため. β_k 早期打切により ``m_eff < m`` になる step では
+        ``m_eff_sum`` が ``6m`` 未満になり, ``n_matvec`` 推定 (現状
+        ``n_steps_actual · 6m``) より実コストは小さい.
 
     Raises
     ------
