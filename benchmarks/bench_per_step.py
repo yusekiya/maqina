@@ -45,7 +45,15 @@ required ``n_steps`` のずれを別途見積もる必要がある.
   生データ (n, dim, method, trial, n_steps, dt, m, total_wall_sec,
   per_step_sec, states_per_sec, n_steps_actual, final_err_vs_ref).
 * ``benchmarks/results/<YYYYMMDD-HHMMSS>/bench_per_step.md``: 集計表
-  (per-method summary + cross-method 比較表) + machine info.
+  (per-method summary + cross-method 比較表 + adaptive driver detail) +
+  machine info. adaptive 経路 (``cfm4_adaptive_richardson`` 等) を含む
+  実行では ``## Adaptive driver detail`` 節が追加され, PI controller が
+  accept した実 step 数 ``n_steps_actual`` と高精度参照解との差
+  ``final_err_vs_ref`` (adaptive driver の性能・精度評価に最も重要な
+  2 値) が n × method 単位で記録される. reference 計算 (高精度 fixed
+  CFM4:2) の wall time も machine info の ``reference_wall_sec_total``
+  と adaptive section の per-n ``reference_wall_sec`` 列に記録され,
+  大 n で reference が 1-2 時間かかる現実問題に対する透明性を担保する.
 
 CLI 例::
 
@@ -315,15 +323,24 @@ def _compute_reference_psi(
     t0: float,
     t1: float,
     m: int,
-) -> np.ndarray:
+) -> tuple[np.ndarray, float]:
     """adaptive 経路の ``final_err_vs_ref`` 算出のための参照解 ψ を取る.
 
     fixed CFM4:2 を ``_REFERENCE_N_STEPS`` 多 step で走らせた終端 ψ を
     「真値の代用」とする. QuTiP との fidelity 検証は
     ``tests/test_adaptive.py`` で別途行われており, ベンチではコスト次元
     比較が主目的なので追加依存を避ける.
+
+    Returns
+    -------
+    psi_ref : np.ndarray
+        高精度参照解の終端波動関数 (complex128).
+    wall_sec : float
+        参照解の計算自体に要した wall time (秒). 大 n で 1-2 時間かかる
+        場合があるため bench 出力に透明性として記録する.
     """
     ann_ref = QuantumAnnealer(problem, schedule, m=m)
+    t_start = time.perf_counter()
     res = ann_ref.run(
         psi0,
         t0,
@@ -331,7 +348,8 @@ def _compute_reference_psi(
         method=_REFERENCE_METHOD,  # type: ignore[arg-type]
         n_steps=_REFERENCE_N_STEPS,
     )
-    return np.asarray(res.psi_final)
+    t_end = time.perf_counter()
+    return np.asarray(res.psi_final), t_end - t_start
 
 
 def collect_machine_info() -> dict[str, str]:
@@ -384,8 +402,10 @@ def write_outputs(
     out_dir: Path,
     rows: list[dict[str, float | int | str]],
     summary: list[dict[str, float | int | str]],
+    adaptive_summary: list[dict[str, float | int | str]],
     machine_info: dict[str, str],
     args: argparse.Namespace,
+    reference_wall_by_n: dict[int, float],
 ) -> None:
     """CSV (生データ) と markdown (集計 + machine info) を ``out_dir`` に書く.
 
@@ -394,6 +414,17 @@ def write_outputs(
     ``n_steps`` での raw per-step コスト比較を一目で見られるようにする
     (LTE order の違いから「精度を揃えた場合の wall time 比較」は別途
     必要; 詳細は冒頭 docstring の Notes 参照).
+
+    さらに adaptive 経路 (``_ADAPTIVE_METHODS``) を含む実行では
+    ``## Adaptive driver detail`` 節を追加し, PI controller が accept した
+    実 step 数 ``n_steps_actual`` (median, min/max) と高精度参照解との
+    state 差 ``final_err_vs_ref`` (median) を per-n × method で出す.
+    これらは adaptive driver の性能・精度評価で最重要 2 値だが,
+    Summary 表の per-step / states/sec だけでは見えないため別節で並べる
+    (cv_ising の bench pattern とは異なる, kryanneal 固有の adaptive 評価軸).
+    ``reference_wall_sec`` 列は ``_compute_reference_psi`` 自体の wall time
+    を per-n で記録する (大 n で reference が 1-2 時間かかる現実問題への
+    透明性).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -471,9 +502,46 @@ def write_outputs(
             lines.append("| " + " | ".join(row_cells) + " |")
         lines.append("")
 
+    # adaptive 経路がある場合のみ Adaptive driver detail 節を出す.
+    # Summary / Cross-method 表は per-step 値しか見ないため,
+    # n_steps_actual (PI controller が accept した実 step 数) と
+    # final_err_vs_ref (高精度 reference との state 差) が落ちる.
+    # adaptive driver の評価軸として最重要なので別節で並べる.
+    if adaptive_summary:
+        lines.append("## Adaptive driver detail")
+        lines.append("")
+        lines.append(
+            "| n | dim | method | n_steps_actual (median) | "
+            "n_steps_actual (min/max) | final_err_vs_ref (median) | "
+            "per_step (sec, median) | total_wall (sec, median) | "
+            "reference_wall (sec) |"
+        )
+        lines.append("|" + "|".join(["---"] * 9) + "|")
+        for row in adaptive_summary:
+            n_val = int(row["n"])
+            ref_wall = reference_wall_by_n.get(n_val)
+            ref_wall_str = f"{ref_wall:.3e}" if ref_wall is not None else "n/a"
+            lines.append(
+                f"| {row['n']} | {row['dim']} | {row['method']} | "
+                f"{float(row['n_steps_actual_median']):.1f} | "
+                f"{int(row['n_steps_actual_min'])}/{int(row['n_steps_actual_max'])} | "
+                f"{float(row['final_err_vs_ref_median']):.6e} | "
+                f"{float(row['per_step_sec_median']):.6e} | "
+                f"{float(row['total_wall_sec_median']):.6e} | "
+                f"{ref_wall_str} |"
+            )
+        lines.append("")
+
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    print(f"wrote {csv_path.relative_to(REPO_ROOT)}")
-    print(f"wrote {md_path.relative_to(REPO_ROOT)}")
+    # ``--results-dir`` が repo 外 (例: pytest の tmp_path) を指している
+    # 場合に備え, ``relative_to`` の ``walk_up=True`` を使う (Python 3.12+).
+    # 失敗時は absolute path を素直に出す.
+    for p in (csv_path, md_path):
+        try:
+            shown = p.relative_to(REPO_ROOT, walk_up=True)
+        except ValueError:
+            shown = p
+        print(f"wrote {shown}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -499,6 +567,8 @@ def main(argv: list[str] | None = None) -> int:
 
     rows: list[dict[str, float | int | str]] = []
     summary: list[dict[str, float | int | str]] = []
+    adaptive_summary: list[dict[str, float | int | str]] = []
+    reference_wall_by_n: dict[int, float] = {}
     schedule = Schedule.linear(T=args.T)
 
     for n in args.n_values:
@@ -518,9 +588,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"  computing reference ψ ({_REFERENCE_METHOD},"
                 f" n_steps={_REFERENCE_N_STEPS})..."
             )
-            psi_ref = _compute_reference_psi(
+            psi_ref, ref_wall = _compute_reference_psi(
                 problem, schedule, psi0, 0.0, args.T, args.m
             )
+            reference_wall_by_n[n] = ref_wall
+            print(f"  reference ψ wall: {ref_wall:.3f}s")
 
         for method in args.methods:
             is_adaptive = method in _ADAPTIVE_METHODS
@@ -532,6 +604,7 @@ def main(argv: list[str] | None = None) -> int:
 
             trial_times: list[float] = []
             trial_n_steps_actual: list[int] = []
+            trial_final_err: list[float] = []
             for trial in range(args.repeat):
                 wall, n_steps_actual, psi_final = time_method_run(
                     problem,
@@ -550,6 +623,7 @@ def main(argv: list[str] | None = None) -> int:
                 states_per_sec = dim / per_step if per_step > 0 else float("inf")
                 if is_adaptive and psi_ref is not None:
                     final_err = float(np.linalg.norm(psi_final - psi_ref))
+                    trial_final_err.append(final_err)
                     final_err_field = f"{final_err:.6e}"
                 else:
                     final_err_field = "n/a"
@@ -595,8 +669,40 @@ def main(argv: list[str] | None = None) -> int:
                     "states_per_sec_median": dim / statistics.median(per_step_times),
                 }
             )
+            if is_adaptive and trial_final_err:
+                adaptive_summary.append(
+                    {
+                        "n": n,
+                        "dim": dim,
+                        "method": method,
+                        "n_steps_actual_median": statistics.median(
+                            trial_n_steps_actual
+                        ),
+                        "n_steps_actual_min": min(trial_n_steps_actual),
+                        "n_steps_actual_max": max(trial_n_steps_actual),
+                        "final_err_vs_ref_median": statistics.median(trial_final_err),
+                        "per_step_sec_median": statistics.median(per_step_times),
+                        "total_wall_sec_median": statistics.median(trial_times),
+                    }
+                )
 
-    write_outputs(out_dir, rows, summary, machine_info, args)
+    # reference 計算自体の総 wall time を machine info に併記する.
+    # 大 n で reference 1 本に 1-2 時間かかる現実問題に対する透明性として,
+    # adaptive section の per-n 値とは別に「合算値」が機械情報節に出る.
+    if reference_wall_by_n:
+        machine_info["reference_wall_sec_total"] = (
+            f"{sum(reference_wall_by_n.values()):.3f}"
+        )
+
+    write_outputs(
+        out_dir,
+        rows,
+        summary,
+        adaptive_summary,
+        machine_info,
+        args,
+        reference_wall_by_n=reference_wall_by_n,
+    )
     return 0
 
 
