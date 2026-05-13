@@ -40,6 +40,15 @@ Phase 5 で導入予定).
   自動見積もり ``dt_max = max(min(10·dt0, 4m / ‖H‖_est), dt0)`` で
   ``dt · ‖H‖ ≲ 4m`` の安全領域にクランプする (issue #43 B). 大 N で
   ``‖H‖ ∝ N`` が支配的になる領域で PI controller を守備に機能させる.
+* ``m_max`` を渡すと adaptive Richardson 経路の Lanczos 部分空間次元の
+  上限を ``self.m`` の代わりに ``m_max`` で上書きする (issue #43 C, 簡略
+  scope). step-doubling Richardson 推定子が Lanczos breakdown も embedded
+  error として検出するため, ``m_max=16`` 等まで下げて per-step matvec を
+  30% 程度削減しても fail-safe で動作する (本来 PI controller が dt を
+  絞ることで精度を担保). β_k < ``krylov_tol`` で Lanczos 早期打切が
+  既存実装で効くため, ``m_eff ≤ m_max`` の運用. ``m_eff`` 累積統計の
+  ``QuantumResult`` 露出は Rust API 拡張 (``lanczos_propagate`` の戻り値
+  追加) が必要なため本フェーズでは保留 (``docs/design.md`` §5.3 参照).
 
 実装方針: ``kryanneal.krylov.evolve_schedule_m2`` /
 ``evolve_schedule_trotter`` / ``evolve_schedule_trotter_suzuki4`` /
@@ -89,7 +98,7 @@ class QuantumAnnealer:
     def __init__(self, problem: IsingProblem, schedule: Schedule, *, m: int=24, krylov_tol: float=1e-12) -> None:
         ...
 
-    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='m2', n_steps: int | None=None, atol: float | None=None, dt_init: float | Literal['auto'] | None=None, dt_max: float | Literal['auto'] | None=None, save_tlist: np.ndarray | None=None) -> QuantumResult:
+    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='m2', n_steps: int | None=None, atol: float | None=None, dt_init: float | Literal['auto'] | None=None, dt_max: float | Literal['auto'] | None=None, m_max: int | None=None, save_tlist: np.ndarray | None=None) -> QuantumResult:
         """``[t0, t1]`` 区間で時間発展を実行し ``QuantumResult`` を返す.
 
         Parameters
@@ -142,6 +151,21 @@ class QuantumAnnealer:
             機能する. step-doubling Richardson が breakdown を検出する
             ので fail-safe で動作する (Lanczos 容量を僅かに超えても
             embedded error 経由で dt が縮む).
+        m_max
+            adaptive Richardson 経路の Lanczos 部分空間次元の上限。
+            ``None`` (default) のときは ``self.m`` (コンストラクタ既定 24)
+            をそのまま使う。整数を指定すると ``self.m`` を上書きして
+            driver の Lanczos 部分空間次元として用いる (issue #43 C,
+            簡略 scope)。step-doubling Richardson 推定子が Lanczos
+            breakdown も embedded error として検出する fail-safe を
+            活かし, ``m_max=16`` 等で per-step matvec を 30% 程度削減
+            する運用を許容する (Richardson が破綻を検知すれば PI
+            controller が dt を絞り精度を維持)。``β_k < krylov_tol``
+            の早期打切が既存実装で効くため, 実効次元は ``m_eff ≤
+            m_max`` になる。固定 dt 経路では無視される。
+            ``m_eff`` 累積統計の ``QuantumResult`` 露出は Rust API 拡張
+            (``lanczos_propagate`` の戻り値追加 + PyO3 plumbing) が
+            必要なため本フェーズでは保留 (``docs/design.md`` §5.3 参照)。
         save_tlist
             観測時刻列 (Phase 5 で実装予定). 現状は ``None`` 以外を
             渡すと ``NotImplementedError``.

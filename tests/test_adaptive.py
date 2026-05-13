@@ -524,6 +524,114 @@ def test_auto_dt_max_zero_hamiltonian_falls_back_to_default() -> None:
     assert val == pytest.approx(5.0, rel=1e-15)  # 10·dt0
 
 
+def test_m_max_facade_smoke() -> None:
+    """``m_max=16`` で facade adaptive 経路が QuTiP fidelity `> 1 - 1e-6` を満たす.
+
+    Richardson estimator が Lanczos breakdown を embedded error として検出
+    する fail-safe を活かし, m=24 default を 16 に下げても精度が維持される
+    (PI controller が dt を絞ることで). n=4, T=5 の smooth linear schedule
+    で smoke 検証.
+    """
+    from kryanneal import QuantumAnnealer
+
+    n = 4
+    T = 5.0
+    prob = _make_random_problem(n, seed=20260513)
+    sched = Schedule.linear(T=T)
+    psi0 = uniform_superposition(n)
+
+    ann = QuantumAnnealer(prob, sched)
+    res = ann.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=1e-8,
+        m_max=16,
+    )
+    psi_ref = _qutip_reference(prob.h_x, prob.H_p_diag, T)
+    fid = _fidelity(res.psi_final, psi_ref)
+    assert fid > 1 - 1e-6, f"m_max=16 fidelity too low: {fid} (1-fid={1 - fid})"
+    assert res.success
+    # n_matvec が m_eff_param=16 ベースで計算されていること (per-step 6m).
+    assert res.n_matvec == res.n_steps_actual * 6 * 16
+
+
+def test_m_max_overrides_self_m() -> None:
+    """``m_max`` が ``self.m`` を上書きすることをビット一致で確認.
+
+    QuantumAnnealer(m=24) を構築し, ``run(m_max=16)`` で実行した結果と
+    QuantumAnnealer(m=16) を構築して ``run()`` した結果がビット一致する
+    (driver は同じ m=16 で呼ばれるはず).
+    """
+    from kryanneal import QuantumAnnealer
+
+    n = 4
+    T = 2.0
+    prob = _make_random_problem(n, seed=42)
+    sched = Schedule.linear(T=T)
+    psi0 = uniform_superposition(n)
+
+    ann_24 = QuantumAnnealer(prob, sched, m=24)
+    res_override = ann_24.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=1e-8,
+        m_max=16,
+    )
+
+    ann_16 = QuantumAnnealer(prob, sched, m=16)
+    res_native = ann_16.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=1e-8,
+    )
+
+    np.testing.assert_array_equal(res_override.psi_final, res_native.psi_final)
+    assert res_override.n_steps_actual == res_native.n_steps_actual
+    assert res_override.n_matvec == res_native.n_matvec
+
+
+def test_m_max_invalid_raises() -> None:
+    """``m_max`` に非正整数または非整数を渡すと ``ValueError``."""
+    from kryanneal import QuantumAnnealer
+
+    n = 3
+    prob = _make_random_problem(n, seed=11)
+    sched = Schedule.linear(T=1.0)
+    psi0 = uniform_superposition(n)
+
+    ann = QuantumAnnealer(prob, sched)
+    with pytest.raises(ValueError, match="m_max"):
+        ann.run(
+            psi0,
+            0.0,
+            1.0,
+            method="cfm4_adaptive_richardson",
+            m_max=0,
+        )
+    with pytest.raises(ValueError, match="m_max"):
+        ann.run(
+            psi0,
+            0.0,
+            1.0,
+            method="cfm4_adaptive_richardson",
+            m_max=-5,
+        )
+    with pytest.raises(ValueError, match="m_max"):
+        ann.run(
+            psi0,
+            0.0,
+            1.0,
+            method="cfm4_adaptive_richardson",
+            m_max=3.5,  # type: ignore[arg-type]
+        )
+
+
 def test_adaptive_save_tlist_not_implemented() -> None:
     """``save_tlist is not None`` で ``NotImplementedError`` (Phase 5)."""
     n = 3

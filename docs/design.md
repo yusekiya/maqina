@@ -1129,13 +1129,33 @@ resolution は facade 層 (`python/kryanneal/annealer.py`) で行い, driver
 は既存 `dt_max=` パラメータをそのまま受ける (driver 内部の入力検証で
 `dt_max >= dt0` を担保)。
 
-##### C. `m` の adaptive 化 (issue #43 C, 未着手)
+##### C. `m` の adaptive 化 (issue #43 C, v0.4.x で簡略 scope を導入)
 
-Lanczos 内で `β_k < krylov_tol` 早期打切を extend し, `m_init=16,
-m_max=32` で adaptive に切り上げる予定。`m_eff` の累積統計を
-`QuantumResult` に保存し, 同一問題で `m=adaptive` と `m=24 fixed` の
-終端 ψ が `rel < 1e-12` で一致することを契約とする。詳細は本リリース
-時点では未確定。
+`QuantumAnnealer.run(method="cfm4_adaptive_richardson", m_max=16)` を
+渡すと, facade 側で adaptive Richardson 経路の Lanczos 部分空間次元
+上限を `self.m` (コンストラクタ既定 24) から `m_max` で上書きする。
+step-doubling Richardson 推定子が Lanczos breakdown も embedded error
+として検出する fail-safe (Phase 4 C3) を活かし, `m_max=16` 等の保守値
+で per-step matvec を 30% 程度削減する運用を許容する (Richardson が
+破綻を検知すれば PI controller が dt を絞り精度を維持)。`β_k <
+krylov_tol` の早期打切は既存 `lanczos_propagate` で実装済 (`src/krylov.rs`
+§ `m_eff` 計算)で, 実効次元は `m_eff ≤ m_max`。
+
+**簡略 scope の理由**: issue 本文の C task は `m_eff` の per-step
+累積統計を `QuantumResult` に保存し, `bench_per_step.py` で
+`m=adaptive vs m=16 fixed vs m=24 fixed` の wall time 比較を要求する。
+これらは Rust 側 `lanczos_propagate` の戻り値拡張 (現状 `Vec<Complex64>`
+→ `(Vec<Complex64>, usize)` で `m_eff` を返す) + PyO3 plumbing + Python
+driver 集計が必要で, Phase 4 follow-up の DX 改善 PR としては
+パッケージが大きすぎる。本リリースでは facade パラメータ `m_max` で
+user-facing API を確定させ, m_eff 統計と bench 拡張は別 issue で起票
+予定 (Phase 5 で `QuantumResult` の history 拡張と一緒に取り込む案を
+含む)。
+
+実機 benchmark 評価は `bench_per_step.py` で `--m 16` / `--m 24` の
+2 経路を手動で sweep して per-cell wall time を比較する形でも検証可
+(adaptive vs fixed の 1.5–1.7× 期待 speedup は issue 本文 motivation
+参照)。
 
 ### 5.4 Python リファレンス実装
 
