@@ -1066,6 +1066,97 @@ def evolve_schedule_adaptive_richardson(
 `QuantumAnnealer.run(method="cfm4_adaptive_richardson", ...)` はこれを
 内部で呼ぶ薄いラッパ。
 
+#### adaptive driver の DX 改善 (Phase 4 follow-up, issue #43)
+
+`m` / `dt_init` / `dt_max` の手動チューニングを段階的に自動化する
+follow-up 群 (issue #43)。バージョンは `0.4.x` 系の patch リリースで
+取り込む (公開 API の破壊的変更なし; シグネチャ拡張のみ)。
+
+##### A. `dt_init="auto"` (issue #43 A, v0.4.x で導入)
+
+`QuantumAnnealer.run(method="cfm4_adaptive_richardson", dt_init="auto")`
+を渡すと, facade 側で線形 schedule の Magnus 級数 T スケーリング
+(s-space scaling invariance) から導いた保守値を `dt0` に解決する:
+
+```
+dt0 = min(max(c · T^β, _AUTO_DT_INIT_FLOOR), T)
+       (T = t1 - t0, 既定 c = 0.1, β = 0.5, floor = 1e-3)
+```
+
+理論最適は `β = 3/4` (Magnus 切断誤差 `~ K · dt^5`, `K ~ ‖[H_drv, H_p]‖²`
+の T 依存と `T = (t1 - t0)` 区間長から導出, `docs/design.md` §5.3 内
+PI controller 既定値の議論と整合) だが, schedule 非線形性や問題依存性に
+対するロバスト性を取って `β = 0.5` を既定とした (issue 本文の motivation
+参照)。`T < 1` の小 T ケースで `c · T^β` が driver の `dt_min` (default
+`1e-4`) を下回らないよう床値 `1e-3` を, 逆に `dt0 > T` で driver 入力
+検証 `dt_max >= dt0` (`dt_max = 10 · dt0` default) を満たさなくなる退化
+ケースを避けるため上限 `T` を同時に張る。
+
+resolution は facade 層 (`python/kryanneal/annealer.py`) で行い, driver
+(`evolve_schedule_adaptive_richardson`) は受け取った `dt0` をそのまま
+使う。これにより driver 単体テスト (`tests/test_adaptive.py` 既存) は
+変更不要で, facade 層のテスト (同ファイル末尾に追加) で `"auto"`
+解決後の挙動と PI controller との接続を smoke 検証する。
+
+##### B. `dt_max` の Lanczos capacity 自動見積もり (issue #43 B, v0.4.x で導入)
+
+`QuantumAnnealer.run(method="cfm4_adaptive_richardson", dt_max="auto")` を
+渡すと, facade 側で Gershgorin 上界による Lanczos capacity 自動見積もりを
+`dt_max` に解決する:
+
+```
+‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|
+dt_max  = max(min(10·dt0, 4m / ‖H‖_est), dt0)
+```
+
+Lanczos m 部分空間で `exp(-i dt H) |ψ⟩` を `rel < tol` で再現できる
+安全領域は経験的に `dt · ‖H‖ ≲ 4 m` (cv_ising 流, hand-rolled Lanczos の
+collapsed safe radius)。`‖H‖` は Gershgorin 上界で closed form に
+見積もる (Power method で 5–10 step 走らせる案 2 もあるが overhead が
+あるので Phase 4 follow-up では closed form を採用)。最後の
+`max(_, dt0)` は driver 入力検証 `dt_max >= dt0` を満たすための floor で,
+`dt0` が Lanczos cap を超える縮退ケースでは Richardson 推定子が breakdown
+を embedded error として検出し PI controller が dt を縮めるため
+fail-safe で成立する (issue #43 B の motivation と整合)。
+
+大 N で `‖H‖ ∝ N` が支配的になる領域では `4m/‖H‖` が default
+`10·dt0` を下回り cap が効く。例えば m=24, dt0=0.5, n=10 (h_x=1·10),
+H_p_diag in [-1, 1] では `‖H‖_est = 10 + 1 = 11` → cap = 4·24/11 ≈ 8.7,
+default 5.0 が支配。n=50 では `‖H‖_est ≈ 51`, cap ≈ 1.88, default 5.0
+より cap が支配。
+
+resolution は facade 層 (`python/kryanneal/annealer.py`) で行い, driver
+は既存 `dt_max=` パラメータをそのまま受ける (driver 内部の入力検証で
+`dt_max >= dt0` を担保)。
+
+##### C. `m` の adaptive 化 (issue #43 C, v0.4.x で簡略 scope を導入)
+
+`QuantumAnnealer.run(method="cfm4_adaptive_richardson", m_max=16)` を
+渡すと, facade 側で adaptive Richardson 経路の Lanczos 部分空間次元
+上限を `self.m` (コンストラクタ既定 24) から `m_max` で上書きする。
+step-doubling Richardson 推定子が Lanczos breakdown も embedded error
+として検出する fail-safe (Phase 4 C3) を活かし, `m_max=16` 等の保守値
+で per-step matvec を 30% 程度削減する運用を許容する (Richardson が
+破綻を検知すれば PI controller が dt を絞り精度を維持)。`β_k <
+krylov_tol` の早期打切は既存 `lanczos_propagate` で実装済 (`src/krylov.rs`
+§ `m_eff` 計算)で, 実効次元は `m_eff ≤ m_max`。
+
+**簡略 scope の理由**: issue 本文の C task は `m_eff` の per-step
+累積統計を `QuantumResult` に保存し, `bench_per_step.py` で
+`m=adaptive vs m=16 fixed vs m=24 fixed` の wall time 比較を要求する。
+これらは Rust 側 `lanczos_propagate` の戻り値拡張 (現状 `Vec<Complex64>`
+→ `(Vec<Complex64>, usize)` で `m_eff` を返す) + PyO3 plumbing + Python
+driver 集計が必要で, Phase 4 follow-up の DX 改善 PR としては
+パッケージが大きすぎる。本リリースでは facade パラメータ `m_max` で
+user-facing API を確定させ, m_eff 統計と bench 拡張は別 issue で起票
+予定 (Phase 5 で `QuantumResult` の history 拡張と一緒に取り込む案を
+含む)。
+
+実機 benchmark 評価は `bench_per_step.py` で `--m 16` / `--m 24` の
+2 経路を手動で sweep して per-cell wall time を比較する形でも検証可
+(adaptive vs fixed の 1.5–1.7× 期待 speedup は issue 本文 motivation
+参照)。
+
 ### 5.4 Python リファレンス実装
 
 `python/kryanneal/krylov.py` に `_python_lanczos_propagate` /
