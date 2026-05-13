@@ -1008,6 +1008,19 @@ growth_max   = 4.0           # 1 step での dt 拡大率上限
 max_rejects  = 50            # 同一 step での連続 reject 上限 (超過で RuntimeError)
 ```
 
+> **`tol_step = 1e-8` の選定根拠 (保守寄り)**: 1 step あたりの局所誤差
+> ``1e-8`` を区間 ``[0, T]`` で蓄積すると, worst case (Lady Windermere's
+> fan) では `N_step · 1e-8 ~ 1e-5` 程度, ランダムウォーク的合成では
+> `√N_step · 1e-8 ~ 1e-7` 程度の終端誤差になる. 標準的な QuTiP 比較
+> テストの fidelity 要件 `1 - 1e-6` を **どんな問題サイズでも安全
+> マージン付きで満たす** よう保守寄りに選定した値.
+> 実用上は `tol_step ∈ [1e-6, 1e-5]` も多くの応用で十分で, user が
+> 速度を取りたい場合は facade の `atol` 引数を緩めることで opt-in
+> できる (PI step 数が減り, `krylov_tol = None` ならば §5.3 follow-up
+> E の `_KRYLOV_TOL_ATOL_RATIO` 連動で Lanczos 早期打切も自動的に
+> 緩む). default の "未指定で robust" 性質を維持しつつ, user が
+> 段階的に速度寄りに振れるよう設計してある.
+
 ループ本体 (擬似コード):
 
 ```python

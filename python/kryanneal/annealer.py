@@ -316,6 +316,14 @@ class QuantumAnnealer:
             adaptive 経路の局所誤差閾値. driver の ``tol_step`` に map
             される. ``None`` のときは driver 既定値 ``1e-8`` を使う.
             固定 dt 経路では無視される.
+
+            **default ``1e-8`` は保守寄りの選択**. 量子ダイナミクス標準
+            テストの fidelity ``1 - 1e-6`` 要件を安全マージン付きで満たす
+            ことを優先した値. 実用上 ``atol=1e-6`` / ``1e-5`` でも多くの
+            応用で許容範囲で, その場合 PI step 数が減るうえ
+            ``krylov_tol = None`` ならば Lanczos 早期打切 (`atol · 1e-3`)
+            も自動的に緩んで二重に高速化される. 詳細は
+            ``docs/design.md`` §5.3 PI controller defaults 表のノート.
         dt_init
             adaptive 経路の初期 dt 提案. driver の ``dt0`` に map される.
             ``None`` (既定) のとき
@@ -414,6 +422,14 @@ class QuantumAnnealer:
         if method == "cfm4_adaptive_richardson":
             # NOTE: 既定値は driver (``evolve_schedule_adaptive_richardson``)
             # 側と一致させること. driver 側を変えたら本ファイルも追従する.
+            #
+            # atol default ``1e-8`` は **保守寄りの選択** (詳細は
+            # ``docs/design.md`` §5.3 PI controller defaults 表のノート).
+            # 量子ダイナミクス標準テストの fidelity ``1 - 1e-6`` 要件を
+            # 単一の安全 default で安定して満たすことを優先しており,
+            # 実用上は ``atol=1e-6`` / ``1e-5`` も十分許容範囲. user が
+            # 速度を取りたい場合は ``atol`` を緩めること (PI step 数が
+            # 減り, ``krylov_tol`` 連動も自動緩和される).
             tol_step = float(atol) if atol is not None else 1e-8
             # issue #54: ``krylov_tol = None`` のとき adaptive Richardson 経路は
             # ``tol_step · _KRYLOV_TOL_ATOL_RATIO`` に解決する.

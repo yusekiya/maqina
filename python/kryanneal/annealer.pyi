@@ -150,6 +150,14 @@ class QuantumAnnealer:
             adaptive 経路の局所誤差閾値. driver の ``tol_step`` に map
             される. ``None`` のときは driver 既定値 ``1e-8`` を使う.
             固定 dt 経路では無視される.
+
+            **default ``1e-8`` は保守寄りの選択**. 量子ダイナミクス標準
+            テストの fidelity ``1 - 1e-6`` 要件を安全マージン付きで満たす
+            ことを優先した値. 実用上 ``atol=1e-6`` / ``1e-5`` でも多くの
+            応用で許容範囲で, その場合 PI step 数が減るうえ
+            ``krylov_tol = None`` ならば Lanczos 早期打切 (`atol · 1e-3`)
+            も自動的に緩んで二重に高速化される. 詳細は
+            ``docs/design.md`` §5.3 PI controller defaults 表のノート.
         dt_init
             adaptive 経路の初期 dt 提案. driver の ``dt0`` に map される.
             ``None`` (既定) のとき

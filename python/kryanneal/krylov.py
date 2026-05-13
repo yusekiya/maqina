@@ -1357,7 +1357,8 @@ def evolve_schedule_adaptive_m2(
     krylov_tol
         Lanczos の β 打切り閾値 (既定 ``1e-12``).
     tol_step
-        accept 判定の局所誤差閾値 (既定 ``1e-8``).
+        accept 判定の局所誤差閾値 (既定 ``1e-8``; 保守寄りの選定根拠は
+        ``docs/design.md`` §5.3 PI controller defaults 表のノート参照).
     dt0
         初期 dt (既定 ``0.5``).
     dt_min
