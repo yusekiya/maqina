@@ -253,8 +253,11 @@ def test_run_cfm4_adaptive_richardson_smoke_and_ground_state() -> None:
     assert res.n_steps_actual >= 1
     # adaptive 経路は要求 step 数を持たないので n_steps = n_steps_actual.
     assert res.n_steps == res.n_steps_actual
-    # Phase 4 C3 規約: n_matvec = n_steps_actual × 6 × m (m=24 デフォルト).
-    assert res.n_matvec == res.n_steps_actual * 6 * 24
+    # Phase 4 follow-up (issue #52 A) 規約: n_matvec は m_eff_history の総和
+    # (実 Lanczos コスト). 早期打切なしの upper bound は n_steps_actual × 6 × m
+    # (m=24 デフォルト) だが, smooth schedule では m_eff < m が一般的なので
+    # 上限のみ assert する.
+    assert 1 <= res.n_matvec <= res.n_steps_actual * 6 * 24
     # propagator は unitary.
     assert abs(np.linalg.norm(res.psi_final) - 1.0) < 1e-10
 

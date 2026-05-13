@@ -559,8 +559,10 @@ def test_m_max_facade_smoke() -> None:
     fid = _fidelity(res.psi_final, psi_ref)
     assert fid > 1 - 1e-6, f"m_max=16 fidelity too low: {fid} (1-fid={1 - fid})"
     assert res.success
-    # n_matvec が m_eff_param=16 ベースで計算されていること (per-step 6m).
-    assert res.n_matvec == res.n_steps_actual * 6 * 16
+    # n_matvec は m_eff_history の総和に基づく実コスト. 早期打切が起き
+    # なければ n_steps_actual * 6 * 16 = upper bound と一致するが,
+    # 早期打切で 6m_max を下回るのが一般 (issue #52 A 以降). 上限のみ assert.
+    assert res.n_matvec <= res.n_steps_actual * 6 * 16
 
 
 def test_m_max_overrides_self_m() -> None:
@@ -600,6 +602,113 @@ def test_m_max_overrides_self_m() -> None:
     np.testing.assert_array_equal(res_override.psi_final, res_native.psi_final)
     assert res_override.n_steps_actual == res_native.n_steps_actual
     assert res_override.n_matvec == res_native.n_matvec
+
+
+def test_m_eff_stats_in_adaptive_result() -> None:
+    """adaptive Richardson 経路で ``QuantumResult.m_eff_stats`` が非 None で
+    必要なキー全部を持ち, 各統計値が ``[1, 6·m]`` の範囲に収まる (issue #52 A).
+    """
+    from kryanneal import QuantumAnnealer
+
+    n = 4
+    T = 5.0
+    prob = _make_random_problem(n, seed=20260513)
+    sched = Schedule.linear(T=T)
+    psi0 = uniform_superposition(n)
+
+    ann = QuantumAnnealer(prob, sched)
+    res = ann.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=1e-8,
+    )
+    assert res.m_eff_stats is not None
+    stats = res.m_eff_stats
+    # 必須キー.
+    for key in ("total", "mean", "median", "min", "max"):
+        assert key in stats, f"missing key {key!r} in m_eff_stats={stats!r}"
+    # 各 per-step 値は [1, 6·m] 範囲 (m default 24).
+    assert 1 <= stats["min"] <= stats["max"] <= 6 * 24
+    assert stats["min"] <= stats["median"] <= stats["max"]
+    assert stats["min"] <= stats["mean"] <= stats["max"]
+    # total = mean · n_steps_actual.
+    assert res.n_steps_actual is not None
+    assert stats["total"] == pytest.approx(
+        stats["mean"] * res.n_steps_actual, rel=1e-12
+    )
+    # n_matvec が m_eff_history の総和と一致する (C4 で導入された contract).
+    assert res.n_matvec == stats["total"]
+
+
+def test_m_eff_stats_none_for_fixed_dt_methods() -> None:
+    """固定 dt 経路 (m2 / trotter / cfm4) では ``m_eff_stats`` が None."""
+    from kryanneal import QuantumAnnealer
+
+    n = 3
+    T = 1.0
+    prob = _make_random_problem(n, seed=42)
+    sched = Schedule.linear(T=T)
+    psi0 = uniform_superposition(n)
+    ann = QuantumAnnealer(prob, sched)
+    for method in ("m2", "trotter", "trotter_suzuki4", "cfm4"):
+        res = ann.run(
+            psi0,
+            0.0,
+            T,
+            method=method,  # type: ignore[arg-type]
+            n_steps=10,
+        )
+        assert res.m_eff_stats is None, (
+            f"method={method!r}: m_eff_stats should be None, got {res.m_eff_stats!r}"
+        )
+
+
+def test_m_max_32_matches_m_24_when_early_termination() -> None:
+    """``m_max=32`` (実 ``m_eff < 24`` で β_k 早期打切) と ``m=24`` fixed の
+    終端 ψ が ``rel < 1e-12`` で一致 (issue #52 A の β_k tol 早期打切契約).
+
+    smooth schedule で問題サイズが小さい (n=4) 場合, 実 ``m_eff`` は 24 を
+    下回るのが一般. 同じ β_k 打切点で停止するため Rust / Python 双方の
+    Lanczos が決定論的に同じ部分空間を構築し, 終端 ψ もビット一致または
+    機械精度内一致が期待される.
+    """
+    from kryanneal import QuantumAnnealer
+
+    n = 4
+    T = 5.0
+    prob = _make_random_problem(n, seed=20260513)
+    sched = Schedule.linear(T=T)
+    psi0 = uniform_superposition(n)
+
+    ann_24 = QuantumAnnealer(prob, sched, m=24)
+    res_24 = ann_24.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=1e-8,
+    )
+    ann_24_with_max32 = QuantumAnnealer(prob, sched, m=24)
+    res_32 = ann_24_with_max32.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=1e-8,
+        m_max=32,
+    )
+    # 早期打切が同じ m_eff (=k+1) で起きていれば終端 ψ は完全一致するか
+    # それ以下になる. 緩めに rel<1e-12 で assert.
+    rel = float(
+        np.linalg.norm(res_24.psi_final - res_32.psi_final)
+        / max(np.linalg.norm(res_24.psi_final), 1.0)
+    )
+    assert rel < 1e-12, f"m=24 vs m_max=32 mismatch: rel={rel}"
+    # m_max=32 のときの m_eff_max は ≤ 6·32 = 192.
+    assert res_32.m_eff_stats is not None
+    assert res_32.m_eff_stats["max"] <= 6 * 32
 
 
 def test_m_max_invalid_raises() -> None:

@@ -116,7 +116,9 @@ def test_python_cfm4_matches_rust(n: int, seed: int) -> None:
     psi_rust, m_eff_rust = _rust_mod.cfm4_step_py(
         psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol
     )
-    assert m_eff_py == m_eff_rust, f"m_eff_sum mismatch: py={m_eff_py}, rust={m_eff_rust}"
+    assert m_eff_py == m_eff_rust, (
+        f"m_eff_sum mismatch: py={m_eff_py}, rust={m_eff_rust}"
+    )
     rel = np.linalg.norm(psi_py - psi_rust) / max(np.linalg.norm(psi_rust), 1.0)
     assert rel < 1e-13, f"n={n}, seed={seed}: rel = {rel}"
 

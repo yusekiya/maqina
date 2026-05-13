@@ -91,6 +91,17 @@ class QuantumResult:
         Phase 4 追加. adaptive 経路で実際に accept された step 数.
         固定 dt 経路では ``n_steps`` と一致する整数値を返し,
         Phase 1–3 互換のために default ``None`` も許容する.
+    m_eff_stats
+        Phase 4 follow-up (issue #52 A) 追加. adaptive Richardson 経路で
+        per-step の Lanczos 部分空間次元合計 ``m_eff_sum`` (= 6 Lanczos
+        呼出の m_eff 合計, 早期打切なしで ``6m``) の累積統計. キーは
+        ``"total"`` (全 step 合算 = 実 matvec 数の見積もり), ``"mean"``
+        (per-step 平均), ``"min"`` / ``"max"`` (per-step 最小 / 最大),
+        ``"median"`` (per-step 中央値). 固定 dt 経路 (m2 / trotter /
+        cfm4 / trotter_suzuki4) では ``None`` を返す. adaptive M2 経路は
+        本 Phase では未対応のため ``None`` (将来 driver 拡張で支援する案
+        あり). 値の型は ``"total"`` のみ ``int``, それ以外は ``float``
+        (median / mean が非整数値になりうるため).
 
     Notes
     -----
@@ -108,3 +119,4 @@ class QuantumResult:
     success: bool = True
     method: str = "m2"
     n_steps_actual: int | None = None
+    m_eff_stats: dict[str, int | float] | None = None
