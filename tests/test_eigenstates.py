@@ -32,7 +32,9 @@ def _make_problem(n: int, seed: int = 0) -> IsingProblem:
     return IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
 
 
-def _apply_ht(prob: IsingProblem, sched: Schedule, t: float, v: np.ndarray) -> np.ndarray:
+def _apply_ht(
+    prob: IsingProblem, sched: Schedule, t: float, v: np.ndarray
+) -> np.ndarray:
     """``H(t) @ v`` を Rust matvec 経由で計算する (テスト残差用)."""
     a_t, b_t = sched.coeffs_at(t)
     v_c = np.ascontiguousarray(v)

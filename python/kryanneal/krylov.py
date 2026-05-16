@@ -1638,7 +1638,9 @@ def evolve_schedule_adaptive_m2(
         同一 step での連続 reject 上限. 超過で ``RuntimeError``
         (既定 ``50``).
     save_tlist
-        観測時刻列 (Phase 5 で実装予定). 現状は ``None`` 以外を渡すと
+        Phase 5 拡張対象外 (issue #47 では adaptive Richardson のみ有効化).
+        adaptive M2 driver は ``annealer.py`` の facade からは呼ばれない
+        内部 API のため scope 外. ``None`` 以外を渡すと
         ``NotImplementedError``.
 
     Returns
@@ -1657,13 +1659,14 @@ def evolve_schedule_adaptive_m2(
     ValueError
         ``t1 <= t0`` または PI controller の数値引数が範囲外のとき.
     NotImplementedError
-        ``save_tlist`` が ``None`` でないとき (Phase 5).
+        ``save_tlist`` が ``None`` でないとき (本 driver では scope 外).
     RuntimeError
         ``max_rejects`` を連続超過したとき.
     """
     if save_tlist is not None:
         raise NotImplementedError(
-            "save_tlist is reserved for Phase 5; pass None in Phase 4."
+            "save_tlist is not supported on the adaptive M2 driver; "
+            "use evolve_schedule_adaptive_richardson or method='cfm4_adaptive_richardson'."
         )
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")

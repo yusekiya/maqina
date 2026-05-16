@@ -1,6 +1,6 @@
 [project]
 name = "kryanneal"
-version = "0.4.0"
+version = "0.5.0"
 description = "Krylov + Magnus quantum annealing simulator for the transverse-field Ising model"
 readme = "README.md"
 requires-python = ">=3.13"

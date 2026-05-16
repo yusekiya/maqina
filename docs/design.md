@@ -1,4 +1,4 @@
-# kryanneal: 設計書 (v0.4)
+# kryanneal: 設計書 (v0.5)
 
 横磁場イジングモデル (TFIM) の量子ダイナミクスを matrix-free に計算する
 Python パッケージ。Krylov 法 (Lanczos) で matvec を介した短時間プロパゲータ
@@ -1169,9 +1169,9 @@ def evolve_schedule_adaptive_richardson(
 **`None` default + auto resolution + 明示 float で override** の統一
 スタイルに揃え (`"auto"` リテラル廃止) 公開 API の破壊的変更を導入した。
 版数は `docs/conventions.md` §2 ポリシー (Phase 完了時に `0.N.0` へ bump)
-に従い, **Phase 5 完了時の v0.5.0 minor bump で正式に版数化** する
-(本変更は Phase 4 follow-up として 0.4.x 系で先行マージされ, Phase 5
-umbrella PR でまとめて bump される)。
+に従い, **Phase 5 完了の v0.5.0 minor bump で正式に版数化済** (本変更は
+Phase 4 follow-up として 0.4.x 系で先行マージされ, Phase 5 umbrella PR
+(issue #45) でまとめて bump された)。
 
 ##### A. `dt_init=None` で T 依存 auto resolution (issue #43 A で導入, issue #54 で None default 化)
 
@@ -1263,7 +1263,7 @@ user-facing API を確定させ, m_eff 統計と bench 拡張は別 issue で起
 (adaptive vs fixed の 1.5–1.7× 期待 speedup は issue 本文 motivation
 参照)。
 
-##### E. adaptive driver default の統一 (issue #54, Phase 5 完了時の v0.5.0 で版数化予定)
+##### E. adaptive driver default の統一 (issue #54, Phase 5 完了の v0.5.0 で版数化済)
 
 PR #53 (issue #52) で `QuantumResult.m_eff_stats` を露出させたところ,
 adaptive Richardson の `krylov_tol = 1e-12` (旧 default) が `atol = 1e-8`
@@ -1277,14 +1277,14 @@ default に対して 4 桁過剰タイトで Lanczos β_k 早期打切が `m_eff
 (問題依存推定)** の 2 経路設計も「根拠の薄い固定保守 default より auto
 解決値を default にする」方が筋という観点で再整理した。
 
-| パラメータ | 旧 default | 旧 `"auto"` 挙動 | **新 default (`None` で auto resolution, Phase 5 完了の v0.5.0 で版数化予定)** |
+| パラメータ | 旧 default | 旧 `"auto"` 挙動 | **新 default (`None` で auto resolution, Phase 5 完了の v0.5.0 で版数化済)** |
 |---|---|---|---|
 | `krylov_tol` | `1e-12` 固定 | (なし) | `atol · _KRYLOV_TOL_ATOL_RATIO` (既定 `1e-3`) |
 | `dt_init` | `None → 0.5` 固定 / `"auto"` あり | `max(min(c·T^β, T), 1e-3)` | 同上 (旧 "auto" 式が default) |
 | `dt_max` | `None → 10·dt0` / `"auto"` あり | `max(min(10·dt0, 4m/‖H‖_est), dt0)` | 同上 |
 
 `Literal["auto"]` リテラルは facade から完全削除 (公開 API の破壊的変更;
-v0.5.0 で版数化予定)。None default = 旧 `"auto"` 経路と挙動上等価なので,
+v0.5.0 で版数化済)。None default = 旧 `"auto"` 経路と挙動上等価なので,
 `dt_init="auto"` / `dt_max="auto"` を明示していた呼び出しを `dt_init=None`
 / `dt_max=None` (または引数省略) に置換すれば挙動はビット一致で維持される。
 
@@ -1773,7 +1773,10 @@ U(dt) ≈ phase_p(dt/2) · (Π_i R_i(dt)) · phase_p(dt/2)
   逐次操作する. 固定 dt 経路は `run` と bit-identical な数値 (`rel < 1e-13`).
   `QuantumAnnealer.create_simulator(psi0, t0, *, method=...)` が簡便 factory.
   詳細は §4.5.
-- `instantaneous_eigenstates` (将来検討)
+- `instantaneous_eigenstates(problem, schedule, t, k, method, ...)` (issue #49, 済).
+  瞬時 H(t) の下位 k 固有値・固有状態を返す. `method="lanczos"` (default,
+  Krylov shift-invert + 自前 hand-rolled implicit QL) と `method="exact"`
+  (`n <= 12` の dense `eigh` 経路) の 2 経路. 詳細は §4.7.
 
 ### Phase 6: 並列化 + 仕上げ (~v0.6)
 
