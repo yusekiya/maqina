@@ -48,6 +48,7 @@ MODULES = [
     "eigenstates",
     "builders",
     "initial_states",
+    "observable",
     "result",
     "reference_qutip",
 ]

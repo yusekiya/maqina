@@ -539,8 +539,13 @@ class Observable:
     @classmethod
     def ising_energy(cls, problem: IsingProblem) -> "Observable":
         """H_problem 自体を観測量化."""
-        return cls(problem.H_p_diag)
+        return cls(problem.H_p_diag.copy())
 ```
+
+`ising_energy` が `.copy()` を取るのは, `problem` 側を別途参照し続けても
+Observable 側の `diag` が独立な実体になることを担保するため (Observable
+は内部で diag を共有保持する設計で, copy しないと `problem.H_p_diag`
+への副作用が起きうる). `magnetization` の `axis="z"` のみ Phase 5 で対応.
 
 X / Y 期待値は (a) `ψ` 自体への bit-flip を一度噛ませる必要があり遅い、
 (b) アニーリングのユースケースでは稀、という理由で v0.1 では対応しない
