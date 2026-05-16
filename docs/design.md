@@ -748,8 +748,15 @@ fn apply_h(
   ついて k と k^mask のペアを `mask=1<<i` で 2 元ストライドにより列挙。
   i=0 で stride 1、i=1 で stride 2、... と level-by-level に走査することで
   TLB / L2 ヒット率を上げる古典的テクニック (state-vector simulator の
-  X-gate pass と同一)。**Phase 1 ではスカラ単スレッド実装、Phase 6 で
-  rayon + SIMD + cache block-fusion を載せる** (§12 Phase 6)
+  X-gate pass と同一)。
+- **Phase 6 C1 (issue #62, v0.6 で版数化予定) で rayon `par_chunks_mut`
+  経由の L2 並列化を導入済み**。`y` を chunk 分割し各 chunk closure 内で
+  diag pass + 全 i bit-flip pass を **fuse** (cache-blocked 形)。`y_chunk`
+  を L1 cache resident に保つことで後段 SIMD (C2) / cache block-fusion
+  (C3) の足場とする。`feature = "rayon"` (default ON) で有効化, scalar
+  単スレッドビルドは `--no-default-features` でフォールバック。**SIMD
+  (Phase 6 C2)** / **cache block-fusion (Phase 6 C3)** は同 closure 内
+  inner ループに後段で重ねる予定 (§12 Phase 6)。
 
 #### 5.1.2 `apply_single_mode_axis_i` (Phase 2)
 
@@ -1783,17 +1790,22 @@ U(dt) ≈ phase_p(dt/2) · (Π_i R_i(dt)) · phase_p(dt/2)
 Phase 1-5 でアルゴリズム面の機能が出揃った時点で実装面の並列化に着手する。
 Phase 1 の baseline と比較できることが本 phase の前提。
 
-- **L2 並列化**: matvec / Trotter primitives の bit-flip pass を rayon
-  `par_chunks_mut` で並列化。`apply_h_kryanneal` と `apply_single_mode_axis_i`
-  の両方が対象 (CFM4:2 / Trotter どちらの経路でも効く)
-- **SIMD**: `std::simd` または `wide` クレートで AVX2 / AVX-512 / NEON
-  ターゲット。i=0,1,2 (stride 1/2/4) の連続アクセス領域に集中して適用
-- **cache block-fusion**: 大 N (≥20) で高 i の bit-flip pass が DRAM 律速
-  になるのを防ぐため、高 i 群を fuse して L2 cache に収まるブロック単位で
-  低 i pass と一緒に走らせる古典テクニック (qsim の X-gate pass 同様、§5.1.1
-  末尾の TODO で referenced)
+- **L2 並列化 (C1, issue #62, 実装済み)**: matvec / Trotter primitives の
+  bit-flip pass を rayon `par_chunks_mut` で並列化。`apply_h_kryanneal` と
+  `apply_single_mode_axis_i` の両方が対象 (CFM4:2 / Trotter どちらの経路でも
+  効く)。前者は cache-blocked 形 (chunk 内で diag + 全 i fuse), 後者は
+  `2·mask` block 単位の par_chunks_mut + 退化ケース `i=n-1` で split_at_mut
+  ペア並列。`feature = "rayon"` (default ON, `--no-default-features` で
+  scalar 単スレッドフォールバック)。
+- **SIMD (C2, issue #63, 計画)**: `std::simd` または `wide` クレートで
+  AVX2 / AVX-512 / NEON ターゲット。i=0,1,2 (stride 1/2/4) の連続アクセス
+  領域に集中して適用。C1 の chunk closure inner ループに重ねる前提。
+- **cache block-fusion (C3, issue #64, 計画)**: 大 N (≥20) で高 i の bit-flip
+  pass が DRAM 律速になるのを防ぐため、高 i 群を fuse して L2 cache に
+  収まるブロック単位で低 i pass と一緒に走らせる古典テクニック (qsim の
+  X-gate pass 同様、§5.1.1 末尾の TODO で referenced)。
 - 物理コア数 vs スループットの sweep をベンチに含め、メモリ帯域律速点を
-  明示する
+  明示する (`benchmarks/bench_parallel_scaling.py`, Phase 6 C1 で導入)
 - BLAS feature ON/OFF の数値一致 CI (両ビルドで rel < 1e-13)
 - 大規模 QuTiP 比較 (n=12-16 程度まで)
 - ドキュメント整備、Quick start サンプル

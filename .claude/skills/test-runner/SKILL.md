@@ -22,8 +22,10 @@ description: kryanneal のテスト・lint・build (`uv run pytest` / `cargo tes
 | 個別ファイル | `uv run pytest tests/test_krylov.py` |
 | 名前パターン | `uv run pytest -k "richardson"` |
 | `print` 出力を表示 | `uv run pytest -s` |
-| Rust 単体 (BLAS feature ON) | `cargo test` |
-| Rust 単体 (scalar fallback) | `cargo test --no-default-features` |
+| Rust 単体 (BLAS + rayon ON = default) | `cargo test` |
+| Rust 単体 (scalar fallback, BLAS + rayon OFF) | `cargo test --no-default-features` |
+| Rust 単体 (BLAS のみ, rayon OFF) | `cargo test --no-default-features --features blas` |
+| Rust 単体 (rayon のみ, BLAS OFF) | `cargo test --no-default-features --features rayon` |
 | Lint | `uv run ruff check .` |
 | 型チェック | `uv run ty check python/kryanneal` |
 | Stub 再生成 | `uv run python tools/gen_api_stubs.py` |
@@ -71,13 +73,20 @@ markers = [
 
 ### Rust 単体テスト (`cargo test`)
 
-`src/*.rs` 内に inline `#[cfg(test)] mod tests` として書く. BLAS feature
-on/off の両ブランチを別々に網羅:
+`src/*.rs` 内に inline `#[cfg(test)] mod tests` として書く. BLAS / rayon
+feature on/off の組合せを別々に網羅:
 
 ```bash
-cargo test                       # blas feature ON (default)
-cargo test --no-default-features # scalar fallback
+cargo test                                          # blas + rayon ON (default)
+cargo test --no-default-features                    # 両方 OFF (scalar 単スレッド)
+cargo test --no-default-features --features blas    # blas のみ
+cargo test --no-default-features --features rayon   # rayon のみ
 ```
+
+rayon 経路 (`apply_h_kryanneal_rayon` / `apply_single_mode_axis_i_rayon`,
+issue #62) の決定性テスト (`apply_*_rayon_determinism_8thread_100iter`) は
+`#[cfg(feature = "rayon")]` で gate されているため rayon ON ビルドでのみ
+実行される.
 
 カバー対象:
 
