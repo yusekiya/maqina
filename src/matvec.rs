@@ -155,6 +155,42 @@ mod simd_kernels {
     use num_complex::Complex64;
     use wide::f64x4;
 
+    /// 4 連続 f64 を 256-bit unaligned load で `f64x4` に取り込む.
+    ///
+    /// `wide::f64x4` は `#[repr(C, align(32))]` で内部 SIMD register (AVX `__m256d`
+    /// 等) と layout が一致するため, `ptr::read_unaligned` で memcpy された 32-byte
+    /// 領域を直接 `f64x4` 値として解釈できる. AVX target では LLVM が **1 個の
+    /// vmovupd** に折り畳む (旧版の `f64x4::new([ptr[0], ptr[1], ptr[2], ptr[3]])`
+    /// 要素 load は 4 個の scalar load + insert に展開され実 SIMD にならない
+    /// ことがあった).
+    ///
+    /// # Safety
+    /// `ptr` は **少なくとも 32 bytes (= 4 個の `f64`) が連続して読み出せる**
+    /// 領域を指していること. alignment は不要 (`read_unaligned` は 1-byte align
+    /// でも sound).
+    #[inline(always)]
+    unsafe fn load_f64x4_unaligned(ptr: *const f64) -> f64x4 {
+        // SAFETY: 呼び出し側が 4 f64 readable を保証. wide::f64x4 の layout は
+        // align(32), size(32), 内容は f64×4 と同じビットパターンなので
+        // read_unaligned で正しい f64x4 値が再構成される.
+        unsafe { std::ptr::read_unaligned(ptr as *const f64x4) }
+    }
+
+    /// `f64x4` 値を 4 連続 f64 へ 256-bit unaligned store する.
+    ///
+    /// AVX target では LLVM が **1 個の vmovupd** に折り畳む. 旧版の
+    /// `to_array()` + `copy_from_slice` パターンは 4 個の scalar store
+    /// になり得る.
+    ///
+    /// # Safety
+    /// `ptr` は **少なくとも 32 bytes が書き込み可能** であること.
+    /// alignment は不要.
+    #[inline(always)]
+    unsafe fn store_f64x4_unaligned(ptr: *mut f64, val: f64x4) {
+        // SAFETY: 呼び出し側が 4 f64 writable を保証.
+        unsafe { std::ptr::write_unaligned(ptr as *mut f64x4, val) }
+    }
+
     /// `&[Complex64]` を `&[f64]` (長さ 2 倍) として view する.
     ///
     /// # Safety
@@ -185,6 +221,12 @@ mod simd_kernels {
     /// `len = v.len() = y.len()` は `>= 2` かつ `2` の倍数であること
     /// (block-aligned 前提). `dim = 2^n` (n ≥ 1) の serial path および rayon
     /// path の `SIMD_BLOCK_MAX = 8` 倍数 chunk のいずれでも自動的に満たされる.
+    ///
+    /// # 命令計画 (AVX2 + FMA target)
+    /// 1 block あたり: vmovupd (v load) → vperm2f128 (128-bit half swap) →
+    /// vmovupd (y load) → vfmadd231pd (`y + coeff * v_swap`) → vmovupd (store).
+    /// i=0 のみ in-register half-swap が必要で, LLVM は `to_array()` + `new()`
+    /// 経由の reorder を vperm2f128 1 命令に折り畳む.
     #[inline]
     pub(super) fn bitflip_i0(v: &[Complex64], y: &mut [Complex64], coeff: f64) {
         debug_assert_eq!(v.len(), y.len(), "v and y must have equal length");
@@ -194,19 +236,26 @@ mod simd_kernels {
         let coeff_v = f64x4::splat(coeff);
         let v_f64 = as_f64_slice(v);
         let y_f64 = as_f64_slice_mut(y);
-        // 1 block = 2 Complex64 = 4 f64 = 1 × f64x4. block 内の前半 (1 complex
-        // = 2 f64) と後半 (1 complex = 2 f64) を入れ替えた v を読み込む.
+        // 1 block = 2 Complex64 = 4 f64 = 1 × f64x4.
         for (v_chunk, y_chunk) in v_f64.chunks_exact(4).zip(y_f64.chunks_exact_mut(4)) {
-            // v_chunk = [v[0].re, v[0].im, v[1].re, v[1].im]
-            // 半分を入れ替えた値 = [v[1].re, v[1].im, v[0].re, v[0].im]
-            let v_swap = f64x4::new([v_chunk[2], v_chunk[3], v_chunk[0], v_chunk[1]]);
-            let y_load = f64x4::new([y_chunk[0], y_chunk[1], y_chunk[2], y_chunk[3]]);
-            let new_y = coeff_v * v_swap + y_load;
-            let arr = new_y.to_array();
-            y_chunk[0] = arr[0];
-            y_chunk[1] = arr[1];
-            y_chunk[2] = arr[2];
-            y_chunk[3] = arr[3];
+            // SAFETY: chunks_exact(4) は各 chunk の長さを 4 (= 32 bytes f64) と
+            // 保証する. load_f64x4_unaligned / store_f64x4_unaligned の
+            // precondition を満たす.
+            unsafe {
+                // v_raw = [v[0].re, v[0].im, v[1].re, v[1].im] を 1 vmovupd で load.
+                let v_raw = load_f64x4_unaligned(v_chunk.as_ptr());
+                // 128-bit lane swap で半分を入れ替え (vperm2f128 想定):
+                //   [a, b, c, d] -> [c, d, a, b]
+                let arr = v_raw.to_array();
+                let v_swap = f64x4::new([arr[2], arr[3], arr[0], arr[1]]);
+                // y_load を 1 vmovupd で load.
+                let y_load = load_f64x4_unaligned(y_chunk.as_ptr());
+                // vfmadd231pd: new_y = coeff_v * v_swap + y_load (single FMA op
+                // on FMA-enabled CPU; fallback = mul + add).
+                let new_y = coeff_v.mul_add(v_swap, y_load);
+                // 1 vmovupd で store.
+                store_f64x4_unaligned(y_chunk.as_mut_ptr(), new_y);
+            }
         }
     }
 
@@ -214,6 +263,11 @@ mod simd_kernels {
     /// SIMD 特化版 (i=1, mask=2, block=4 Complex64 = 8 f64).
     ///
     /// `len = v.len() = y.len()` は `>= 4` かつ `4` の倍数であること.
+    ///
+    /// # 命令計画
+    /// 1 block (= 2 × f64x4) あたり: 2 × vmovupd (v_lo, v_hi load) →
+    /// 2 × vmovupd (y_lo, y_hi load) → 2 × vfmadd231pd → 2 × vmovupd (store).
+    /// shuffle 不要 (half がちょうど 1 × f64x4 に収まる).
     #[inline]
     pub(super) fn bitflip_i1(v: &[Complex64], y: &mut [Complex64], coeff: f64) {
         debug_assert_eq!(v.len(), y.len(), "v and y must have equal length");
@@ -223,22 +277,20 @@ mod simd_kernels {
         let coeff_v = f64x4::splat(coeff);
         let v_f64 = as_f64_slice(v);
         let y_f64 = as_f64_slice_mut(y);
-        // 1 block = 4 Complex64 = 8 f64 = 2 × f64x4. half (2 complex = 4 f64)
-        // がちょうど 1 × f64x4 に収まるので, 前半 / 後半をそれぞれ 1 SIMD reg
-        // に load して入れ替えるだけ. in-register shuffle 不要.
         for (v_chunk, y_chunk) in v_f64.chunks_exact(8).zip(y_f64.chunks_exact_mut(8)) {
-            let v_lo = f64x4::new([v_chunk[0], v_chunk[1], v_chunk[2], v_chunk[3]]);
-            let v_hi = f64x4::new([v_chunk[4], v_chunk[5], v_chunk[6], v_chunk[7]]);
-            let y_lo = f64x4::new([y_chunk[0], y_chunk[1], y_chunk[2], y_chunk[3]]);
-            let y_hi = f64x4::new([y_chunk[4], y_chunk[5], y_chunk[6], y_chunk[7]]);
-            // y_lo += coeff * v_hi
-            // y_hi += coeff * v_lo
-            let new_lo = coeff_v * v_hi + y_lo;
-            let new_hi = coeff_v * v_lo + y_hi;
-            let arr_lo = new_lo.to_array();
-            let arr_hi = new_hi.to_array();
-            y_chunk[0..4].copy_from_slice(&arr_lo);
-            y_chunk[4..8].copy_from_slice(&arr_hi);
+            // SAFETY: chunks_exact(8) で各 chunk 長 8 f64 = 2 × 32 bytes が保証
+            // される. 各 load/store の 4-f64 範囲は chunk 内に収まる.
+            unsafe {
+                let v_lo = load_f64x4_unaligned(v_chunk.as_ptr());
+                let v_hi = load_f64x4_unaligned(v_chunk.as_ptr().add(4));
+                let y_lo = load_f64x4_unaligned(y_chunk.as_ptr());
+                let y_hi = load_f64x4_unaligned(y_chunk.as_ptr().add(4));
+                // y_lo += coeff * v_hi, y_hi += coeff * v_lo.
+                let new_lo = coeff_v.mul_add(v_hi, y_lo);
+                let new_hi = coeff_v.mul_add(v_lo, y_hi);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr(), new_lo);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr().add(4), new_hi);
+            }
         }
     }
 
@@ -248,6 +300,11 @@ mod simd_kernels {
     /// `len = v.len() = y.len()` は `>= 8` かつ `8` の倍数であること.
     /// この block サイズが `SIMD_BLOCK_MAX = 8` (Complex64 単位) に対応し,
     /// rayon path の chunk_size align 基準になる.
+    ///
+    /// # 命令計画
+    /// 1 block (= 4 × f64x4) あたり: 4 × vmovupd (v load) →
+    /// 4 × vmovupd (y load) → 4 × vfmadd231pd → 4 × vmovupd (store).
+    /// shuffle 不要.
     #[inline]
     pub(super) fn bitflip_i2(v: &[Complex64], y: &mut [Complex64], coeff: f64) {
         debug_assert_eq!(v.len(), y.len(), "v and y must have equal length");
@@ -257,28 +314,30 @@ mod simd_kernels {
         let coeff_v = f64x4::splat(coeff);
         let v_f64 = as_f64_slice(v);
         let y_f64 = as_f64_slice_mut(y);
-        // 1 block = 8 Complex64 = 16 f64 = 4 × f64x4. half (4 complex = 8 f64)
-        // が 2 × f64x4 に収まる. shuffle 不要で 4 SIMD reg load + 4 SIMD ops.
         for (v_chunk, y_chunk) in v_f64.chunks_exact(16).zip(y_f64.chunks_exact_mut(16)) {
-            // 前半 (低 4 complex = 8 f64): 2 × f64x4
-            let v_lo_a = f64x4::new([v_chunk[0], v_chunk[1], v_chunk[2], v_chunk[3]]);
-            let v_lo_b = f64x4::new([v_chunk[4], v_chunk[5], v_chunk[6], v_chunk[7]]);
-            // 後半 (高 4 complex = 8 f64): 2 × f64x4
-            let v_hi_a = f64x4::new([v_chunk[8], v_chunk[9], v_chunk[10], v_chunk[11]]);
-            let v_hi_b = f64x4::new([v_chunk[12], v_chunk[13], v_chunk[14], v_chunk[15]]);
-            let y_lo_a = f64x4::new([y_chunk[0], y_chunk[1], y_chunk[2], y_chunk[3]]);
-            let y_lo_b = f64x4::new([y_chunk[4], y_chunk[5], y_chunk[6], y_chunk[7]]);
-            let y_hi_a = f64x4::new([y_chunk[8], y_chunk[9], y_chunk[10], y_chunk[11]]);
-            let y_hi_b = f64x4::new([y_chunk[12], y_chunk[13], y_chunk[14], y_chunk[15]]);
-            // y_lo += coeff * v_hi, y_hi += coeff * v_lo (各 half 2 × f64x4).
-            let new_lo_a = coeff_v * v_hi_a + y_lo_a;
-            let new_lo_b = coeff_v * v_hi_b + y_lo_b;
-            let new_hi_a = coeff_v * v_lo_a + y_hi_a;
-            let new_hi_b = coeff_v * v_lo_b + y_hi_b;
-            y_chunk[0..4].copy_from_slice(&new_lo_a.to_array());
-            y_chunk[4..8].copy_from_slice(&new_lo_b.to_array());
-            y_chunk[8..12].copy_from_slice(&new_hi_a.to_array());
-            y_chunk[12..16].copy_from_slice(&new_hi_b.to_array());
+            // SAFETY: chunks_exact(16) で各 chunk 長 16 f64 = 4 × 32 bytes が保証
+            // される. 各 load/store の 4-f64 範囲は chunk 内に収まる.
+            unsafe {
+                // 前半 (低 4 complex = 8 f64): 2 × f64x4
+                let v_lo_a = load_f64x4_unaligned(v_chunk.as_ptr());
+                let v_lo_b = load_f64x4_unaligned(v_chunk.as_ptr().add(4));
+                // 後半 (高 4 complex = 8 f64): 2 × f64x4
+                let v_hi_a = load_f64x4_unaligned(v_chunk.as_ptr().add(8));
+                let v_hi_b = load_f64x4_unaligned(v_chunk.as_ptr().add(12));
+                let y_lo_a = load_f64x4_unaligned(y_chunk.as_ptr());
+                let y_lo_b = load_f64x4_unaligned(y_chunk.as_ptr().add(4));
+                let y_hi_a = load_f64x4_unaligned(y_chunk.as_ptr().add(8));
+                let y_hi_b = load_f64x4_unaligned(y_chunk.as_ptr().add(12));
+                // y_lo += coeff * v_hi, y_hi += coeff * v_lo (各 half 2 × f64x4).
+                let new_lo_a = coeff_v.mul_add(v_hi_a, y_lo_a);
+                let new_lo_b = coeff_v.mul_add(v_hi_b, y_lo_b);
+                let new_hi_a = coeff_v.mul_add(v_lo_a, y_hi_a);
+                let new_hi_b = coeff_v.mul_add(v_lo_b, y_hi_b);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr(), new_lo_a);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr().add(4), new_lo_b);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr().add(8), new_hi_a);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr().add(12), new_hi_b);
+            }
         }
     }
 }
