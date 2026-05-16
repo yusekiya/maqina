@@ -9,6 +9,7 @@
 | スクリプト | 内容 | 導入 Phase |
 |---|---|---|
 | `bench_per_step.py` | M2 / Trotter / Suzuki S_4 / CFM4:2 / CFM4 adaptive Richardson の per-step wall time を `(method, n)` で sweep. adaptive 経路は `n_steps_actual` (PI controller が accept した実 step 数) と `final_err_vs_ref` (高精度参照解との state 差) も併記 | Phase 1 (M2) → Phase 2 (Trotter / Suzuki S_4) → Phase 3 (CFM4:2) → Phase 4 C3 (adaptive Richardson) |
+| `bench_parallel_scaling.py` | `apply_h_kryanneal` / `apply_single_mode_axis_i` の rayon thread × N sweep. subprocess 起動時に `RAYON_NUM_THREADS` を変えながら physical core 数 vs throughput の knee (memory-bandwidth saturation point) を CSV + md に出力. BLAS thread は 1 固定で rayon 効果を分離する | Phase 6 C1 (issue #62) |
 | `bench_blas_compare.py` | BLAS feature on/off の同一マシン比較 | Phase 6 予定 |
 | `bench_vs_qutip.py` | QuTiP `sesolve` との fidelity vs wall time | Phase 3 以降予定 |
 

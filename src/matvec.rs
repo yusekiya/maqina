@@ -21,8 +21,22 @@
 //! `mask = 1<<i` で stride を持つ走査) を共有するため. Phase 6 の cache
 //! block-fusion 最適化が両者に均等に効く前提.
 //!
-//! Phase 1 / 2 はスカラ単スレッド実装. SIMD ヒント / unroll は入れない (Phase 6
-//! で rayon + SIMD + cache block-fusion を載せる).
+//! Phase 6 C1 (issue #62) で rayon `par_chunks_mut` 経由の L2 並列化を導入済み
+//! (`feature = "rayon"`, default ON). 同じ chunk closure 内で diag pass + 全 i
+//! bit-flip pass を完走する **cache-blocked 形** を採用し, `y_chunk` を L1 cache
+//! resident に保つことで後段 SIMD (Phase 6 C2) / cache block-fusion (Phase 6 C3)
+//! の足場とする (`docs/design.md` §5.1.1 / §12 Phase 6). `--no-default-features`
+//! ビルドでは scalar 単スレッド経路 (`*_serial`) が呼ばれ, 既存挙動を維持する.
+//!
+//! ## Thread pool 競合の注意 (rayon × BLAS)
+//!
+//! rayon thread 数は環境変数 `RAYON_NUM_THREADS` で **プロセス起動時に** 設定
+//! する (rayon の global pool は最初の rayon op で構築される). 一方 BLAS
+//! thread 数は Python 側 `kryanneal.set_blas_threads(n)` で動的に変えられる.
+//! 両者が `cpu_count` × `cpu_count` の総スレッド数を取ると context-switch で
+//! 性能が落ちるため, **rayon 経路で並列化する場合は `set_blas_threads(1)` に
+//! 落として BLAS pool を 1 thread に固定する** 運用が推奨 (詳細は `CLAUDE.md`
+//! 「Thread pool 運用」節).
 //!
 //! Phase 2 で `apply_single_mode_axis_i_py` を `#[pyfunction]` として宣言するが,
 //! `#[pymodule]` への登録は trotter 経路を整える C3 issue でまとめて行う.
@@ -35,6 +49,19 @@ use num_complex::Complex64;
 use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
+
+/// rayon chunk あたりの **最大** 要素数. y_chunk + v の参照範囲が L2 cache
+/// (~256 KB ≈ 16K Complex64) に収まる上限を狙う.
+#[cfg(feature = "rayon")]
+const RAYON_CHUNK_MAX: usize = 1 << 14;
+
+/// rayon chunk あたりの **最小** 要素数. closure / scheduling overhead を
+/// 償却するため 64 要素 (cache-line 4 要素 × 16) 以上を保証する.
+#[cfg(feature = "rayon")]
+const RAYON_CHUNK_MIN: usize = 1 << 6;
 
 /// `y = a_t · H_driver · v + b_t · diag(H_p_diag) · v` を計算する.
 ///
@@ -55,8 +82,15 @@ use pyo3::prelude::*;
 ///    `mask = 1 << i` を用い, `y[k] += coeff · v[k ^ mask]` を全 `k` で
 ///    accumulate.
 ///
-/// Phase 1 はシンプルな `for k in 0..dim` を維持する. inner-loop 最適化
-/// (cache-blocking / SIMD / rayon) は Phase 6 で導入する.
+/// # 実装
+/// `feature = "rayon"` (default ON) 時は [`apply_h_kryanneal_rayon`] が呼ばれ
+/// `y` を `par_chunks_mut` で分割し chunk closure 内で diag + 全 i bit-flip
+/// pass を完走する. 各 `y[k]` への書き込みは単一スレッドからしか発生せず,
+/// `v` は read-only のため race-free. 演算順序は chunk 内で serial と同じ
+/// (diag → i=0 → i=1 → ...) なので **rayon あり/なし両ビルドで bit-identical**
+/// に y[k] を生成する (詳細は `apply_h_kryanneal_rayon_matches_serial_*`
+/// テスト). `--no-default-features` 時は [`apply_h_kryanneal_serial`] にフォール
+/// バック.
 ///
 /// # Panics
 /// - `v.len() != 1 << n`
@@ -78,6 +112,28 @@ pub(crate) fn apply_h_kryanneal(
     assert_eq!(h_x.len(), n, "h_x must have length n");
     assert_eq!(h_p_diag.len(), dim, "h_p_diag must have length 2^n");
 
+    #[cfg(feature = "rayon")]
+    {
+        apply_h_kryanneal_rayon(v, y, h_x, h_p_diag, a_t, b_t, n);
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        apply_h_kryanneal_serial(v, y, h_x, h_p_diag, a_t, b_t, n);
+    }
+}
+
+/// `apply_h_kryanneal` の scalar 単スレッド実装. `feature = "rayon"` OFF
+/// ビルドおよび `#[cfg(test)]` 経路から rayon 経路との数値同一性比較に使う.
+fn apply_h_kryanneal_serial(
+    v: &[Complex64],
+    y: &mut [Complex64],
+    h_x: &[f64],
+    h_p_diag: &[f64],
+    a_t: f64,
+    b_t: f64,
+    n: usize,
+) {
+    let dim = 1usize << n;
     // 対角部分: y[k] = b_t · H_p_diag[k] · v[k] (上書き).
     for k in 0..dim {
         y[k] = Complex64::new(b_t * h_p_diag[k], 0.0) * v[k];
@@ -90,6 +146,65 @@ pub(crate) fn apply_h_kryanneal(
             y[k] += Complex64::new(coeff, 0.0) * v[k ^ mask];
         }
     }
+}
+
+/// `apply_h_kryanneal` の rayon 並列実装. `y` を `par_chunks_mut(chunk_size)`
+/// で分割し, 各 chunk closure 内で diag pass → 全 i bit-flip pass を完走する.
+///
+/// # 並列化スキーム (cache-blocked 形)
+///
+/// chunk 単位の closure に diag + 全 i を **fuse** することで:
+///
+/// 1. `y_chunk` (~`chunk_size`要素) が closure 実行中 L1 cache resident に
+///    保たれ, `(n+1)` 回の touch を re-load なしで処理できる.
+/// 2. rayon barrier が **per-call 1 個** で済む (i ごとに par section を
+///    張る形だと `(n+1)` 個入る). dim が小さい matvec を Lanczos の各
+///    step で繰り返す呼出パターンに有利.
+/// 3. 後段の SIMD (Phase 6 C2) は内側 `li` loop に, cache block-fusion
+///    (Phase 6 C3) は同 closure 内 i loop に直接重ねられる.
+///
+/// `v[k ^ mask]` の読み込みは chunk 境界を跨ぐことがある (mask > chunk_size)
+/// が `v` は read-only で race-free. 各 `y[k]` への書き込みは disjoint な
+/// chunk 内に閉じる.
+///
+/// # チャンクサイズ
+///
+/// `current_num_threads() * 4` 個のチャンクを目標に `dim / (nth*4)` を取り,
+/// [`RAYON_CHUNK_MIN`] (closure overhead 償却) と [`RAYON_CHUNK_MAX`]
+/// (L2 cache 上限) で clamp する.
+#[cfg(feature = "rayon")]
+fn apply_h_kryanneal_rayon(
+    v: &[Complex64],
+    y: &mut [Complex64],
+    h_x: &[f64],
+    h_p_diag: &[f64],
+    a_t: f64,
+    b_t: f64,
+    n: usize,
+) {
+    let dim = 1usize << n;
+    let nth = rayon::current_num_threads().max(1);
+    let chunk_size = (dim / (nth * 4)).clamp(RAYON_CHUNK_MIN, RAYON_CHUNK_MAX);
+
+    y.par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(idx, y_chunk)| {
+            let base = idx * chunk_size;
+            // 対角 pass: y_chunk[li] = b_t · H_p[k] · v[k].
+            for (li, y_k) in y_chunk.iter_mut().enumerate() {
+                let k = base + li;
+                *y_k = Complex64::new(b_t * h_p_diag[k], 0.0) * v[k];
+            }
+            // bit-flip pass: 全 i を同一 chunk 内で完走 (y_chunk が L1 resident).
+            for (i, &h_x_i) in h_x.iter().enumerate() {
+                let coeff = -a_t * h_x_i;
+                let mask = 1usize << i;
+                for (li, y_k) in y_chunk.iter_mut().enumerate() {
+                    let k = base + li;
+                    *y_k += Complex64::new(coeff, 0.0) * v[k ^ mask];
+                }
+            }
+        });
 }
 
 /// `psi` を axis `i` で 2 元化したペア `(psi[k], psi[k | mask])` に 2×2
@@ -115,6 +230,13 @@ pub(crate) fn apply_h_kryanneal(
 /// `if k & mask != 0 { continue; }` の分岐スキップを完全に避けられ,
 /// 内側ループは予測可能な連続アクセス + `mask` stride アクセスに揃う.
 ///
+/// `feature = "rayon"` (default ON) では [`apply_single_mode_axis_i_rayon`]
+/// が呼ばれ block 単位 (`2·mask`) で `par_chunks_mut` 並列化される. 退化
+/// ケース (i = n-1, block = dim, chunk が 1 個になる) は psi を上下半分に
+/// `split_at_mut` した上で `par_iter_mut().zip(par_iter_mut())` のペア並列に
+/// 切り替える. 各ペア `(lo, hi)` は単一スレッドが処理し write は disjoint
+/// なので race-free + rayon あり/なし両ビルドで bit-identical.
+///
 /// # 入出力
 /// - `psi` (length `2^n`): in-place で更新される状態ベクトル.
 /// - `u`: row-major 2×2 ユニタリ (本関数自体はユニタリ性を要求しないが,
@@ -135,6 +257,20 @@ pub(crate) fn apply_single_mode_axis_i(
     assert_eq!(psi.len(), dim, "psi must have length 2^n");
     assert!(i < n, "i={} must be < n={}", i, n);
 
+    #[cfg(feature = "rayon")]
+    {
+        apply_single_mode_axis_i_rayon(psi, u, i, n);
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        apply_single_mode_axis_i_serial(psi, u, i, n);
+    }
+}
+
+/// `apply_single_mode_axis_i` の scalar 単スレッド実装. テスト経路から
+/// rayon 結果との bit-identical 比較に使う.
+fn apply_single_mode_axis_i_serial(psi: &mut [Complex64], u: &[Complex64; 4], i: usize, n: usize) {
+    let dim = 1usize << n;
     let mask = 1usize << i;
     let block = mask << 1; // 2 * mask
     let mut base = 0usize;
@@ -148,6 +284,72 @@ pub(crate) fn apply_single_mode_axis_i(
             psi[hi] = u[2] * a + u[3] * b;
         }
         base += block;
+    }
+}
+
+/// `apply_single_mode_axis_i` の rayon 並列実装.
+///
+/// # 並列化スキーム
+///
+/// `block = 2·mask` 単位で操作を分割する.
+///
+/// - **複数 block** (`block < dim`, すなわち `i < n-1`): `par_chunks_mut(chunk_size)`
+///   で `chunk_size` を `block` の整数倍 (≥ [`RAYON_CHUNK_MIN`]) に揃え, 各
+///   chunk 内で block ごとに `split_at_mut(mask)` してペア処理する. chunk
+///   境界が `block` 境界に揃うので block を跨ぐ書き込み競合は起きない.
+/// - **単一 block** (`block == dim`, `i = n-1` 退化ケース): `psi.split_at_mut(mask)`
+///   で上下半分に分け `par_iter_mut().zip(par_iter_mut())` で個別ペアを並列に
+///   処理する.
+///
+/// どちらの経路もペア `(lo, hi)` は単一スレッドが排他処理し, 操作内容も
+/// scalar 経路と同じ `a = psi[lo]; b = psi[hi]; psi[lo] = u[0]·a + u[1]·b;
+/// psi[hi] = u[2]·a + u[3]·b` のためスケジュールに依らず bit-identical.
+#[cfg(feature = "rayon")]
+fn apply_single_mode_axis_i_rayon(psi: &mut [Complex64], u: &[Complex64; 4], i: usize, n: usize) {
+    let dim = 1usize << n;
+    let mask = 1usize << i;
+    let block = mask << 1; // 2 * mask
+
+    if block == dim {
+        // 単一 block (i == n-1): 上下半分に分けて pair 並列.
+        let (lo_half, hi_half) = psi.split_at_mut(mask);
+        lo_half
+            .par_iter_mut()
+            .zip(hi_half.par_iter_mut())
+            .with_min_len(RAYON_CHUNK_MIN)
+            .for_each(|(a_ref, b_ref)| {
+                let a = *a_ref;
+                let b = *b_ref;
+                *a_ref = u[0] * a + u[1] * b;
+                *b_ref = u[2] * a + u[3] * b;
+            });
+    } else {
+        // 複数 block: chunk_size を block の整数倍で RAYON_CHUNK_MIN 以上に揃える.
+        // block も chunk_size も power of 2 で dim も power of 2 なので chunk
+        // は全て等サイズ (last chunk が短くなることはない).
+        let chunk_size = if block >= RAYON_CHUNK_MIN {
+            block
+        } else {
+            // block=2 (i=0) なら chunk_size=64, block=4 (i=1) なら 64, ...
+            // block * ceil(RAYON_CHUNK_MIN / block) = block の整数倍で最初の
+            // ≥ RAYON_CHUNK_MIN を取る.
+            RAYON_CHUNK_MIN.next_multiple_of(block)
+        };
+        let chunk_size = chunk_size.min(dim);
+        psi.par_chunks_mut(chunk_size).for_each(|chunk| {
+            let mut local_base = 0usize;
+            while local_base < chunk.len() {
+                let sub = &mut chunk[local_base..local_base + block];
+                let (lo_half, hi_half) = sub.split_at_mut(mask);
+                for (a_ref, b_ref) in lo_half.iter_mut().zip(hi_half.iter_mut()) {
+                    let a = *a_ref;
+                    let b = *b_ref;
+                    *a_ref = u[0] * a + u[1] * b;
+                    *b_ref = u[2] * a + u[3] * b;
+                }
+                local_base += block;
+            }
+        });
     }
 }
 
@@ -698,6 +900,211 @@ mod tests {
                 psi[k],
                 expected[k]
             );
+        }
+    }
+
+    // ===== rayon 並列化 (Phase 6 C1, issue #62) のテスト =====
+
+    /// rayon あり/なしで [`apply_h_kryanneal`] が要素ごとに bit-identical な
+    /// 結果を返すこと. 各 `y[k]` は単一スレッドで diag pass → i=0,1,...,n-1
+    /// の順に同じ演算順序を踏むため bit-for-bit 一致を期待できる.
+    ///
+    /// `n=10` (dim=1024) は rayon path の chunk 数 ≥ 2 を確実に超える
+    /// (chunk_size ≤ `RAYON_CHUNK_MAX`, dim/chunk_size ≥ 1024/16384 < 1 でも
+    /// `max(dim/(nth·4), RAYON_CHUNK_MIN)` で複数 chunk になる典型サイズ).
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn apply_h_kryanneal_rayon_matches_serial() {
+        for n in [3, 6, 10, 12] {
+            let dim = 1usize << n;
+            for seed in [1u64, 17, 0xdead_beef] {
+                let mut rng = Xor64::new(seed.wrapping_add(n as u64));
+                let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+                let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+                let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+                let a_t = rng.signed();
+                let b_t = rng.signed();
+
+                let mut y_serial = vec![Complex64::new(0.0, 0.0); dim];
+                apply_h_kryanneal_serial(&v, &mut y_serial, &h_x, &h_p_diag, a_t, b_t, n);
+
+                let mut y_par = vec![Complex64::new(0.0, 0.0); dim];
+                apply_h_kryanneal_rayon(&v, &mut y_par, &h_x, &h_p_diag, a_t, b_t, n);
+
+                for k in 0..dim {
+                    assert_eq!(
+                        y_par[k].re.to_bits(),
+                        y_serial[k].re.to_bits(),
+                        "n={}, seed={}, k={}: rayon re-bits differ from serial \
+                         (rayon={:?}, serial={:?})",
+                        n,
+                        seed,
+                        k,
+                        y_par[k],
+                        y_serial[k],
+                    );
+                    assert_eq!(
+                        y_par[k].im.to_bits(),
+                        y_serial[k].im.to_bits(),
+                        "n={}, seed={}, k={}: rayon im-bits differ from serial \
+                         (rayon={:?}, serial={:?})",
+                        n,
+                        seed,
+                        k,
+                        y_par[k],
+                        y_serial[k],
+                    );
+                }
+            }
+        }
+    }
+
+    /// rayon あり/なしで [`apply_single_mode_axis_i`] が bit-identical.
+    /// `i = n-1` (block == dim, split_at_mut 経路) と `i < n-1`
+    /// (par_chunks_mut 経路) の両方を踏むよう n と i を組み合わせる.
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn apply_single_mode_axis_i_rayon_matches_serial() {
+        for n in [3usize, 6, 10, 12] {
+            let dim = 1usize << n;
+            for seed in [3u64, 31, 0xcafe_babe] {
+                let mut rng = Xor64::new(seed.wrapping_add(n as u64));
+                let psi0: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+                for i in 0..n {
+                    let u = random_unitary_2x2(&mut rng);
+
+                    let mut psi_serial = psi0.clone();
+                    apply_single_mode_axis_i_serial(&mut psi_serial, &u, i, n);
+
+                    let mut psi_par = psi0.clone();
+                    apply_single_mode_axis_i_rayon(&mut psi_par, &u, i, n);
+
+                    for k in 0..dim {
+                        assert_eq!(
+                            psi_par[k].re.to_bits(),
+                            psi_serial[k].re.to_bits(),
+                            "n={}, i={}, seed={}, k={}: rayon re-bits differ from serial",
+                            n,
+                            i,
+                            seed,
+                            k,
+                        );
+                        assert_eq!(
+                            psi_par[k].im.to_bits(),
+                            psi_serial[k].im.to_bits(),
+                            "n={}, i={}, seed={}, k={}: rayon im-bits differ from serial",
+                            n,
+                            i,
+                            seed,
+                            k,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 8 thread の rayon pool で `apply_h_kryanneal` を 100 回反復実行し,
+    /// 結果が **毎回 bit-identical** であることを確認する (race condition
+    /// 検出). 各 `y[k]` への書き込みは disjoint な chunk に閉じるため
+    /// thread スケジュールに依らない決定性を保つ. issue #62 acceptance.
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn apply_h_kryanneal_rayon_determinism_8thread_100iter() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .expect("failed to build rayon pool with 8 threads");
+
+        let n = 12;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xfeed_face_dead_beef);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+        let a_t = rng.signed();
+        let b_t = rng.signed();
+
+        // 1 回目を reference として保存し, 残り 99 回が全て bit-identical かを検証.
+        let reference: Vec<Complex64> = pool.install(|| {
+            let mut y = vec![Complex64::new(0.0, 0.0); dim];
+            apply_h_kryanneal(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+            y
+        });
+        for iter in 1..100 {
+            let actual: Vec<Complex64> = pool.install(|| {
+                let mut y = vec![Complex64::new(0.0, 0.0); dim];
+                apply_h_kryanneal(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+                y
+            });
+            for k in 0..dim {
+                assert_eq!(
+                    actual[k].re.to_bits(),
+                    reference[k].re.to_bits(),
+                    "iter={}, k={}: non-deterministic re bits",
+                    iter,
+                    k,
+                );
+                assert_eq!(
+                    actual[k].im.to_bits(),
+                    reference[k].im.to_bits(),
+                    "iter={}, k={}: non-deterministic im bits",
+                    iter,
+                    k,
+                );
+            }
+        }
+    }
+
+    /// 同 fuzz: `apply_single_mode_axis_i` を 8 thread pool × 100 反復で
+    /// bit-identical 検証. `i = n-1` (split_at_mut path) を含む複数の i を踏む.
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn apply_single_mode_axis_i_rayon_determinism_8thread_100iter() {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(8)
+            .build()
+            .expect("failed to build rayon pool with 8 threads");
+
+        let n = 12;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xcafe_babe_face_feed);
+        let psi0: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+
+        for i in [0usize, 1, 2, 5, 10, 11] {
+            // i=11 = n-1 で split_at_mut path, それ以外は par_chunks_mut path.
+            let u = random_unitary_2x2(&mut rng);
+
+            let reference: Vec<Complex64> = pool.install(|| {
+                let mut psi = psi0.clone();
+                apply_single_mode_axis_i(&mut psi, &u, i, n);
+                psi
+            });
+            for iter in 1..100 {
+                let actual: Vec<Complex64> = pool.install(|| {
+                    let mut psi = psi0.clone();
+                    apply_single_mode_axis_i(&mut psi, &u, i, n);
+                    psi
+                });
+                for k in 0..dim {
+                    assert_eq!(
+                        actual[k].re.to_bits(),
+                        reference[k].re.to_bits(),
+                        "i={}, iter={}, k={}: non-deterministic re bits",
+                        i,
+                        iter,
+                        k,
+                    );
+                    assert_eq!(
+                        actual[k].im.to_bits(),
+                        reference[k].im.to_bits(),
+                        "i={}, iter={}, k={}: non-deterministic im bits",
+                        i,
+                        iter,
+                        k,
+                    );
+                }
+            }
         }
     }
 }

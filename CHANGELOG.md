@@ -11,7 +11,42 @@
   (`0.N.0` → `0.N+1.0`) で破壊的変更を吸収する (`docs/conventions.md`
   §2 参照).
 
-## Unreleased — Phase 4 follow-up (0.4.x → 0.5.0 で版数化予定)
+## Unreleased — Phase 6 in progress (0.5.x → 0.6.0 で版数化予定)
+
+### Added
+
+- **issue #62 / PR (TBD)**: `src/matvec.rs` の bit-flip pass primitive を
+  rayon `par_chunks_mut` 経由で L2 並列化 (Phase 6 C1).
+  - `apply_h_kryanneal`: `y` を `(dim / (nth·4))` を目安に chunk 分割し,
+    各 chunk closure 内で diag pass + 全 i bit-flip pass を **fuse**
+    (cache-blocked 形). `y_chunk` を L1 cache resident に保ち, 後段 SIMD
+    (C2) / cache block-fusion (C3) の足場とする.
+  - `apply_single_mode_axis_i`: `block = 2·mask` 単位で `par_chunks_mut`
+    並列化. 退化ケース `i = n-1` (block == dim) では `psi.split_at_mut(mask)`
+    + `par_iter_mut().zip(par_iter_mut())` のペア並列にフォールバック.
+  - Cargo: `rayon = "1"` optional dep + `[features] rayon` (**default ON**,
+    BLAS と同じ on/off pattern). `--no-default-features` でビルドすると
+    scalar 単スレッド経路に戻り従来挙動を維持する.
+  - thread 数制御: 環境変数 `RAYON_NUM_THREADS` (rayon の global pool は
+    プロセス起動時に決まる). 既存 `kryanneal.set_blas_threads(n)` と
+    併用するときは BLAS pool を 1 thread に落とすことを推奨
+    (`CLAUDE.md` 「Thread pool 運用」節).
+  - `benchmarks/bench_parallel_scaling.py` を新規追加. subprocess で
+    `RAYON_NUM_THREADS` を変えながら N × thread sweep し,
+    `(median wall_sec, speedup vs threads=1, memory-bandwidth knee)` を
+    `benchmarks/results/<ts>/bench_parallel_scaling.{csv,md}` に出力.
+  - 数値: rayon あり/なし両ビルドで `y` / `psi` が **bit-identical**
+    (`apply_*_rayon_matches_serial` テストで `to_bits()` 一致を検証).
+    8 thread × 100 反復の race-detection fuzz test も追加.
+
+### Unreleased internal note
+
+CHANGELOG: Phase 5 finalize 時 (commit `49dd673`) に旧 `Unreleased — Phase 4
+follow-up` セクションを `## 0.5.0` に繰り上げ忘れていたため, Phase 6 C1
+の docs 更新と合わせて遡及的に促進した. 内容変更は無し (header の rename
+のみ).
+
+## 0.5.0 - 2026-05-16
 
 ### Breaking
 
