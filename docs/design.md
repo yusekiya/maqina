@@ -757,6 +757,17 @@ fn apply_h(
   単スレッドビルドは `--no-default-features` でフォールバック。**SIMD
   (Phase 6 C2)** / **cache block-fusion (Phase 6 C3)** は同 closure 内
   inner ループに後段で重ねる予定 (§12 Phase 6)。
+- **dim 閾値による rayon dispatch (issue #68, follow-up)**: `apply_h_kryanneal`
+  と `apply_single_mode_axis_i` の **public 関数側で `dim < MIN_RAYON_DIM`
+  (= 1 << 17 = 128K 要素 = 2 MB Complex64) を判定し scalar 単スレッド経路
+  (`*_serial`) にフォールバック** する。N ≤ 16 (dim ≤ 64K) では rayon
+  barrier overhead が単スレッド計算時間を超えて regression (Phase 4-5 と
+  同じ Linux サーバー本番 bench で N=16 / 2 threads = 0.57× 観測, issue #62
+  本番 sweep)。private `*_rayon` 関数は dispatch を含まず常に rayon 実行
+  するため, 既存 rayon-path テスト (`apply_*_rayon_matches_serial`,
+  `apply_*_rayon_determinism_8thread_100iter`) は `*_rayon` を直接呼んで
+  rayon path の正当性を検証し続ける。`MIN_RAYON_DIM` の値は const なので
+  再評価には release rebuild が必要。
 
 #### 5.1.2 `apply_single_mode_axis_i` (Phase 2)
 

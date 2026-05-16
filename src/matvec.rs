@@ -63,6 +63,28 @@ const RAYON_CHUNK_MAX: usize = 1 << 14;
 #[cfg(feature = "rayon")]
 const RAYON_CHUNK_MIN: usize = 1 << 6;
 
+/// rayon dispatch を起動する **最小 dim 閾値**. これ未満では scalar 単スレッド
+/// 経路 (`*_serial`) にフォールバックする (issue #68).
+///
+/// # 根拠 (issue #62 本番 bench, cpu_count=64 Linux サーバー, BLAS thread=1)
+///
+/// `apply_h_kryanneal` の speedup vs threads=1:
+///
+/// | N | dim | 2 threads | 4 threads | 評価 |
+/// |---|---|---|---|---|
+/// | 16 | 2^16 = 64K  | **0.57×** (regression) | 1.58× | rayon overhead が単スレッド計算時間を超える |
+/// | 18 | 2^18 = 256K | 1.70× | 2.09× | 並列化が利得を出し始める |
+/// | 20 | 2^20 = 1M   | 1.84× | 3.18× | 大きく positive |
+///
+/// 転換点が N=16-18 にあるので, 安全側の保守的閾値として `1 << 17` (128K
+/// 要素 = 2 MB Complex64) を採用. dim < 128K (= N ≤ 16) は rayon を起動
+/// しない. N=17 (dim=131072) で rayon dispatch に入る (`>=` 判定).
+///
+/// 値の再評価は issue #68 follow-up bench で行う想定. const なので
+/// release rebuild が必要な点に注意.
+#[cfg(feature = "rayon")]
+const MIN_RAYON_DIM: usize = 1 << 17;
+
 /// `y = a_t · H_driver · v + b_t · diag(H_p_diag) · v` を計算する.
 ///
 /// `H_driver = -Σ_i h_x_i X_i` (サイト依存横磁場の inhomogeneous 拡張).
@@ -83,13 +105,17 @@ const RAYON_CHUNK_MIN: usize = 1 << 6;
 ///    accumulate.
 ///
 /// # 実装
-/// `feature = "rayon"` (default ON) 時は [`apply_h_kryanneal_rayon`] が呼ばれ
-/// `y` を `par_chunks_mut` で分割し chunk closure 内で diag + 全 i bit-flip
-/// pass を完走する. 各 `y[k]` への書き込みは単一スレッドからしか発生せず,
-/// `v` は read-only のため race-free. 演算順序は chunk 内で serial と同じ
-/// (diag → i=0 → i=1 → ...) なので **rayon あり/なし両ビルドで bit-identical**
-/// に y[k] を生成する (詳細は `apply_h_kryanneal_rayon_matches_serial_*`
-/// テスト). `--no-default-features` 時は [`apply_h_kryanneal_serial`] にフォール
+/// `feature = "rayon"` (default ON) 時は **dim 閾値 dispatch**: `dim >=
+/// MIN_RAYON_DIM` (= 1 << 17 = 128K 要素) のときだけ [`apply_h_kryanneal_rayon`]
+/// が呼ばれ, それ未満では [`apply_h_kryanneal_serial`] にフォールバックする
+/// (issue #68: 小 dim では rayon barrier overhead が単スレッド計算時間を超え
+/// て regression する). `apply_h_kryanneal_rayon` 内では `y` を `par_chunks_mut`
+/// で分割し chunk closure 内で diag + 全 i bit-flip pass を完走する. 各 `y[k]`
+/// への書き込みは単一スレッドからしか発生せず, `v` は read-only のため
+/// race-free. 演算順序は chunk 内で serial と同じ (diag → i=0 → i=1 → ...)
+/// なので **rayon あり/なし両ビルドで bit-identical** に y[k] を生成する
+/// (詳細は `apply_h_kryanneal_rayon_matches_serial_*` テスト).
+/// `--no-default-features` 時は常に [`apply_h_kryanneal_serial`] にフォール
 /// バック.
 ///
 /// # Panics
@@ -114,7 +140,11 @@ pub(crate) fn apply_h_kryanneal(
 
     #[cfg(feature = "rayon")]
     {
-        apply_h_kryanneal_rayon(v, y, h_x, h_p_diag, a_t, b_t, n);
+        if dim < MIN_RAYON_DIM {
+            apply_h_kryanneal_serial(v, y, h_x, h_p_diag, a_t, b_t, n);
+        } else {
+            apply_h_kryanneal_rayon(v, y, h_x, h_p_diag, a_t, b_t, n);
+        }
     }
     #[cfg(not(feature = "rayon"))]
     {
@@ -230,12 +260,15 @@ fn apply_h_kryanneal_rayon(
 /// `if k & mask != 0 { continue; }` の分岐スキップを完全に避けられ,
 /// 内側ループは予測可能な連続アクセス + `mask` stride アクセスに揃う.
 ///
-/// `feature = "rayon"` (default ON) では [`apply_single_mode_axis_i_rayon`]
-/// が呼ばれ block 単位 (`2·mask`) で `par_chunks_mut` 並列化される. 退化
-/// ケース (i = n-1, block = dim, chunk が 1 個になる) は psi を上下半分に
-/// `split_at_mut` した上で `par_iter_mut().zip(par_iter_mut())` のペア並列に
-/// 切り替える. 各ペア `(lo, hi)` は単一スレッドが処理し write は disjoint
-/// なので race-free + rayon あり/なし両ビルドで bit-identical.
+/// `feature = "rayon"` (default ON) では **dim 閾値 dispatch**:
+/// `dim >= MIN_RAYON_DIM` のときだけ [`apply_single_mode_axis_i_rayon`] が
+/// 呼ばれ, それ未満では [`apply_single_mode_axis_i_serial`] にフォールバック
+/// (issue #68). rayon path では block 単位 (`2·mask`) で `par_chunks_mut`
+/// 並列化される. 退化ケース (i = n-1, block = dim, chunk が 1 個になる) は
+/// psi を上下半分に `split_at_mut` した上で
+/// `par_iter_mut().zip(par_iter_mut())` のペア並列に切り替える. 各ペア
+/// `(lo, hi)` は単一スレッドが処理し write は disjoint なので race-free +
+/// rayon あり/なし両ビルドで bit-identical.
 ///
 /// # 入出力
 /// - `psi` (length `2^n`): in-place で更新される状態ベクトル.
@@ -259,7 +292,11 @@ pub(crate) fn apply_single_mode_axis_i(
 
     #[cfg(feature = "rayon")]
     {
-        apply_single_mode_axis_i_rayon(psi, u, i, n);
+        if dim < MIN_RAYON_DIM {
+            apply_single_mode_axis_i_serial(psi, u, i, n);
+        } else {
+            apply_single_mode_axis_i_rayon(psi, u, i, n);
+        }
     }
     #[cfg(not(feature = "rayon"))]
     {
@@ -1026,15 +1063,18 @@ mod tests {
         let b_t = rng.signed();
 
         // 1 回目を reference として保存し, 残り 99 回が全て bit-identical かを検証.
+        // 注: public `apply_h_kryanneal` は dim < MIN_RAYON_DIM = 1<<17 で scalar
+        // path に dispatch されるため (issue #68), rayon path 自体の決定性を
+        // テストするには `apply_h_kryanneal_rayon` を直接呼ぶ必要がある.
         let reference: Vec<Complex64> = pool.install(|| {
             let mut y = vec![Complex64::new(0.0, 0.0); dim];
-            apply_h_kryanneal(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+            apply_h_kryanneal_rayon(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
             y
         });
         for iter in 1..100 {
             let actual: Vec<Complex64> = pool.install(|| {
                 let mut y = vec![Complex64::new(0.0, 0.0); dim];
-                apply_h_kryanneal(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+                apply_h_kryanneal_rayon(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
                 y
             });
             for k in 0..dim {
@@ -1073,17 +1113,20 @@ mod tests {
 
         for i in [0usize, 1, 2, 5, 10, 11] {
             // i=11 = n-1 で split_at_mut path, それ以外は par_chunks_mut path.
+            // 注: public `apply_single_mode_axis_i` は dim < MIN_RAYON_DIM で
+            // scalar path に dispatch されるため (issue #68), rayon path 自体の
+            // 決定性をテストするには `apply_single_mode_axis_i_rayon` を直接呼ぶ.
             let u = random_unitary_2x2(&mut rng);
 
             let reference: Vec<Complex64> = pool.install(|| {
                 let mut psi = psi0.clone();
-                apply_single_mode_axis_i(&mut psi, &u, i, n);
+                apply_single_mode_axis_i_rayon(&mut psi, &u, i, n);
                 psi
             });
             for iter in 1..100 {
                 let actual: Vec<Complex64> = pool.install(|| {
                     let mut psi = psi0.clone();
-                    apply_single_mode_axis_i(&mut psi, &u, i, n);
+                    apply_single_mode_axis_i_rayon(&mut psi, &u, i, n);
                     psi
                 });
                 for k in 0..dim {
