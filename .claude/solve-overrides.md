@@ -63,6 +63,21 @@
 - インフラ・CI ワークフローの破壊的変更 (Phase 1 では `.github/workflows/` 自体が未整備)
 - リリース手順・wheel 公開先・依存バージョン制約の変更
 
+## Bench を伴う issue の運用 (pre-merge bench cycle)
+
+性能 acceptance を持つ issue (例: Phase 6 C2 #63, C3 #64, C4 #65, C5 #66, C2.5 #71 など) は **PR branch を Linux サーバーで checkout して bench を取り, acceptance pass を確認してから merge する pre-merge 運用** を取る (#63 で確定した更新版; 2026-05-16):
+
+1. PR を push したら **merge を急がず, ユーザーに「Linux サーバーで `gh pr checkout <PR#>` で取得して bench をかけてください」と依頼する**
+2. acceptance pass しなければ: **同一 PR branch に追加 commit を push して bench を反復**。 新規 PR は立てない (これにより 1 issue = 1 PR 体制を維持)
+3. acceptance pass 後, **bench 結果を `gh pr comment <PR#> --body-file <result.md>` で PR コメントに添付してから merge**
+4. merge 後の手動オペは無し (`.github/workflows/` 未整備のため CI トリガもない)
+
+旧運用「bench は PR 本体に含めず merge 後にコメント添付」(issue #47 で当初確定) は #63 で **4 PR / 2 weeks の試行錯誤が分散発生** する問題を起こしたため差し替え。 1 issue = 1 PR で完結する pre-merge 運用に統一する。
+
+Claude (本 skill 経由) は **bench を必要とする issue の PR を push した時点で「Linux で bench をかけてください」と明示的にユーザーに promote する** こと。 ユーザーの merge 操作を先回りしない。
+
+非 perf な issue (公開 API 追加・bug fix・ドキュメント整備など bench acceptance を持たない issue) では本節は適用外で, 通常通り PR push → 即 merge で OK。
+
 ## Post-apply actions
 
 現時点で PR マージ後の手動オペは無し (`.github/workflows/` 未整備のため CI トリガもない)。Phase 1 で CI を導入し次第、必要に応じて本節を更新する。
