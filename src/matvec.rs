@@ -300,7 +300,9 @@ mod simd_kernels {
 /// 1. 対角部分: `y[k] = b_t · H_p_diag[k] · v[k]` を全 `k` に上書き.
 /// 2. bit-flip 部分: 各サイト `i` について `coeff = -a_t · h_x[i]` と
 ///    `mask = 1 << i` を用い, `y[k] += coeff · v[k ^ mask]` を全 `k` で
-///    accumulate.
+///    accumulate. `coeff == 0` (`a_t == 0` または `h_x[i] == 0`) の場合は
+///    その i pass を完全スキップする (数値的に no-op). sparse h_x で
+///    支配的に効く最適化.
 ///
 /// # 実装
 /// `feature = "rayon"` (default ON) 時は **dim 閾値 dispatch**: `dim >=
@@ -390,6 +392,13 @@ fn apply_h_kryanneal_serial(
     // bit-flip 部分: y[k] += -a_t · h_x[i] · v[k ^ mask] を i について accumulate.
     for (i, &h_x_i) in h_x.iter().enumerate() {
         let coeff = -a_t * h_x_i;
+        // coeff == 0 (a_t == 0 もしくは h_x[i] == 0) のときは数値的に no-op
+        // (y[k] += 0 * v[k ^ mask] = y[k]) なので i pass 全体をスキップする.
+        // sparse h_x (`bench_simd_scaling.py` の i012-focus 等) で支配的に効く
+        // 最適化. `coeff == 0.0` は IEEE 754 で +0 / -0 両方に対し true.
+        if coeff == 0.0 {
+            continue;
+        }
         let mask = 1usize << i;
 
         // SIMD dispatch for i ∈ {0, 1, 2}.
@@ -479,6 +488,11 @@ fn apply_h_kryanneal_rayon(
             // bit-flip pass: 全 i を同一 chunk 内で完走 (y_chunk が L1 resident).
             for (i, &h_x_i) in h_x.iter().enumerate() {
                 let coeff = -a_t * h_x_i;
+                // coeff == 0 のときは数値的に no-op なのでスキップ. sparse h_x で
+                // 支配的に効く最適化 (serial path と同じ; 詳細はそちらコメント).
+                if coeff == 0.0 {
+                    continue;
+                }
                 let mask = 1usize << i;
 
                 // SIMD dispatch for i ∈ {0, 1, 2}: mask ≤ 4 < SIMD_BLOCK_MAX なので
@@ -936,6 +950,77 @@ mod tests {
         let y_expected = &h_dense * DVector::<Complex64>::from_vec(v.clone());
         let rel = relative_error(&y, &y_expected);
         assert!(rel < 1e-13, "rel = {}", rel);
+    }
+
+    #[test]
+    fn sparse_h_x_matches_dense_reference() {
+        // h_x にゼロ要素を混ぜたケース. apply_h_kryanneal の bit-flip pass は
+        // `coeff == 0` (= h_x[i] == 0) の i pass をスキップする最適化を持つが,
+        // それでも数値結果は dense H · v と rel < 1e-13 で一致するはず
+        // (スキップした i の dense H への寄与は元々 0 なので等価).
+        //
+        // n を 18 (issue #63 acceptance の N と同じ) より小さい n=7 にして
+        // テスト時間を抑える. dim=128 で SIMD path (i=0,1,2) と scalar path
+        // (i=3..6) の両方を踏み, さらに i=1,3,5 を 0 にすることで短絡 path も
+        // 同時に踏む. n を **奇数** にして h_x のゼロ pattern と非ゼロ pattern
+        // が混在するよう調整 (i=0,2,4,6 が non-zero, i=1,3,5 が zero).
+        let n = 7;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xc1c2_c3c4_c5c6_c7c8);
+        let mut h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        for i in [1, 3, 5] {
+            h_x[i] = 0.0;
+        }
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+        let a_t = rng.signed();
+        let b_t = rng.signed();
+
+        // 参照: dense H · v (build_dense_h は h_x[i]=0 で coeff=0 のため i pass
+        // を寄与なしで足し込む形, apply_h_kryanneal の短絡経路と等価).
+        let h_dense = build_dense_h(n, &h_x, &h_p_diag, a_t, b_t);
+        let v_vec = DVector::<Complex64>::from_vec(v.clone());
+        let y_expected = &h_dense * &v_vec;
+
+        let mut y = vec![Complex64::new(0.0, 0.0); dim];
+        apply_h_kryanneal(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+
+        let rel = relative_error(&y, &y_expected);
+        assert!(
+            rel < 1e-13,
+            "sparse h_x: rel={} >= 1e-13 (短絡が壊れている可能性)",
+            rel,
+        );
+    }
+
+    #[test]
+    fn a_t_zero_skips_all_bitflip_passes() {
+        // a_t = 0 で coeff = -a_t · h_x[i] = 0 (全 i). 全 bit-flip pass を
+        // 短絡で skip し, 結果は diag pass のみ (y[k] = b_t · H_p[k] · v[k]).
+        let n = 5;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xa7a7_a7a7_a7a7_a7a7);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+        let a_t = 0.0; // ← 短絡を発動させる
+        let b_t = rng.signed();
+
+        let mut y = vec![Complex64::new(0.0, 0.0); dim];
+        apply_h_kryanneal(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+
+        // 期待値: y[k] = b_t · H_p_diag[k] · v[k] (diag のみ).
+        for k in 0..dim {
+            let expected = Complex64::new(b_t * h_p_diag[k], 0.0) * v[k];
+            let diff = (y[k] - expected).norm();
+            assert!(
+                diff < 1e-15 * (expected.norm() + 1.0),
+                "k={}: a_t=0 short-circuit broken: actual={} vs diag={}",
+                k,
+                y[k],
+                expected,
+            );
+        }
     }
 
     #[test]
