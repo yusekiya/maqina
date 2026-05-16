@@ -69,9 +69,33 @@ before / after」原則). **bench は PR 本体に含めず, merge 後に issue 
   cfg が拾えるようになる).
 - BLAS thread は ``--blas-threads 1`` で 1 thread 固定にする
   (``bench_parallel_scaling.py`` と同じ acceptance 条件).
-- rayon thread は ``RAYON_NUM_THREADS`` 環境変数で固定する. SIMD per-thread
-  scaling を見るため measure 時は ``RAYON_NUM_THREADS=1`` を推奨
-  (parallel scaling は ``bench_parallel_scaling.py`` 担当).
+- rayon thread は ``RAYON_NUM_THREADS`` 環境変数で固定する. issue #63
+  acceptance「Phase 6 C1 baseline (rayon あり, SIMD なし) と比較」と
+  apples-to-apples にするには **``RAYON_NUM_THREADS=cpu_count``** (本番
+  Linux server で 64) を使う. ``RAYON_NUM_THREADS=1`` は per-thread SIMD
+  孤立観測用で N≥16 では memory-bandwidth bound のため SIMD 効果が見えない
+  ことが #63 bench で判明 (参考: issue #63 コメント).
+
+## 測定ノイズと推奨 repeat / runs
+
+issue #63 final bench (Linux x86_64, cpu_count=64, OpenBLAS) で **N≥18
+multi-thread cell の inter-run 変動が ~3-5× に達する** ケースが観測された
+(代表例: N=20 ``i012-focus`` で 3 runs の speedup が 0.58×, 0.95×, 2.71×).
+原因は per-call wall time が ms オーダで, 64 threads × 短時間 work が
+背景 process / NUMA / scheduler / thermal の影響を強く受けるため.
+
+このため SIMD ON/OFF 比較は次の運用を推奨:
+
+1. ``--repeat 50 --warmup 10`` で 1 measure 内の中央値を安定化させる.
+2. **同じ build profile で 3 回 back-to-back に measure を回し**, inter-run
+   variance を確認する. 1 run だけで判断しない. 単発で 1.5× 出ても
+   別 run で 0.5× になることがある (issue #63 で確認済).
+3. N=16 (serial path, dim < ``MIN_RAYON_DIM = 1<<17``) は inter-run 変動が
+   小さく (±0.05 程度), 安定した signal が得られる cell. N=18 / N=20
+   multi-thread cell は noise が乗る前提で 3 runs の median を取る.
+4. 必要なら ``taskset -c 0-31`` で physical core に pin して HT contention
+   を回避する (HT enabled 64 logical = 32 physical の典型 Xeon Gold 構成
+   の場合).
 """
 
 from __future__ import annotations

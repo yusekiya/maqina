@@ -1826,16 +1826,35 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   SIMD inner kernel (`simd_kernels::bitflip_i0` / `_i1` / `_i2`) は
   `apply_h_kryanneal_serial` と `apply_h_kryanneal_rayon` の両 path から
   共通で呼ばれ, rayon path では chunk_size を `SIMD_BLOCK_MAX = 8` Complex64
-  の倍数に丸めて block-aligned 前提を満たす。SIMD 経路と scalar 経路は各
+  の倍数に丸めて block-aligned 前提を満たす。SIMD load/store は
+  `std::ptr::read_unaligned::<f64x4>` / `write_unaligned::<f64x4>` で AVX
+  `vmovupd` 1 命令に折り畳み, compute は `f64x4::mul_add` で `vfmadd231pd`
+  (FMA-enabled CPU) に折り畳む (PR #74)。SIMD 経路と scalar 経路は各
   `y[k]` への単一 `coeff * v[k^mask] + y[k]` を独立 lane で並列実行するため
   **両ビルドで bit-identical または rel < 1e-13** な数値結果を返す
   (`apply_h_kryanneal_simd_matches_scalar_fuzz_100iter` テスト, src/matvec.rs)。
+  併せて `coeff == 0` (= `h_x[i] == 0` または `a_t == 0`) で i pass を完全
+  スキップする短絡 (PR #73) も入っており, sparse h_x で SIMD 効果が最も
+  ROI 高く見える `i012-focus` mode bench が成立する。
   `apply_single_mode_axis_i` の SIMD 特化 (2×2 complex matmul の broadcast +
-  swizzle pattern) は follow-up issue として deferred。
+  swizzle pattern) は follow-up issue として deferred (#71)。
   実 SIMD 速度向上は build 時の `target-cpu` 設定に依存し, default `x86_64`
   target では `wide` が scalar fallback を選び正確性のみ提供する
   (`benchmarks/bench_simd_scaling.py` の本番 sweep は
   `RUSTFLAGS="-C target-cpu=native"` を前提)。
+  **観測 (Linux x86_64, cpu_count=64, OpenBLAS, AVX2 + FMA, DDR4 multi-channel,
+  `RAYON_NUM_THREADS=64`, BLAS thread=1, 3 runs × repeat=50 median)**:
+  per-pass SIMD speedup ≈ **1.75×** (理論 3-4× には届かないが scalar 比で
+  確実に高速化), `i012-focus` mode (3 SIMD pass + 1 diag pass) の total
+  speedup ≈ **1.28×** (N=18, 中央値 of 3 runs)。issue #63 の当初 acceptance
+  「N=18 i012-focus ≥ 1.5×」は **未達**。 主因は (1) DRAM bandwidth 上限への
+  per-pass の頭打ち, (2) SIMD 化していない diag pass による希釈 (4 pass 中
+  1 つが scalar), (3) 大 dim multi-thread の per-call ms オーダ計測が背景負荷
+  に強く依存し inter-run 変動 が ~5× に達することがある, の 3 つ。 acceptance
+  ギャップは Phase 6 C3 (cache block-fusion, #64) で memory traffic を削減
+  することで本来取りに行く性格のもの。
+  bench は PR 本体に含めず, 個別 issue (#63) コメントとして添付済み
+  (issue #47 で確定した運用)。
 - **cache block-fusion (C3, issue #64, 計画)**: 大 N (≥20) で高 i の bit-flip
   pass が DRAM 律速になるのを防ぐため、高 i 群を fuse して L2 cache に
   収まるブロック単位で低 i pass と一緒に走らせる古典テクニック (qsim の
