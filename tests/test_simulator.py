@@ -178,9 +178,7 @@ def test_advance_to_matches_run_fixed_dt(method: str, n_steps: int) -> None:
     sim.advance_to(t1, n_steps=n_steps)
     assert sim.t == pytest.approx(t1)
     # bit-identical を期待 (同じ driver を同じ schedule 評価点で呼んでいる).
-    rel = float(
-        np.linalg.norm(sim.psi - res.psi_final) / np.linalg.norm(res.psi_final)
-    )
+    rel = float(np.linalg.norm(sim.psi - res.psi_final) / np.linalg.norm(res.psi_final))
     assert rel < 1e-13, f"method={method} rel={rel:.3e}"
     # n_matvec も完全一致.
     assert sim.n_matvec == res.n_matvec
@@ -215,9 +213,7 @@ def test_advance_to_adaptive_rejects_n_steps() -> None:
     prob = _build_problem(n)
     sched = Schedule.linear(T=1.0)
     psi0 = uniform_superposition(n)
-    sim = AnnealingSimulator(
-        prob, sched, psi0, 0.0, method="cfm4_adaptive_richardson"
-    )
+    sim = AnnealingSimulator(prob, sched, psi0, 0.0, method="cfm4_adaptive_richardson")
     with pytest.raises(ValueError, match="n_steps must be None"):
         sim.advance_to(1.0, n_steps=10)
 
@@ -290,9 +286,7 @@ def test_adaptive_step_advances_by_exactly_dt() -> None:
     prob = _build_problem(n)
     sched = Schedule.linear(T=5.0)
     psi0 = uniform_superposition(n)
-    sim = AnnealingSimulator(
-        prob, sched, psi0, 0.0, method="cfm4_adaptive_richardson"
-    )
+    sim = AnnealingSimulator(prob, sched, psi0, 0.0, method="cfm4_adaptive_richardson")
     sim.step(0.3)
     assert sim.t == pytest.approx(0.3)
     assert sim.n_matvec > 0
@@ -341,13 +335,9 @@ def test_adaptive_advance_to_matches_run_psi() -> None:
     ann = QuantumAnnealer(prob, sched)
     res = ann.run(psi0, 0.0, 2.0, method="cfm4_adaptive_richardson", atol=1e-8)
 
-    sim = ann.create_simulator(
-        psi0, 0.0, method="cfm4_adaptive_richardson", atol=1e-8
-    )
+    sim = ann.create_simulator(psi0, 0.0, method="cfm4_adaptive_richardson", atol=1e-8)
     sim.advance_to(2.0)
-    rel = float(
-        np.linalg.norm(sim.psi - res.psi_final) / np.linalg.norm(res.psi_final)
-    )
+    rel = float(np.linalg.norm(sim.psi - res.psi_final) / np.linalg.norm(res.psi_final))
     # 同じ driver を同じ引数 (auto-resolved dt_init/dt_max 含め) で呼ぶので
     # bit-identical を期待.
     assert rel < 1e-13, f"adaptive sim vs run rel={rel:.3e}"
@@ -396,9 +386,7 @@ def test_init_validates_m_and_krylov_tol() -> None:
     with pytest.raises(ValueError, match="m must be a positive integer"):
         AnnealingSimulator(prob, sched, psi0, 0.0, method="m2", m=0)
     with pytest.raises(ValueError, match="krylov_tol must be"):
-        AnnealingSimulator(
-            prob, sched, psi0, 0.0, method="m2", krylov_tol=-1.0
-        )
+        AnnealingSimulator(prob, sched, psi0, 0.0, method="m2", krylov_tol=-1.0)
 
 
 @pytest.mark.parametrize("param_name", ["atol", "dt_init", "dt_max", "m_max"])
