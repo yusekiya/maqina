@@ -43,6 +43,7 @@ Usage
 import warnings
 
 from kryanneal.annealer import QuantumAnnealer
+from kryanneal.observable import Observable
 from kryanneal.problem import IsingProblem
 from kryanneal.result import QuantumResult, Trajectory
 from kryanneal.schedule import Schedule
@@ -51,6 +52,7 @@ from kryanneal.schedule import Schedule
 
 __all__ = [
     "IsingProblem",
+    "Observable",
     "QuantumAnnealer",
     "QuantumResult",
     "Schedule",

@@ -44,11 +44,12 @@ Usage
 """
 import warnings
 from kryanneal.annealer import QuantumAnnealer as QuantumAnnealer
+from kryanneal.observable import Observable as Observable
 from kryanneal.problem import IsingProblem as IsingProblem
 from kryanneal.result import QuantumResult as QuantumResult, Trajectory as Trajectory
 from kryanneal.schedule import Schedule as Schedule
 from typing import Any
-__all__ = ['IsingProblem', 'QuantumAnnealer', 'QuantumResult', 'Schedule', 'Trajectory', 'set_blas_threads', 'available_blas_threads']
+__all__ = ['IsingProblem', 'Observable', 'QuantumAnnealer', 'QuantumResult', 'Schedule', 'Trajectory', 'set_blas_threads', 'available_blas_threads']
 
 def set_blas_threads(n: int) -> None:
     """ロード済みの全 OpenBLAS pool のスレッド上限を ``n`` に統一する.
