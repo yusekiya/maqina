@@ -199,10 +199,10 @@ class AnnealingSimulator:
             raise ValueError(f"dt_init must be > 0 or None, got {dt_init!r}")
         if dt_max is not None and not (dt_max > 0.0):
             raise ValueError(f"dt_max must be > 0 or None, got {dt_max!r}")
-        if m_max is not None and (not isinstance(m_max, (int, np.integer)) or m_max < 1):
-            raise ValueError(
-                f"m_max must be a positive integer or None, got {m_max!r}"
-            )
+        if m_max is not None and (
+            not isinstance(m_max, (int, np.integer)) or m_max < 1
+        ):
+            raise ValueError(f"m_max must be a positive integer or None, got {m_max!r}")
 
         psi0_arr = _validate_psi0(problem, psi0)
 
@@ -292,9 +292,7 @@ class AnnealingSimulator:
             # adaptive: dt を proposal にして driver を [_t, _t+dt] で呼ぶ.
             # dt_max=dt で growth を禁止, 内部 reject は dt 縮めて再試行
             # (PI controller 動作).
-            self._run_adaptive(
-                t_next, dt_init_override=dt_f, dt_max_override=dt_f
-            )
+            self._run_adaptive(t_next, dt_init_override=dt_f, dt_max_override=dt_f)
 
     def advance_to(self, t_target: float, *, n_steps: int | None = None) -> None:
         """``t_target`` まで進める.
@@ -335,9 +333,7 @@ class AnnealingSimulator:
                     f"{self._method!r}; pass a positive integer."
                 )
             if not isinstance(n_steps, (int, np.integer)) or n_steps < 1:
-                raise ValueError(
-                    f"n_steps must be a positive integer, got {n_steps!r}"
-                )
+                raise ValueError(f"n_steps must be a positive integer, got {n_steps!r}")
             self._run_fixed_dt(t_target_f, n_steps=int(n_steps))
         else:
             if n_steps is not None:
