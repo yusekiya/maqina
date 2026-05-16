@@ -9,9 +9,11 @@
 に対して異なる初期状態 / 区間で繰り返し実行できるよう, ``psi0`` は
 コンストラクタではなく ``run`` 側で受け取る.
 
-``AnnealingSimulator`` は同じ問題に対する step-wise stateful API.
-Phase 1 では ``QuantumAnnealer`` のみ提供する (``AnnealingSimulator`` は
-Phase 5 で導入予定).
+``AnnealingSimulator`` (``kryanneal.simulator``) は同じ問題に対する
+step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Observable``
+で測定して続きを発展させる workflow 用. ``QuantumAnnealer.create_simulator``
+で生成するのが簡便 (現 instance の ``problem`` / ``schedule`` / ``m`` /
+``krylov_tol`` を引き継ぐ).
 
 仕様 (Phase 1 + Phase 2 + Phase 3 + Phase 4)
 --------------------------------------------
@@ -65,13 +67,25 @@ L2-normalize) を本クラスで集中させ, krylov 層は数値計算に専念
 使わないため両パラメータは無視される.
 """
 from __future__ import annotations as annotations
-from typing import Literal as Literal, cast as cast
+from typing import TYPE_CHECKING as TYPE_CHECKING, Literal as Literal, cast as cast
 import numpy as np
+from kryanneal._helpers import _AUTO_DT_INIT_BETA as _AUTO_DT_INIT_BETA
+from kryanneal._helpers import _AUTO_DT_INIT_C as _AUTO_DT_INIT_C
+from kryanneal._helpers import _AUTO_DT_INIT_FLOOR as _AUTO_DT_INIT_FLOOR
+from kryanneal._helpers import _KRYLOV_TOL_ATOL_RATIO as _KRYLOV_TOL_ATOL_RATIO
+from kryanneal._helpers import _KRYLOV_TOL_FIXED_DEFAULT as _KRYLOV_TOL_FIXED_DEFAULT
+from kryanneal._helpers import _LANCZOS_DT_NORM_COEFF as _LANCZOS_DT_NORM_COEFF
+from kryanneal._helpers import _PSI_NORM_TOL as _PSI_NORM_TOL
+from kryanneal._helpers import _gershgorin_norm_upper_bound as _gershgorin_norm_upper_bound
+from kryanneal._helpers import _resolve_dt_init_auto as _resolve_dt_init_auto
+from kryanneal._helpers import _resolve_dt_max_auto as _resolve_dt_max_auto
+from kryanneal._helpers import _validate_psi0 as _validate_psi0
 from kryanneal.krylov import evolve_schedule_adaptive_richardson as evolve_schedule_adaptive_richardson, evolve_schedule_cfm4 as evolve_schedule_cfm4, evolve_schedule_m2 as evolve_schedule_m2, evolve_schedule_trotter as evolve_schedule_trotter, evolve_schedule_trotter_suzuki4 as evolve_schedule_trotter_suzuki4
 from kryanneal.observable import Observable as Observable
 from kryanneal.problem import IsingProblem as IsingProblem
 from kryanneal.result import QuantumResult as QuantumResult
 from kryanneal.schedule import Schedule as Schedule
+from kryanneal.simulator import AnnealingSimulator as AnnealingSimulator
 from typing import Any
 __all__ = ['QuantumAnnealer']
 
@@ -257,5 +271,39 @@ class QuantumAnnealer:
         RuntimeError
             adaptive 経路で ``max_rejects`` 連続超過したとき (driver から
             伝播).
+        """
+        ...
+
+    def create_simulator(self, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='cfm4', atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> AnnealingSimulator:
+        """``AnnealingSimulator`` (step-wise stateful API) を生成する.
+
+        ``QuantumAnnealer`` と同じ ``problem`` / ``schedule`` / ``m`` /
+        ``krylov_tol`` を引き継いだ Simulator を返す. ``psi0`` / ``t0`` /
+        ``method`` 以降は Simulator コンストラクタに直接渡される.
+
+        Parameters
+        ----------
+        psi0
+            shape ``(2**n,)`` complex128 の初期状態. L2-normalize 済み.
+        t0
+            初期時刻.
+        method
+            プロパゲータ. ``run`` と同じ集合をサポート (``m2`` /
+            ``trotter`` / ``trotter_suzuki4`` / ``cfm4`` /
+            ``cfm4_adaptive_richardson``).
+        atol, dt_init, dt_max, m_max
+            adaptive method (``cfm4_adaptive_richardson``) 専用パラメータ.
+            固定 dt method で指定すると ``ValueError``. 詳細は
+            ``AnnealingSimulator.__init__`` の docstring.
+
+        Returns
+        -------
+        AnnealingSimulator
+            step / advance_to / measure で逐次操作可能なシミュレータ.
+
+        Notes
+        -----
+        ``m`` / ``krylov_tol`` を Simulator 側で上書きしたい場合は
+        ``AnnealingSimulator`` を直接構築する.
         """
         ...

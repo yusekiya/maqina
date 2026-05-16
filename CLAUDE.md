@@ -70,7 +70,8 @@ kryanneal/
 │   ├── py.typed                # PEP 561 マーカ
 │   ├── problem.py              # IsingProblem
 │   ├── schedule.py             # Schedule
-│   ├── annealer.py             # QuantumAnnealer / AnnealingSimulator
+│   ├── annealer.py             # QuantumAnnealer (one-shot run() ファサード)
+│   ├── simulator.py            # AnnealingSimulator (step-wise stateful API)
 │   ├── krylov.py               # adaptive ドライバ + Python リファレンス
 │   ├── eigenstates.py          # 瞬時固有状態への投影
 │   ├── builders.py             # PauliTerm → diag, J/h → diag
