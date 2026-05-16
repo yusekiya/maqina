@@ -3,12 +3,100 @@
 
 """瞬時固有状態への投影ユーティリティ.
 
-``H(t_k)`` の低次固有状態を Lanczos で抽出し, 時間発展中の波動関数を
-それらに射影してプロット用の確率系列を返す. 小規模 ``n`` 向けには dense
-``eigh`` ベースの参照実装も同梱して数値一致のテストに使う.
+``H(t)`` の下位 ``k`` 個の固有値・固有ベクトルを Lanczos / dense ``eigh``
+ベースで取り出す API を提供する. 時間発展中の波動関数 ``ψ(t)`` を
+``eigvecs`` に射影すれば瞬時固有空間内の amplitude が得られる:
 
-Phase 1 で実装予定 (現状は API スケルトン).
+    amps = eigvecs.conj().T @ psi_t            # shape (k,)
+    probs = np.abs(amps) ** 2
+
+実装方針:
+
+* ``method="lanczos"`` (default): Python ループから ``_rust.apply_h_kryanneal_py``
+  を呼んで Krylov 部分空間 (次元 ``m``, default 64) を構築し,
+  ``_rust.tridiag_eigh_py`` で三重対角の完全固有分解を取って下位 ``k`` 個の
+  Ritz vector を再構築する. 新規 Rust 関数は追加せず, 既存 primitive を
+  Python ループで組み合わせる方針 (固有値計算は時間発展に比べて頻度が
+  低く Python 越境のオーバヘッドは無視できる).
+* ``method="exact"``: ``n <= 12`` 制限で dense ``H(t)`` を組み立て
+  ``numpy.linalg.eigh`` を呼ぶ参照経路.
 """
 from __future__ import annotations as annotations
+import importlib
+from typing import Literal as Literal
+import numpy as np
+from kryanneal.problem import IsingProblem as IsingProblem
+from kryanneal.schedule import Schedule as Schedule
 from typing import Any
-__all__: list[str] = []
+__all__ = ['instantaneous_eigenstates']
+
+def instantaneous_eigenstates(problem: IsingProblem, schedule: Schedule, t: float, k: int=8, method: Literal['lanczos', 'exact']='lanczos', *, m: int=64, seed: int | None=None, krylov_tol: float=1e-12) -> tuple[np.ndarray, np.ndarray]:
+    """瞬時 ``H(t)`` の下位 ``k`` 固有値・固有ベクトルを返す.
+
+    Hamiltonian は ``H(t) = A(s(t)) · H_driver + B(s(t)) · H_problem`` で,
+    ``A``, ``B`` は ``schedule`` から評価され, ``H_driver``, ``H_problem``
+    は ``problem`` から取り出される (``CLAUDE.md`` 「物理的取り決め」節).
+
+    Parameters
+    ----------
+    problem
+        TFIM 問題定義 (``n``, ``H_p_diag``, ``h_x``).
+    schedule
+        アニーリングスケジュール (``A(s(t))`` と ``B(s(t))`` を評価).
+    t
+        評価時刻 (real). ``schedule`` の domain ``[0, T]`` 内が想定だが
+        外挿は ``schedule`` 側の挙動に従う.
+    k
+        取得する下位固有状態数. ``k >= 1`` かつ ``method="lanczos"`` では
+        ``k <= m``, ``method="exact"`` では ``k <= 2**n``.
+    method
+        ``"lanczos"`` (default) は Krylov 部分空間で下位固有値を抽出.
+        ``"exact"`` は ``n <= 12`` 制約で dense ``H(t)`` を ``numpy.linalg.eigh``
+        にかける参照経路.
+    m
+        Lanczos 部分空間次元 (default 64). ``method="exact"`` では無視.
+        eigenstates 用は時間発展の m (≈24) より大きめに取る (Ritz 値の
+        収束を担保するため). ``m >= 1``.
+    seed
+        Lanczos の始ベクトル生成に使う ``np.random.default_rng`` の seed.
+        ``None`` は entropy 由来の seed (再現性なし). ``method="exact"``
+        では無視.
+    krylov_tol
+        ``β_k < krylov_tol`` で Krylov 部分空間構築を早期打切. default
+        ``1e-12`` (``docs/design.md`` §5.2 の Lanczos と同じ慣習).
+
+    Returns
+    -------
+    eigvals : np.ndarray
+        shape ``(k,)``, dtype ``float64``. 昇順 (最小固有値が ``eigvals[0]``).
+    eigvecs : np.ndarray
+        shape ``(2**n, k)``, dtype ``complex128``. 列 ``eigvecs[:, j]`` が
+        ``eigvals[j]`` に対応する単位固有ベクトル.
+
+    Raises
+    ------
+    ValueError
+        ``k < 1`` / ``m < 1`` / ``k > m`` (lanczos) /
+        ``n > 12`` (exact) / ``k > 2**n`` (exact) /
+        未知の ``method`` の場合.
+    ImportError
+        ``_rust`` 拡張が import できない場合 (``method="lanczos"`` でのみ
+        発生; ``method="exact"`` は NumPy のみで完結する).
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from kryanneal import IsingProblem, Schedule
+    >>> from kryanneal.eigenstates import instantaneous_eigenstates
+    >>> n = 4
+    >>> prob = IsingProblem(
+    ...     n=n,
+    ...     H_p_diag=np.arange(1 << n, dtype=np.float64),
+    ...     h_x=np.ones(n),
+    ... )
+    >>> sched = Schedule.linear(T=10.0)
+    >>> eigvals, eigvecs = instantaneous_eigenstates(prob, sched, t=5.0, k=2)
+    >>> eigvals.shape, eigvecs.shape
+    ((2,), (16, 2))
+    """
+    ...

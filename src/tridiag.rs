@@ -18,6 +18,11 @@
 
 use std::fmt;
 
+use numpy::ndarray::Array2;
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1};
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
+
 /// 三重対角固有分解で発生し得るエラー.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TridiagError {
@@ -186,6 +191,73 @@ pub(crate) fn tridiag_eigh(
     // 固有値を昇順 sort し, 対応する q の row も並べ替える.
     sort_eigh_ascending(d, q);
     Ok(())
+}
+
+/// `tridiag_eigh` の Python wrap. 実対称三重対角の完全固有分解を Python
+/// 側に露出する.
+///
+/// 主用途は `python/kryanneal/eigenstates.py` の `instantaneous_eigenstates`
+/// (Lanczos 経路で得た `(α, β)` の固有分解を Python 側から呼ぶ). Lanczos /
+/// CFM4:2 内部の固有分解は Rust 内で完結するため, 本関数は **eigenstates /
+/// 参照実装比較用** の公開 API である (`apply_h_kryanneal_py` 等と同じ位置付).
+///
+/// # Python 側シグネチャ
+/// ```python
+/// eigvals, eigvecs = _rust.tridiag_eigh_py(alpha, beta)
+/// ```
+/// - `alpha`: shape `(m,)` float64. 対角成分 `T[k, k]`.
+/// - `beta`: shape `(m-1,)` float64. 副対角成分 `T[i, i+1]`.
+/// - `eigvals`: shape `(m,)` float64. 昇順固有値.
+/// - `eigvecs`: shape `(m, m)` float64. **column `k` が `eigvals[k]` に対応
+///   する単位固有ベクトル** (scipy.linalg.eigh と同じ規約). Rust 内部の
+///   row-major 行列を本関数内で転置して返す.
+///
+/// `m = 1` のとき `beta` は長さ 0 の空配列で渡す.
+// PyO3 の戻り型 `(Bound<PyArray1<_>>, Bound<PyArray2<_>>)` は clippy の
+// `type_complexity` lint に引っかかるが, 1 箇所のみの thin-wrap で型 alias を
+// 切るほどの再利用は無いので allow する.
+#[pyfunction]
+#[pyo3(signature = (alpha, beta))]
+#[allow(clippy::type_complexity)]
+pub(crate) fn tridiag_eigh_py<'py>(
+    py: Python<'py>,
+    alpha: PyReadonlyArray1<'py, f64>,
+    beta: PyReadonlyArray1<'py, f64>,
+) -> PyResult<(Bound<'py, PyArray1<f64>>, Bound<'py, PyArray2<f64>>)> {
+    let a = alpha.as_slice()?;
+    let b = beta.as_slice()?;
+    let m = a.len();
+    if m == 0 {
+        return Err(PyValueError::new_err("alpha must have length >= 1"));
+    }
+    if b.len() + 1 != m {
+        return Err(PyValueError::new_err(format!(
+            "beta length {} must equal alpha length {} - 1",
+            b.len(),
+            m,
+        )));
+    }
+    let mut d = a.to_vec();
+    // e of length m: e[0..m-1] = beta, e[m-1] = sentinel (set by tridiag_eigh).
+    let mut e = vec![0.0_f64; m];
+    if m > 1 {
+        e[..m - 1].copy_from_slice(b);
+    }
+    let mut q = vec![0.0_f64; m * m];
+    tridiag_eigh(&mut d, &mut e, &mut q)
+        .map_err(|err| PyRuntimeError::new_err(format!("tridiag_eigh failed: {err}")))?;
+
+    // Rust 規約: row k = eigvals[k] に対応する単位固有ベクトル (row-major).
+    // Python 規約 (scipy): eigvecs[:, k] = eigvals[k] の固有ベクトル.
+    // 転置して返す.
+    let mut q_t = vec![0.0_f64; m * m];
+    for k in 0..m {
+        for i in 0..m {
+            q_t[i * m + k] = q[k * m + i];
+        }
+    }
+    let arr = Array2::from_shape_vec((m, m), q_t).expect("shape (m, m) matches m*m");
+    Ok((d.into_pyarray(py), PyArray2::from_owned_array(py, arr)))
 }
 
 /// 固有値 `d` を昇順 sort し, `q` の row も同じ permutation で並べ替える.

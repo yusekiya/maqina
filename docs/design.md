@@ -626,25 +626,35 @@ def instantaneous_eigenstates(
     t: float,
     k: int = 8,                    # 取得する低位固有状態数
     method: Literal["lanczos", "exact"] = "lanczos",
+    *,
+    m: int = 64,                   # Krylov 部分空間次元 (lanczos のみ)
+    seed: int | None = None,       # 始ベクトル生成 seed (lanczos のみ)
+    krylov_tol: float = 1e-12,     # β 早期打切閾値 (lanczos のみ)
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     瞬時 H(t) の下位 k 固有値・固有状態を返す.
 
     Returns
     -------
-    eigvals : (k,) real
-    eigvecs : (2**n, k) complex128
+    eigvals : (k,) real           # 昇順
+    eigvecs : (2**n, k) complex128  # 列 j = eigvals[j] の単位固有ベクトル
     """
 ```
 
 実装方針:
 
-- `method="lanczos"` (default): `lanczos_propagate` と同じ Lanczos 反復で
-  下位 k 固有値を取得 (`apply_h_kryanneal` を再利用、§5.2 の三重対角化を
-  そのまま使い、最終的に hand-rolled QL で固有値・固有ベクトルを得る)。
-- `method="exact"`: 小規模問題 (`n <= 12`) 向け、Python 側で
-  `numpy.linalg.eigh` を使った dense 検証経路 (Rust 経由で LAPACK を
-  呼ばない)。
+- `method="lanczos"` (default): Python ループから `_rust.apply_h_kryanneal_py`
+  を呼んで Krylov 部分空間 (次元 `m`, default 64) を構築し,
+  `_rust.tridiag_eigh_py` (`src/tridiag.rs` の hand-rolled QL を thin-wrap)
+  で三重対角の完全固有分解を取って下位 `k` 個の Ritz vector を再構築する。
+  新規 Rust 関数 (Lanczos kernel) は追加せず, 既存 primitive を Python
+  ループで組み合わせる方針 (固有値計算は時間発展に比べて頻度が低く
+  Python 越境のオーバヘッドは無視できる)。`m` は時間発展用 (`m ≈ 24`) より
+  大きめのデフォルト (64) を取り, Ritz 値の収束を担保する。
+- `method="exact"`: 小規模問題 (`n <= 12`) 向け、`_rust.apply_h_kryanneal_py`
+  を standard basis `e_j` に当てて `H(t)` の列を 1 本ずつ抽出 (Kronecker
+  product より重複コードが無くビット規約の取り違いも避けられる) → Python
+  側で `numpy.linalg.eigh` を呼ぶ参照経路 (Rust 経由で LAPACK を呼ばない)。
 
 ユーザーは `ψ(t)` を `eigvecs` に内積して amplitude を出す:
 `amps = eigvecs.conj().T @ psi(t)`。

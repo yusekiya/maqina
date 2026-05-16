@@ -43,6 +43,7 @@ Usage
 import warnings
 
 from kryanneal.annealer import QuantumAnnealer
+from kryanneal.eigenstates import instantaneous_eigenstates
 from kryanneal.observable import Observable
 from kryanneal.problem import IsingProblem
 from kryanneal.result import QuantumResult, Trajectory
@@ -57,6 +58,7 @@ __all__ = [
     "QuantumResult",
     "Schedule",
     "Trajectory",
+    "instantaneous_eigenstates",
     "set_blas_threads",
     "available_blas_threads",
 ]
