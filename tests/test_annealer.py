@@ -287,8 +287,15 @@ def test_run_rejects_unsupported_method() -> None:
         ann.run(psi0, 0.0, 1.0, method="adaptive_m2", n_steps=10)  # type: ignore[arg-type]
 
 
-def test_run_rejects_save_tlist() -> None:
-    """``save_tlist`` 非 None で ``NotImplementedError`` (Phase 5 で実装予定)."""
+def test_run_save_tlist_snapshot_smoke() -> None:
+    """Phase 5 (issue #47): ``save_tlist`` を渡すと ``QuantumResult.times``
+    と ``observables_history`` / ``states`` が記録される.
+
+    Phase 4 までの ``NotImplementedError`` 経路は除去された (issue #47 で
+    有効化). 固定 dt 経路の m2 で smoke 確認.
+    """
+    from kryanneal import Observable
+
     n = 3
     prob = IsingProblem(
         n=n,
@@ -298,14 +305,80 @@ def test_run_rejects_save_tlist() -> None:
     sched = Schedule.linear(T=1.0)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
-    with pytest.raises(NotImplementedError):
+    save_tlist = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float64)
+    res = ann.run(
+        psi0,
+        0.0,
+        1.0,
+        method="m2",
+        n_steps=10,
+        observables={"M_z": Observable.magnetization(n)},
+        save_tlist=save_tlist,
+        store_states=True,
+    )
+    assert res.times is not None
+    np.testing.assert_array_equal(res.times, save_tlist)
+    np.testing.assert_array_equal(res.t_history, save_tlist)
+    assert "M_z" in res.observables_history
+    assert res.observables_history["M_z"].shape == (5,)
+    assert res.states is not None
+    assert res.states.shape == (5, 1 << n)
+    # 先頭は psi0 そのもの.
+    np.testing.assert_array_equal(res.states[0], psi0)
+    # 末尾は psi_final と一致 (target=t1 を踏むので).
+    np.testing.assert_array_equal(res.states[-1], res.psi_final)
+    # probabilities は常に計算される.
+    assert res.probabilities is not None
+    np.testing.assert_array_almost_equal(res.probabilities, np.abs(res.psi_final) ** 2)
+
+
+def test_run_observables_without_save_tlist_raises() -> None:
+    """Phase 5 (issue #47): ``save_tlist=None`` で ``observables`` 指定は
+    最節約モードに矛盾するため ``ValueError``.
+    """
+    from kryanneal import Observable
+
+    n = 3
+    prob = IsingProblem(
+        n=n,
+        H_p_diag=_ferromagnetic_chain_h_p_diag(n),
+        h_x=np.ones(n, dtype=np.float64),
+    )
+    sched = Schedule.linear(T=1.0)
+    psi0 = uniform_superposition(n)
+    ann = QuantumAnnealer(prob, sched)
+    with pytest.raises(ValueError, match="save_tlist"):
         ann.run(
             psi0,
             0.0,
             1.0,
             method="m2",
             n_steps=10,
-            save_tlist=np.array([0.5]),
+            observables={"M_z": Observable.magnetization(n)},
+        )
+
+
+def test_run_store_states_without_save_tlist_raises() -> None:
+    """Phase 5 (issue #47): ``save_tlist=None`` で ``store_states=True`` は
+    最節約モードに矛盾するため ``ValueError``.
+    """
+    n = 3
+    prob = IsingProblem(
+        n=n,
+        H_p_diag=_ferromagnetic_chain_h_p_diag(n),
+        h_x=np.ones(n, dtype=np.float64),
+    )
+    sched = Schedule.linear(T=1.0)
+    psi0 = uniform_superposition(n)
+    ann = QuantumAnnealer(prob, sched)
+    with pytest.raises(ValueError, match="save_tlist"):
+        ann.run(
+            psi0,
+            0.0,
+            1.0,
+            method="m2",
+            n_steps=10,
+            store_states=True,
         )
 
 

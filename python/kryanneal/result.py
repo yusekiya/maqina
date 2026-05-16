@@ -5,27 +5,30 @@
 * ``Trajectory``: 観測量の時系列のみを切り出した補助コンテナ
   (post-processing 用途).
 
-Phase 1–4 subset
+Phase 1–5 subset
 ----------------
-``docs/design.md`` §4.4 の ``QuantumResult`` には ``times`` / ``states``
-(``store_states`` / ``store_times`` 用) や ``success`` / ``method`` /
-``n_steps_actual`` (adaptive driver 用), ``probabilities`` フィールドが
-含まれる. 本リリースでは以下を実装する:
+``docs/design.md`` §4.4 の ``QuantumResult`` に対応するフィールドを保持する:
 
-* ``psi_final``
-* ``t_history``
-* ``observables_history``
+* ``psi_final`` — 終端 ``ψ(T)`` (常に非 None)
+* ``t_history`` — 互換目的の deprecated 別名 (Phase 1 以来の名前を残す;
+  Phase 5 からは ``save_tlist`` 経路で ``times`` と同値を返す)
+* ``observables_history`` — 観測量時系列 (``save_tlist=None`` のとき空 dict)
 * ``n_steps``
 * ``n_matvec``
 * ``success`` (Phase 4 で追加, adaptive driver 失敗時の指標)
 * ``method`` (Phase 4 で追加, 実行された propagator 名)
 * ``n_steps_actual`` (Phase 4 で追加, adaptive 経路の実 step 数;
   固定 dt 経路では ``n_steps`` と一致)
+* ``m_eff_stats`` (Phase 4 follow-up, issue #52 A)
+* ``times`` (Phase 5 で追加, ``save_tlist`` で指定した観測時刻軸;
+  ``save_tlist=None`` 経路では ``None``)
+* ``states`` (Phase 5 で追加, ``store_states=True`` 経路で指定時刻の
+  ψ スナップショット; それ以外は ``None``)
+* ``probabilities`` (Phase 5 で追加, ``|psi_final|^2`` の eager 計算;
+  どの経路でも常に非 None で返る — 最終状態の付随情報)
 
 新フィールドは default 付きで dataclass 末尾に置き backward compatible
-な追加とした (既存呼出側は変更不要). ``store_states`` / Observable 連動
-の ``times`` / ``states`` / ``observables`` 追加は Phase 5 で導入予定
-(parent issue #1 の Out of scope 表).
+な追加とした (既存呼出側は変更不要).
 
 ``@dataclass(frozen=True, eq=False)`` を使う理由は ``problem.py`` と同様で,
 ``np.ndarray`` を持つため dataclass 既定の ``__eq__`` が
@@ -102,13 +105,26 @@ class QuantumResult:
         本 Phase では未対応のため ``None`` (将来 driver 拡張で支援する案
         あり). 値の型は ``"total"`` のみ ``int``, それ以外は ``float``
         (median / mean が非整数値になりうるため).
-
-    Notes
-    -----
-    Phase 5 で以下のフィールドが追加される予定:
-
-    * ``times`` / ``states`` (``store_states`` 用の中間波動関数列)
-    * ``probabilities`` (``|psi_final|^2`` の caching)
+    times
+        Phase 5 (issue #47) 追加. ``QuantumAnnealer.run`` に
+        ``save_tlist`` を渡したときに記録される観測時刻軸. shape ``(K,)``
+        float64 で ``save_tlist`` と同一の値 (driver は内部で step
+        boundary に ``save_tlist`` 時刻をマージし, accept 時に当該点で
+        スナップショットを取る). ``save_tlist=None`` (デフォルト, 最節約
+        モード) では ``None``. ``observables_history`` および ``states``
+        の time index と整合する.
+    states
+        Phase 5 (issue #47) 追加. ``store_states=True`` かつ
+        ``save_tlist`` 非 None の経路でのみ非 None. shape
+        ``(K, 2**n)`` complex128, ``states[i]`` が ``times[i]`` 時刻での
+        ψ スナップショット. それ以外の経路 (``save_tlist=None`` or
+        ``store_states=False``) では ``None``.
+    probabilities
+        Phase 5 (issue #47) 追加. ``psi_final`` の振幅二乗
+        ``|psi_final|^2`` を eager 計算した shape ``(2**n,)`` float64.
+        どの経路でも常に非 None で返る (最終状態の付随情報なので
+        ``save_tlist`` の有無に依らない). 数値的には ``np.abs(psi_final)
+        ** 2`` と同値で, 呼出側で都度計算する手間を省くキャッシュ.
     """
 
     psi_final: np.ndarray
@@ -120,3 +136,6 @@ class QuantumResult:
     method: str = "m2"
     n_steps_actual: int | None = None
     m_eff_stats: dict[str, int | float] | None = None
+    times: np.ndarray | None = None
+    states: np.ndarray | None = None
+    probabilities: np.ndarray | None = None

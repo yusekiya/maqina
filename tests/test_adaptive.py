@@ -23,7 +23,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kryanneal import IsingProblem, Schedule
+from kryanneal import IsingProblem, Observable, Schedule
 from kryanneal.initial_states import uniform_superposition
 from kryanneal.krylov import (
     evolve_schedule_adaptive_m2,
@@ -131,8 +131,10 @@ def test_adaptive_richardson_matches_qutip() -> None:
     sched = Schedule.linear(T=T)
     psi0 = uniform_superposition(n)
 
-    # issue #52 A: driver は 5-tuple (psi, t_hist, dt_hist, n_rejects, m_eff_hist).
-    psi_final, t_history, dt_history, n_rejects, m_eff_history = (
+    # issue #52 A + Phase 5 (issue #47): driver は 6-tuple
+    # (psi, t_hist, dt_hist, n_rejects, m_eff_hist, snapshot).
+    # snapshot は save_tlist=None で None.
+    psi_final, t_history, dt_history, n_rejects, m_eff_history, snapshot = (
         evolve_schedule_adaptive_richardson(
             h_x=prob.h_x,
             h_p_diag=prob.H_p_diag,
@@ -144,6 +146,7 @@ def test_adaptive_richardson_matches_qutip() -> None:
             dt0=0.1,
         )
     )
+    assert snapshot is None
     psi_ref = _qutip_reference(prob.h_x, prob.H_p_diag, T)
     fid = _fidelity(psi_final, psi_ref)
     assert fid > 1 - 1e-6, (
@@ -175,7 +178,7 @@ def test_adaptive_pi_dt_grows_with_loose_tolerance() -> None:
     sched = Schedule(T=T, A=lambda s: 0.5, B=lambda s: 0.5)
     psi0 = uniform_superposition(n)
 
-    _, _, dt_history, _, _ = evolve_schedule_adaptive_richardson(
+    _, _, dt_history, _, _, _ = evolve_schedule_adaptive_richardson(
         h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
@@ -205,7 +208,7 @@ def test_adaptive_rejects_oversized_dt0() -> None:
     sched = Schedule.linear(T=T)
     psi0 = uniform_superposition(n)
 
-    _, _, _, n_rejects, _ = evolve_schedule_adaptive_richardson(
+    _, _, _, n_rejects, _, _ = evolve_schedule_adaptive_richardson(
         h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
@@ -455,7 +458,7 @@ def test_dt_max_none_facade_caps_dt_history() -> None:
     # cap を超えないこと, かつ PI が dt0=0.5 から伸びていることを driver
     # 直接呼出で dt_history を見て確認 (QuantumResult は dt_history を
     # 公開しないので driver layer に降りる).
-    _, _, dt_history, _, _ = evolve_schedule_adaptive_richardson(
+    _, _, dt_history, _, _, _ = evolve_schedule_adaptive_richardson(
         h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
@@ -705,8 +708,15 @@ def test_m_max_invalid_raises() -> None:
         )
 
 
-def test_adaptive_save_tlist_not_implemented() -> None:
-    """``save_tlist is not None`` で ``NotImplementedError`` (Phase 5)."""
+def test_adaptive_m2_save_tlist_still_not_implemented() -> None:
+    """``evolve_schedule_adaptive_m2`` は Phase 5 (issue #47) スコープ外で
+    ``save_tlist`` 非 None で ``NotImplementedError`` を維持する.
+
+    adaptive M2 は annealer.py の facade からは呼ばれない内部 API なので,
+    Phase 5 では adaptive Richardson のみ ``save_tlist`` 経路を有効化した.
+    将来 adaptive M2 driver も拡張する case (low priority) に備えて契約を
+    テストで明示する.
+    """
     n = 3
     prob = _make_random_problem(n, seed=11)
     sched = Schedule.linear(T=1.0)
@@ -722,7 +732,23 @@ def test_adaptive_save_tlist_not_implemented() -> None:
             t1=1.0,
             save_tlist=np.array([0.5]),
         )
-    with pytest.raises(NotImplementedError, match="save_tlist"):
+
+
+def test_adaptive_richardson_save_tlist_records_states() -> None:
+    """Phase 5 (issue #47): ``evolve_schedule_adaptive_richardson`` は
+    ``save_tlist`` 非 None で snapshot dict を返し, ψ をその時刻で記録する.
+
+    PI controller が ``next_save_target - t`` で dt をクランプして save_tlist
+    時刻を厳密に踏むことを, observables 評価 + 状態保存の round-trip で確認.
+    """
+    n = 3
+    prob = _make_random_problem(n, seed=11)
+    sched = Schedule.linear(T=1.0)
+    psi0 = uniform_superposition(n)
+    save_tlist = np.array([0.0, 0.3, 0.7, 1.0], dtype=np.float64)
+    obs = {"M_z": Observable.magnetization(n)}
+
+    psi_final, _t_hist, _dt_hist, _n_rej, _m_eff, snapshot = (
         evolve_schedule_adaptive_richardson(
             h_x=prob.h_x,
             h_p_diag=prob.H_p_diag,
@@ -730,8 +756,24 @@ def test_adaptive_save_tlist_not_implemented() -> None:
             psi0=psi0,
             t0=0.0,
             t1=1.0,
-            save_tlist=np.array([0.5]),
+            tol_step=1e-8,
+            dt0=0.1,
+            observables=obs,
+            save_tlist=save_tlist,
+            store_states=True,
         )
+    )
+    assert snapshot is not None
+    np.testing.assert_array_equal(snapshot["times"], save_tlist)
+    states = snapshot["states"]
+    assert states is not None
+    assert states.shape == (4, 1 << n)
+    # 先頭は psi0, 末尾は psi_final と一致 (driver が target を厳密に踏む契約).
+    np.testing.assert_array_equal(states[0], psi0)
+    np.testing.assert_array_equal(states[-1], psi_final)
+    obs_hist = snapshot["observables_history"]
+    assert "M_z" in obs_hist
+    assert obs_hist["M_z"].shape == (4,)
 
 
 def test_krylov_tol_none_resolves_to_atol_ratio_bit_exact() -> None:

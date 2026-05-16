@@ -64,7 +64,7 @@ L2-normalize) を本クラスで集中させ, krylov 層は数値計算に専念
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 
 import numpy as np
 
@@ -75,6 +75,7 @@ from kryanneal.krylov import (
     evolve_schedule_trotter,
     evolve_schedule_trotter_suzuki4,
 )
+from kryanneal.observable import Observable
 from kryanneal.problem import IsingProblem
 from kryanneal.result import QuantumResult
 from kryanneal.schedule import Schedule
@@ -287,7 +288,9 @@ class QuantumAnnealer:
         dt_init: float | None = None,
         dt_max: float | None = None,
         m_max: int | None = None,
+        observables: dict[str, Observable] | None = None,
         save_tlist: np.ndarray | None = None,
+        store_states: bool = False,
     ) -> QuantumResult:
         """``[t0, t1]`` 区間で時間発展を実行し ``QuantumResult`` を返す.
 
@@ -365,17 +368,35 @@ class QuantumAnnealer:
             ``m_eff`` 累積統計の ``QuantumResult`` 露出は Rust API 拡張
             (``lanczos_propagate`` の戻り値追加 + PyO3 plumbing) が
             必要なため本フェーズでは保留 (``docs/design.md`` §5.3 参照)。
+        observables
+            Phase 5 (issue #47) で有効化. ``{name: Observable}`` dict もしくは
+            ``None``. ``save_tlist`` 非 None かつ非空 dict のとき, 各
+            ``save_tlist[i]`` 時刻で ``obs.expectation(psi)`` を評価して
+            ``QuantumResult.observables_history[name]`` に shape
+            ``(len(save_tlist),)`` の時系列を格納する. ``save_tlist=None``
+            (デフォルト) のときは silent 無視 (最節約モード).
         save_tlist
-            観測時刻列 (Phase 5 で実装予定). 現状は ``None`` 以外を
-            渡すと ``NotImplementedError``.
+            Phase 5 (issue #47) で有効化. shape ``(K,)`` float64 の観測時刻列.
+            monotonic increasing, ``[t0, t1]`` の範囲. 非 None のとき
+            時間発展に該当時刻を厳密に踏ませ (固定 dt: step boundary に
+            merge, adaptive: dt クランプ), ``QuantumResult.times`` に複製を
+            格納する. ``None`` (デフォルト, 最節約モード) で snapshot 記録
+            なし (``times = states = None``, ``observables_history = {}``).
+        store_states
+            Phase 5 (issue #47) で有効化. ``True`` かつ ``save_tlist`` 非 None
+            のとき, snapshot 時刻に ψ を保存し ``QuantumResult.states`` に
+            shape ``(K, 2**n)`` complex128 として返す. ``save_tlist=None``
+            または ``False`` で ``states = None``.
 
         Returns
         -------
         QuantumResult
             ``psi_final`` / ``n_steps`` / ``n_matvec`` / ``success`` /
-            ``method`` / ``n_steps_actual`` を持つ result.
-            ``t_history = None``, ``observables_history = {}`` (Phase 5 で
-            観測量を一緒に格納予定). ``n_matvec`` は経路ごとに以下:
+            ``method`` / ``n_steps_actual`` / ``probabilities`` を常に持ち,
+            ``save_tlist`` 経路でのみ ``times`` / ``states`` /
+            ``observables_history`` が非 None / 非空になる. ``probabilities``
+            は ``|psi_final|^2`` を eager 計算した shape ``(2**n,)`` float64
+            (どの経路でも常に返る). ``n_matvec`` は経路ごとに以下:
 
             * ``"m2"``: ``n_steps × m`` (Lanczos の matvec 見積もり).
             * ``"trotter"``: ``n_steps × (N + 1)`` (phase pass 1 + bit-flip
@@ -395,10 +416,12 @@ class QuantumAnnealer:
         ------
         ValueError
             入力検証失敗 (``psi0`` の shape / dtype / 非正規化,
-            固定 dt 経路で ``n_steps`` 不指定 / ``n_steps < 1``, ``t1 <= t0``).
+            固定 dt 経路で ``n_steps`` 不指定 / ``n_steps < 1``,
+            ``t1 <= t0``, ``observables`` が dict[str, Observable] でない,
+            ``save_tlist`` が monotonic float64 で ``[t0, t1]`` 範囲に
+            収まらない).
         NotImplementedError
-            ``method`` がサポート対象外, または ``save_tlist`` が
-            ``None`` でない場合.
+            ``method`` がサポート対象外の場合.
         RuntimeError
             adaptive 経路で ``max_rejects`` 連続超過したとき (driver から
             伝播).
@@ -414,8 +437,24 @@ class QuantumAnnealer:
             raise NotImplementedError(
                 f"method={method!r} is not supported; valid methods are {valid_methods!r}."
             )
-        if save_tlist is not None:
-            raise NotImplementedError("save_tlist is reserved for Phase 5; pass None.")
+
+        # Phase 5 (issue #47): save_tlist / observables / store_states の入力検証.
+        # save_tlist=None のとき observables / store_states は無効化する
+        # ことが新仕様 (最節約モード). ただし「指定したのに無視」は debug 罠
+        # なので明示的に ValueError で弾く (silent 無視はしない).
+        save_tlist_arr = self._validate_save_tlist(save_tlist, t0, t1)
+        observables_validated = self._validate_observables(observables)
+        if save_tlist_arr is None:
+            if observables_validated is not None:
+                raise ValueError(
+                    "observables requires save_tlist to be non-None "
+                    "(save_tlist=None is the no-recording mode)."
+                )
+            if store_states:
+                raise ValueError(
+                    "store_states=True requires save_tlist to be non-None "
+                    "(save_tlist=None is the no-recording mode)."
+                )
 
         psi0_arr = self._validate_psi0(psi0)
 
@@ -460,14 +499,16 @@ class QuantumAnnealer:
                         f"m_max must be a positive integer or None, got {m_max!r}"
                     )
                 m_eff_param = int(m_max)
-            # C3/C4 (issue #52 A): driver は 5-tuple
-            # `(psi, t_hist, dt_hist, n_rejects, m_eff_hist)` を返す.
+            # C3/C4 (issue #52 A) + Phase 5 (issue #47): driver は 6-tuple
+            # `(psi, t_hist, dt_hist, n_rejects, m_eff_hist, snapshot)` を返す.
+            # ``snapshot`` は ``save_tlist=None`` のとき ``None``.
             (
                 psi_final,
                 _t_history,
                 dt_history,
                 _n_rejects,
                 m_eff_history,
+                snapshot,
             ) = evolve_schedule_adaptive_richardson(
                 h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
@@ -480,6 +521,9 @@ class QuantumAnnealer:
                 tol_step=tol_step,
                 dt0=dt0,
                 dt_max=dt_max_resolved,
+                observables=observables_validated,
+                save_tlist=save_tlist_arr,
+                store_states=store_states,
             )
             n_steps_actual = int(dt_history.shape[0])
             # C4 (issue #52 A): per-step `m_eff_sum` (= 6 Lanczos call の合計)
@@ -502,14 +546,12 @@ class QuantumAnnealer:
             else:
                 m_eff_stats = None
                 n_matvec = n_steps_actual * 6 * m_eff_param
-            return QuantumResult(
+            return self._build_result(
                 psi_final=psi_final,
-                t_history=None,
-                observables_history={},
+                snapshot=snapshot,
+                method=method,
                 n_steps=n_steps_actual,
                 n_matvec=int(n_matvec),
-                success=True,
-                method=method,
                 n_steps_actual=n_steps_actual,
                 m_eff_stats=m_eff_stats,
             )
@@ -529,8 +571,11 @@ class QuantumAnnealer:
         else:
             effective_krylov_tol = _KRYLOV_TOL_FIXED_DEFAULT
 
+        # Phase 5 (issue #47): 固定 dt driver は 3-tuple
+        # `(psi, n_matvec, snapshot)` を返す. snapshot は save_tlist=None で
+        # None.
         if method == "m2":
-            psi_final, n_matvec = evolve_schedule_m2(
+            psi_final, n_matvec, snapshot = evolve_schedule_m2(
                 h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
@@ -540,9 +585,12 @@ class QuantumAnnealer:
                 n_steps=n_steps_int,
                 m=self.m,
                 krylov_tol=effective_krylov_tol,
+                observables=observables_validated,
+                save_tlist=save_tlist_arr,
+                store_states=store_states,
             )
         elif method == "trotter":
-            psi_final, n_matvec = evolve_schedule_trotter(
+            psi_final, n_matvec, snapshot = evolve_schedule_trotter(
                 h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
@@ -550,9 +598,12 @@ class QuantumAnnealer:
                 t0=t0,
                 t1=t1,
                 n_steps=n_steps_int,
+                observables=observables_validated,
+                save_tlist=save_tlist_arr,
+                store_states=store_states,
             )
         elif method == "trotter_suzuki4":
-            psi_final, n_matvec = evolve_schedule_trotter_suzuki4(
+            psi_final, n_matvec, snapshot = evolve_schedule_trotter_suzuki4(
                 h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
@@ -560,9 +611,12 @@ class QuantumAnnealer:
                 t0=t0,
                 t1=t1,
                 n_steps=n_steps_int,
+                observables=observables_validated,
+                save_tlist=save_tlist_arr,
+                store_states=store_states,
             )
         else:  # method == "cfm4"
-            psi_final, n_matvec = evolve_schedule_cfm4(
+            psi_final, n_matvec, snapshot = evolve_schedule_cfm4(
                 h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
@@ -572,16 +626,148 @@ class QuantumAnnealer:
                 n_steps=n_steps_int,
                 m=self.m,
                 krylov_tol=effective_krylov_tol,
+                observables=observables_validated,
+                save_tlist=save_tlist_arr,
+                store_states=store_states,
+            )
+        return self._build_result(
+            psi_final=psi_final,
+            snapshot=snapshot,
+            method=method,
+            n_steps=n_steps_int,
+            n_matvec=int(n_matvec),
+            n_steps_actual=n_steps_int,
+            m_eff_stats=None,
+        )
+
+    def _validate_save_tlist(
+        self, save_tlist: np.ndarray | None, t0: float, t1: float
+    ) -> np.ndarray | None:
+        """``save_tlist`` の dtype / monotonicity / [t0, t1] 範囲を検証する.
+
+        ``None`` のときは ``None`` をそのまま返す (最節約モード). 非 None の
+        とき shape 1D, dtype float64, monotonic increasing (重複は許容),
+        全要素が ``[t0, t1]`` の範囲内であることを検証し, C-contiguous な
+        float64 array を返す.
+        """
+        if save_tlist is None:
+            return None
+        if not isinstance(save_tlist, np.ndarray):
+            raise ValueError(
+                f"save_tlist must be a numpy.ndarray or None, got {type(save_tlist).__name__}"
+            )
+        if save_tlist.ndim != 1:
+            raise ValueError(
+                f"save_tlist must be 1-dimensional, got shape {save_tlist.shape}"
+            )
+        if save_tlist.dtype != np.float64:
+            raise ValueError(
+                f"save_tlist dtype must be float64, got {save_tlist.dtype}"
+            )
+        if not np.all(np.isfinite(save_tlist)):
+            raise ValueError("save_tlist contains NaN or inf")
+        # 空配列は「観測無し」を意味するが silent 無視は debug 罠になるため
+        # 明示的にエラーにする (呼出側で ``None`` を渡せばよい).
+        if save_tlist.shape[0] == 0:
+            raise ValueError(
+                "save_tlist must be non-empty; pass save_tlist=None for no recording."
+            )
+        if not np.all(np.diff(save_tlist) >= 0.0):
+            raise ValueError("save_tlist must be monotonically non-decreasing")
+        if save_tlist[0] < t0 or save_tlist[-1] > t1:
+            raise ValueError(
+                f"save_tlist must fall within [t0={t0!r}, t1={t1!r}], "
+                f"got [{save_tlist[0]!r}, {save_tlist[-1]!r}]"
+            )
+        return np.ascontiguousarray(save_tlist, dtype=np.float64)
+
+    def _validate_observables(
+        self, observables: dict[str, Observable] | None
+    ) -> dict[str, Observable] | None:
+        """``observables`` が ``dict[str, Observable]`` で各 diag が
+        ``(2**n,)`` shape であることを検証する.
+
+        ``None`` のとき ``None`` をそのまま返す. 空 dict は ``None`` と
+        同義扱い (driver 側で空 dict を渡しても何も評価しないが,
+        ``QuantumResult.observables_history`` を非空 dict として保存しない
+        よう, ここで ``None`` に正規化する).
+        """
+        if observables is None:
+            return None
+        if not isinstance(observables, dict):
+            raise ValueError(
+                f"observables must be a dict or None, got {type(observables).__name__}"
+            )
+        if len(observables) == 0:
+            return None
+        expected_dim = self.problem.dim
+        for name, obs in observables.items():
+            if not isinstance(name, str):
+                raise ValueError(
+                    f"observables keys must be str, got {type(name).__name__}"
+                )
+            if not isinstance(obs, Observable):
+                raise ValueError(
+                    f"observables[{name!r}] must be an Observable, got {type(obs).__name__}"
+                )
+            if obs.dim != expected_dim:
+                raise ValueError(
+                    f"observables[{name!r}].diag length mismatch: "
+                    f"expected {expected_dim}, got {obs.dim}"
+                )
+        return observables
+
+    def _build_result(
+        self,
+        *,
+        psi_final: np.ndarray,
+        snapshot: dict[str, np.ndarray | dict[str, np.ndarray] | None] | None,
+        method: str,
+        n_steps: int,
+        n_matvec: int,
+        n_steps_actual: int,
+        m_eff_stats: dict[str, int | float] | None,
+    ) -> QuantumResult:
+        """``QuantumResult`` を組み立てる. ``probabilities`` は常に eager 計算.
+
+        ``snapshot`` (driver の ``save_tlist`` 経路で組まれる dict) から
+        ``times`` / ``states`` / ``observables_history`` を取り出し,
+        ``save_tlist=None`` 経路では ``times=states=None`` /
+        ``observables_history={}`` を返す.
+        """
+        # 最終状態の確率分布は常に eager 計算して返す (どの経路でも).
+        probabilities = (np.abs(psi_final) ** 2).astype(np.float64, copy=False)
+        if snapshot is None:
+            times: np.ndarray | None = None
+            states: np.ndarray | None = None
+            obs_history: dict[str, np.ndarray] = {}
+        else:
+            # snapshot dict の value 型は union (np.ndarray | dict | None) なので
+            # ``cast`` で各フィールドの想定型に narrow する. driver 側の
+            # ``_SnapshotRecorder.finalize`` が key ごとに正しい型で書き込む
+            # のが契約 (krylov.py 参照).
+            times = cast("np.ndarray | None", snapshot.get("times"))
+            states = cast("np.ndarray | None", snapshot.get("states"))
+            obs_history = cast(
+                "dict[str, np.ndarray]",
+                snapshot.get("observables_history") or {},
             )
         return QuantumResult(
             psi_final=psi_final,
-            t_history=None,
-            observables_history={},
-            n_steps=n_steps_int,
-            n_matvec=int(n_matvec),
+            # 互換: t_history は save_tlist 経路の times の別名として返す.
+            # save_tlist=None では従来通り None. Phase 5 以前の呼出側は
+            # save_tlist を使わないので挙動互換.
+            t_history=times,
+            observables_history=obs_history,
+            n_steps=n_steps,
+            n_matvec=n_matvec,
             success=True,
             method=method,
-            n_steps_actual=n_steps_int,
+            n_steps_actual=n_steps_actual,
+            m_eff_stats=m_eff_stats,
+            times=times,
+            states=states,
+            probabilities=probabilities,
         )
 
     def _validate_psi0(self, psi0: np.ndarray) -> np.ndarray:

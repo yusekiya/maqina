@@ -65,9 +65,10 @@ L2-normalize) を本クラスで集中させ, krylov 層は数値計算に専念
 使わないため両パラメータは無視される.
 """
 from __future__ import annotations as annotations
-from typing import Literal as Literal
+from typing import Literal as Literal, cast as cast
 import numpy as np
 from kryanneal.krylov import evolve_schedule_adaptive_richardson as evolve_schedule_adaptive_richardson, evolve_schedule_cfm4 as evolve_schedule_cfm4, evolve_schedule_m2 as evolve_schedule_m2, evolve_schedule_trotter as evolve_schedule_trotter, evolve_schedule_trotter_suzuki4 as evolve_schedule_trotter_suzuki4
+from kryanneal.observable import Observable as Observable
 from kryanneal.problem import IsingProblem as IsingProblem
 from kryanneal.result import QuantumResult as QuantumResult
 from kryanneal.schedule import Schedule as Schedule
@@ -122,7 +123,7 @@ class QuantumAnnealer:
     def __init__(self, problem: IsingProblem, schedule: Schedule, *, m: int=24, krylov_tol: float | None=None) -> None:
         ...
 
-    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='m2', n_steps: int | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None, save_tlist: np.ndarray | None=None) -> QuantumResult:
+    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='m2', n_steps: int | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None, observables: dict[str, Observable] | None=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> QuantumResult:
         """``[t0, t1]`` 区間で時間発展を実行し ``QuantumResult`` を返す.
 
         Parameters
@@ -199,17 +200,35 @@ class QuantumAnnealer:
             ``m_eff`` 累積統計の ``QuantumResult`` 露出は Rust API 拡張
             (``lanczos_propagate`` の戻り値追加 + PyO3 plumbing) が
             必要なため本フェーズでは保留 (``docs/design.md`` §5.3 参照)。
+        observables
+            Phase 5 (issue #47) で有効化. ``{name: Observable}`` dict もしくは
+            ``None``. ``save_tlist`` 非 None かつ非空 dict のとき, 各
+            ``save_tlist[i]`` 時刻で ``obs.expectation(psi)`` を評価して
+            ``QuantumResult.observables_history[name]`` に shape
+            ``(len(save_tlist),)`` の時系列を格納する. ``save_tlist=None``
+            (デフォルト) のときは silent 無視 (最節約モード).
         save_tlist
-            観測時刻列 (Phase 5 で実装予定). 現状は ``None`` 以外を
-            渡すと ``NotImplementedError``.
+            Phase 5 (issue #47) で有効化. shape ``(K,)`` float64 の観測時刻列.
+            monotonic increasing, ``[t0, t1]`` の範囲. 非 None のとき
+            時間発展に該当時刻を厳密に踏ませ (固定 dt: step boundary に
+            merge, adaptive: dt クランプ), ``QuantumResult.times`` に複製を
+            格納する. ``None`` (デフォルト, 最節約モード) で snapshot 記録
+            なし (``times = states = None``, ``observables_history = {}``).
+        store_states
+            Phase 5 (issue #47) で有効化. ``True`` かつ ``save_tlist`` 非 None
+            のとき, snapshot 時刻に ψ を保存し ``QuantumResult.states`` に
+            shape ``(K, 2**n)`` complex128 として返す. ``save_tlist=None``
+            または ``False`` で ``states = None``.
 
         Returns
         -------
         QuantumResult
             ``psi_final`` / ``n_steps`` / ``n_matvec`` / ``success`` /
-            ``method`` / ``n_steps_actual`` を持つ result.
-            ``t_history = None``, ``observables_history = {}`` (Phase 5 で
-            観測量を一緒に格納予定). ``n_matvec`` は経路ごとに以下:
+            ``method`` / ``n_steps_actual`` / ``probabilities`` を常に持ち,
+            ``save_tlist`` 経路でのみ ``times`` / ``states`` /
+            ``observables_history`` が非 None / 非空になる. ``probabilities``
+            は ``|psi_final|^2`` を eager 計算した shape ``(2**n,)`` float64
+            (どの経路でも常に返る). ``n_matvec`` は経路ごとに以下:
 
             * ``"m2"``: ``n_steps × m`` (Lanczos の matvec 見積もり).
             * ``"trotter"``: ``n_steps × (N + 1)`` (phase pass 1 + bit-flip
@@ -229,10 +248,12 @@ class QuantumAnnealer:
         ------
         ValueError
             入力検証失敗 (``psi0`` の shape / dtype / 非正規化,
-            固定 dt 経路で ``n_steps`` 不指定 / ``n_steps < 1``, ``t1 <= t0``).
+            固定 dt 経路で ``n_steps`` 不指定 / ``n_steps < 1``,
+            ``t1 <= t0``, ``observables`` が dict[str, Observable] でない,
+            ``save_tlist`` が monotonic float64 で ``[t0, t1]`` 範囲に
+            収まらない).
         NotImplementedError
-            ``method`` がサポート対象外, または ``save_tlist`` が
-            ``None`` でない場合.
+            ``method`` がサポート対象外の場合.
         RuntimeError
             adaptive 経路で ``max_rejects`` 連続超過したとき (driver から
             伝播).

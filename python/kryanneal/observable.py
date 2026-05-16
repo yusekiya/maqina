@@ -58,13 +58,9 @@ class Observable:
 
     def __init__(self, diag: np.ndarray) -> None:
         if not isinstance(diag, np.ndarray):
-            raise ValueError(
-                f"diag must be a numpy.ndarray, got {type(diag).__name__}"
-            )
+            raise ValueError(f"diag must be a numpy.ndarray, got {type(diag).__name__}")
         if diag.ndim != 1:
-            raise ValueError(
-                f"diag must be 1-dimensional, got shape {diag.shape}"
-            )
+            raise ValueError(f"diag must be 1-dimensional, got shape {diag.shape}")
         dim = diag.shape[0]
         if dim < 1 or (dim & (dim - 1)) != 0:
             raise ValueError(
@@ -109,9 +105,7 @@ class Observable:
             ``psi.shape != self.diag.shape`` の場合.
         """
         if not isinstance(psi, np.ndarray):
-            raise ValueError(
-                f"psi must be a numpy.ndarray, got {type(psi).__name__}"
-            )
+            raise ValueError(f"psi must be a numpy.ndarray, got {type(psi).__name__}")
         if psi.shape != self.diag.shape:
             raise ValueError(
                 f"psi shape mismatch: expected {self.diag.shape}, got {psi.shape}"
@@ -119,9 +113,7 @@ class Observable:
         return float(np.dot(self.diag, np.abs(psi) ** 2))
 
     @classmethod
-    def magnetization(
-        cls, n: int, axis: Literal["z"] = "z"
-    ) -> "Observable":
+    def magnetization(cls, n: int, axis: Literal["z"] = "z") -> "Observable":
         """全磁化 ``M_z = Σ_i σ_i^z`` の Observable を構築する.
 
         ``σ_i^z = 1 - 2·b_i`` (bit ``b_i`` が立つと spin down) という

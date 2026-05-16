@@ -64,6 +64,47 @@ def test_quantum_result_allows_none_t_history() -> None:
     assert res.observables_history == {}
 
 
+def test_quantum_result_phase5_field_defaults() -> None:
+    """Phase 5 (issue #47) で追加した ``times`` / ``states`` /
+    ``probabilities`` フィールドの default 値が ``None``. Phase 1-4 までと
+    同じ 5 引数構築 (Phase 4 末は 7 引数) で破壊変更なく構築できる契約."""
+    psi = np.zeros(4, dtype=np.complex128)
+    res = QuantumResult(
+        psi_final=psi,
+        t_history=None,
+        observables_history={},
+        n_steps=0,
+        n_matvec=0,
+    )
+    assert res.times is None
+    assert res.states is None
+    assert res.probabilities is None
+
+
+def test_quantum_result_phase5_fields_assignable() -> None:
+    """Phase 5 (issue #47): ``times`` / ``states`` / ``probabilities`` に
+    array を明示指定できる (annealer.py の ``_build_result`` 経路で実際に
+    入る形)."""
+    psi = np.array([0.6, 0.0, 0.8, 0.0], dtype=np.complex128)
+    times = np.array([0.0, 0.5, 1.0], dtype=np.float64)
+    states = np.zeros((3, 4), dtype=np.complex128)
+    probs = (np.abs(psi) ** 2).astype(np.float64)
+    res = QuantumResult(
+        psi_final=psi,
+        t_history=times,
+        observables_history={"E": np.array([1.0, 0.8, 0.6])},
+        n_steps=2,
+        n_matvec=10,
+        times=times,
+        states=states,
+        probabilities=probs,
+    )
+    assert res.times is times
+    assert res.states is states
+    assert res.probabilities is probs
+    np.testing.assert_array_almost_equal(float(res.probabilities.sum()), 1.0)
+
+
 def test_trajectory_construct() -> None:
     """``Trajectory`` 単独で構築でき, 観測量を保持できる."""
     t = np.linspace(0.0, 1.0, 5, dtype=np.float64)
