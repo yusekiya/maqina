@@ -41,6 +41,7 @@ PKG_DIR = REPO_ROOT / "python" / "kryanneal"
 # 公開モジュール一覧. ``__init__`` を含む.
 MODULES = [
     "__init__",
+    "_helpers",
     "problem",
     "schedule",
     "annealer",
@@ -51,6 +52,7 @@ MODULES = [
     "observable",
     "result",
     "reference_qutip",
+    "simulator",
 ]
 
 HEADER = (

@@ -524,31 +524,71 @@ class Trajectory:
 ### 4.5 `AnnealingSimulator`
 
 任意の中間時刻まで進めて状態を取り出し、観測量で測定して続けて発展させる
-用途の step-wise stateful API:
+用途の step-wise stateful API (Phase 5 C3, issue #48 で実装):
 
 ```python
 class AnnealingSimulator:
-    def __init__(self, ...): ...
+    def __init__(
+        self,
+        problem: IsingProblem,
+        schedule: Schedule,
+        psi0: np.ndarray,
+        t0: float,
+        *,
+        method: Literal[
+            "m2", "trotter", "trotter_suzuki4", "cfm4", "cfm4_adaptive_richardson"
+        ] = "cfm4",
+        m: int = 24,                  # Lanczos 部分空間次元 (QuantumAnnealer と統一)
+        krylov_tol: float | None = None,
+        # ↓ adaptive (`cfm4_adaptive_richardson`) 専用; 固定 dt method で
+        #   非 None 指定すると ValueError
+        atol: float | None = None,
+        dt_init: float | None = None,
+        dt_max: float | None = None,
+        m_max: int | None = None,
+    ): ...
 
     @property
-    def t(self) -> float: ...
+    def t(self) -> float: ...          # 現在時刻
     @property
-    def psi(self) -> np.ndarray: ...
+    def psi(self) -> np.ndarray: ...   # defensive copy で返す ((2**n,) complex128)
     @property
-    def n_matvec(self) -> int: ...
+    def n_matvec(self) -> int: ...     # 累積 matvec 数
+    @property
+    def method(self) -> str: ...
 
     def step(self, dt: float) -> None:
-        """1 step (固定 dt) 進める。adaptive 経路では dt は提案値."""
+        """1 step (固定 dt) 進める。adaptive 経路では dt は PI controller
+        の proposal 扱い (dt_max=dt で growth を禁じ, reject 時は内部で
+        dt を縮めて sub-step 化する; 結果として _t は exactly +dt 進む)."""
         ...
 
-    def advance_to(self, t_target: float) -> None:
-        """t_target まで進める."""
+    def advance_to(self, t_target: float, *, n_steps: int | None = None) -> None:
+        """t_target まで進める。固定 dt 経路では n_steps 必須 (run と同じ map:
+        dt = (t_target - _t) / n_steps), adaptive 経路では n_steps は None
+        でなければならない (driver が step 数を内部決定)."""
         ...
 
-    def measure(self, observable: "Observable") -> float:
-        """現在 ψ で期待値 <ψ|O|ψ> を計算 (実数)."""
+    def measure(self, observable: Observable) -> float:
+        """現在 ψ で期待値 <ψ|O|ψ> を計算 (実数). Observable 以外は TypeError."""
         ...
 ```
+
+`QuantumAnnealer.create_simulator(psi0, t0, *, method=..., atol=..., dt_init=...,
+dt_max=..., m_max=...)` は QuantumAnnealer インスタンスから派生させる簡便
+ファクトリで, `m` / `krylov_tol` は QuantumAnnealer コンストラクタの値を
+そのまま引き継ぐ (Simulator 側で異なる値を使いたい場合は `AnnealingSimulator`
+を直接構築する).
+
+**実装方針** (`python/kryanneal/simulator.py`): 内部では `evolve_schedule_*`
+driver を `[_t, _t + dt]` または `[_t, t_target]` 区間で呼ぶ薄いラッパ.
+`step` は `n_steps=1` の driver call, `advance_to` は `run` と同じ driver
+call で bit-identical な数値を得る (固定 dt 経路で `rel < 1e-13`).
+adaptive 経路の `step(dt)` は `dt0=dt, dt_max=dt` で driver を呼び, PI
+controller の reject 時は dt を縮めて内部 sub-step 化する (n_matvec は
+driver の `m_eff_history` で正確に累積). `_validate_psi0` は `annealer.py`
+の module-level helper を共有し, `QuantumAnnealer.run` と同じ shape /
+dtype / L2-normalize 検証を通す.
 
 ### 4.6 観測量 `Observable`
 
@@ -1717,7 +1757,12 @@ U(dt) ≈ phase_p(dt/2) · (Π_i R_i(dt)) · phase_p(dt/2)
   最節約モードで状態保存なし; 非 None で指定時刻を厳密に踏み (固定 dt:
   step boundary に merge, adaptive: PI dt クランプ), 観測量時系列と
   (オプションで) ψ スナップショットを記録する.
-- `AnnealingSimulator` step-wise API (将来検討)
+- `AnnealingSimulator` step-wise API (issue #48, 済). 中間時刻まで進めて
+  `Observable` で測ってから続きを発展させる用途. `step(dt)` / `advance_to(t)` /
+  `measure(observable)` で `QuantumAnnealer.run` と同じ propagator 集合を
+  逐次操作する. 固定 dt 経路は `run` と bit-identical な数値 (`rel < 1e-13`).
+  `QuantumAnnealer.create_simulator(psi0, t0, *, method=...)` が簡便 factory.
+  詳細は §4.5.
 - `instantaneous_eigenstates` (将来検討)
 
 ### Phase 6: 並列化 + 仕上げ (~v0.6)

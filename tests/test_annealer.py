@@ -425,3 +425,81 @@ def test_constructor_validates_m_and_tol() -> None:
         QuantumAnnealer(prob, sched, m=0)
     with pytest.raises(ValueError, match="krylov_tol"):
         QuantumAnnealer(prob, sched, krylov_tol=-1e-12)
+
+
+# ---------------------------------------------------------------------------
+# create_simulator (issue #48)
+# ---------------------------------------------------------------------------
+
+
+def test_create_simulator_returns_simulator_with_initial_state() -> None:
+    """``create_simulator`` 戻り値が ``AnnealingSimulator`` で,
+    ``t == t0`` / ``psi ≈ psi0`` / ``n_matvec == 0`` で初期化されている.
+    """
+    from kryanneal import AnnealingSimulator
+
+    n = 3
+    prob = IsingProblem(
+        n=n,
+        H_p_diag=_ferromagnetic_chain_h_p_diag(n),
+        h_x=np.ones(n, dtype=np.float64),
+    )
+    sched = Schedule.linear(T=1.0)
+    psi0 = uniform_superposition(n)
+    ann = QuantumAnnealer(prob, sched)
+
+    sim = ann.create_simulator(psi0, 0.0, method="m2")
+    assert isinstance(sim, AnnealingSimulator)
+    assert sim.t == 0.0
+    assert sim.method == "m2"
+    assert sim.n_matvec == 0
+    assert np.allclose(sim.psi, psi0)
+
+
+def test_create_simulator_supports_same_methods_as_run() -> None:
+    """``create_simulator`` がサポートする method 集合が ``run`` と一致."""
+    n = 3
+    prob = IsingProblem(
+        n=n,
+        H_p_diag=_ferromagnetic_chain_h_p_diag(n),
+        h_x=np.ones(n, dtype=np.float64),
+    )
+    sched = Schedule.linear(T=1.0)
+    psi0 = uniform_superposition(n)
+    ann = QuantumAnnealer(prob, sched)
+
+    # `run` の valid method 集合 (annealer.py のソースに合わせて手で列挙).
+    methods_supported = [
+        "m2",
+        "trotter",
+        "trotter_suzuki4",
+        "cfm4",
+        "cfm4_adaptive_richardson",
+    ]
+    for method in methods_supported:
+        sim = ann.create_simulator(psi0, 0.0, method=method)  # type: ignore[arg-type]
+        assert sim.method == method
+
+    # サポート外の method は ``NotImplementedError`` で弾かれる (``run`` と同じ).
+    with pytest.raises(NotImplementedError):
+        ann.create_simulator(psi0, 0.0, method="bogus")  # type: ignore[arg-type]
+
+
+def test_create_simulator_inherits_m_and_krylov_tol_from_annealer() -> None:
+    """``create_simulator`` は QuantumAnnealer の ``m`` / ``krylov_tol``
+    を Simulator に引き継ぐ."""
+    n = 3
+    prob = IsingProblem(
+        n=n,
+        H_p_diag=_ferromagnetic_chain_h_p_diag(n),
+        h_x=np.ones(n, dtype=np.float64),
+    )
+    sched = Schedule.linear(T=1.0)
+    psi0 = uniform_superposition(n)
+    ann = QuantumAnnealer(prob, sched, m=16, krylov_tol=1e-10)
+
+    sim = ann.create_simulator(psi0, 0.0, method="cfm4")
+    # 内部値の検証は public API 経由では難しいが, step を 1 回呼んで
+    # m=16 経路の n_matvec (1 step × 2m = 32) が返ることで確認.
+    sim.step(0.1)
+    assert sim.n_matvec == 32

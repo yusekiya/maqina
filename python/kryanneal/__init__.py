@@ -47,10 +47,10 @@ from kryanneal.observable import Observable
 from kryanneal.problem import IsingProblem
 from kryanneal.result import QuantumResult, Trajectory
 from kryanneal.schedule import Schedule
-
-# AnnealingSimulator は Phase 5 で実装予定.
+from kryanneal.simulator import AnnealingSimulator
 
 __all__ = [
+    "AnnealingSimulator",
     "IsingProblem",
     "Observable",
     "QuantumAnnealer",
