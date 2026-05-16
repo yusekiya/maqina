@@ -58,7 +58,13 @@ from pathlib import Path
 
 import numpy as np
 
-from kryanneal import IsingProblem, Observable, QuantumAnnealer, Schedule, set_blas_threads
+from kryanneal import (
+    IsingProblem,
+    Observable,
+    QuantumAnnealer,
+    Schedule,
+    set_blas_threads,
+)
 from kryanneal.initial_states import uniform_superposition
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -99,8 +105,7 @@ def _parse_method_list(text: str) -> list[str]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "kryanneal observables / save_tlist overhead benchmark "
-            "(Phase 5, issue #47)"
+            "kryanneal observables / save_tlist overhead benchmark (Phase 5, issue #47)"
         )
     )
     parser.add_argument(
@@ -305,20 +310,20 @@ def main(argv: list[str] | None = None) -> int:
                 for _ in range(int(args.warmup)):
                     time_one_run(ann, psi0, 0.0, args.T, run_kwargs)
                 for trial in range(int(args.repeat)):
-                    wall, n_actual = time_one_run(
-                        ann, psi0, 0.0, args.T, run_kwargs
+                    wall, n_actual = time_one_run(ann, psi0, 0.0, args.T, run_kwargs)
+                    rows.append(
+                        {
+                            "n": n,
+                            "dim": dim,
+                            "method": method,
+                            "mode": mode,
+                            "trial": trial,
+                            "n_steps": int(args.n_steps),
+                            "n_steps_actual": int(n_actual),
+                            "wall_sec": float(wall),
+                            "per_step_sec": float(wall / max(n_actual, 1)),
+                        }
                     )
-                    rows.append({
-                        "n": n,
-                        "dim": dim,
-                        "method": method,
-                        "mode": mode,
-                        "trial": trial,
-                        "n_steps": int(args.n_steps),
-                        "n_steps_actual": int(n_actual),
-                        "wall_sec": float(wall),
-                        "per_step_sec": float(wall / max(n_actual, 1)),
-                    })
                     print(
                         f"  n={n:2d} method={method:30s} mode={mode:11s} "
                         f"trial={trial} wall={wall:.4e}s "
@@ -330,8 +335,15 @@ def main(argv: list[str] | None = None) -> int:
         writer = csv.DictWriter(
             fh,
             fieldnames=[
-                "n", "dim", "method", "mode", "trial", "n_steps",
-                "n_steps_actual", "wall_sec", "per_step_sec",
+                "n",
+                "dim",
+                "method",
+                "mode",
+                "trial",
+                "n_steps",
+                "n_steps_actual",
+                "wall_sec",
+                "per_step_sec",
             ],
         )
         writer.writeheader()

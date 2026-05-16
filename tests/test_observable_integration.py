@@ -339,7 +339,5 @@ def test_probabilities_returned_even_without_save_tlist() -> None:
     assert res.states is None
     assert res.observables_history == {}
     assert res.probabilities is not None
-    np.testing.assert_array_almost_equal(
-        res.probabilities, np.abs(res.psi_final) ** 2
-    )
+    np.testing.assert_array_almost_equal(res.probabilities, np.abs(res.psi_final) ** 2)
     np.testing.assert_array_almost_equal(float(res.probabilities.sum()), 1.0)
