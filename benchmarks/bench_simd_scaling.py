@@ -1,0 +1,362 @@
+"""SIMD scaling bench: `apply_h_kryanneal` per-pass time の SIMD ON/OFF 比較.
+
+issue #63 (Phase 6 C2) の acceptance「N=18, i=0,1,2 集中時の per-pass time
+**>=1.5× 改善** (cpu_count=64 Linux サーバーで, BLAS thread=1)」を計測する
+専用 bench. `bench_parallel_scaling.py` (C1) と同じ subprocess + child mode
+構造を踏襲するが, SIMD feature の切替は **build 時** に行う必要があるため
+parent/child 自動切替はせず, **操作員が異なる build で 2 回 measure を回し
+3 回目に `--mode compare` で統合する** 運用にする.
+
+## 計測対象
+
+`_rust.apply_h_kryanneal_py` の per-call wall time を以下 2 設定で取る:
+
+- ``all-i`` (h_x = all-ones): 全 i bit-flip pass が寄与. 本番ホットパス
+  (Lanczos / CFM4:2) を最も忠実に再現する.
+- ``i012-focus`` (h_x = [1, 1, 1, 0, ..., 0]): i = 0, 1, 2 のみ寄与.
+  SIMD カーネルが効く範囲を分離し, issue acceptance の「i=0,1,2 集中時」
+  シナリオを最大限引き出す.
+
+各セルで warmup → repeat 回計測し, JSON に machine info / build flags
+(``__has_simd__``, ``__has_blas__``, ``__has_rayon__``) と共に出す.
+
+## 実行手順 (本番 Linux サーバー sweep)
+
+::
+
+    # 1. SIMD ON (default build) で measure
+    RUSTFLAGS="-C target-cpu=native" uv run maturin develop --uv --release
+    uv run python benchmarks/bench_simd_scaling.py \\
+        --mode measure --label simd-on \\
+        --output benchmarks/results/bench_simd/simd-on.json
+
+    # 2. SIMD OFF (rayon + blas のみ, simd feature off) で measure
+    #    `MATURIN_PEP517_ARGS` で feature を渡し直す (default を上書き).
+    MATURIN_PEP517_ARGS="--no-default-features --features blas,rayon" \\
+        RUSTFLAGS="-C target-cpu=native" \\
+        uv run maturin develop --uv --release
+    uv run python benchmarks/bench_simd_scaling.py \\
+        --mode measure --label simd-off \\
+        --output benchmarks/results/bench_simd/simd-off.json
+
+    # 3. SIMD ON build に戻して compare → markdown + CSV 出力
+    uv run maturin develop --uv --release
+    uv run python benchmarks/bench_simd_scaling.py \\
+        --mode compare \\
+        --simd-on benchmarks/results/bench_simd/simd-on.json \\
+        --simd-off benchmarks/results/bench_simd/simd-off.json \\
+        --output-dir benchmarks/results/<YYYYMMDD-HHMMSS>/
+
+macOS では smoke (NEON 経路の動作確認 + 数値同一性) のみ. 速度比較は
+**Phase 4-5 と同じ Linux サーバー (x86_64 / glibc 2.35 / cpu_count=64 /
+OpenBLAS)** 上で取る (``CLAUDE.md`` ベンチマーク節「同一マシン上の
+before / after」原則). **bench は PR 本体に含めず, merge 後に issue #63
+コメントとして添付する運用** (issue #47 で確定).
+
+## 注意点
+
+- 実 SIMD 性能向上は build 時の ``target-cpu`` 設定に依存する.
+  default ``x86_64`` target では ``wide`` クレートが scalar fallback を選び
+  正確性のみ提供する. 本番 measure は ``RUSTFLAGS="-C target-cpu=native"``
+  を必ず設定する (AVX2 / AVX-512 / NEON を `wide` の `target_feature`
+  cfg が拾えるようになる).
+- BLAS thread は ``--blas-threads 1`` で 1 thread 固定にする
+  (``bench_parallel_scaling.py`` と同じ acceptance 条件).
+- rayon thread は ``RAYON_NUM_THREADS`` 環境変数で固定する. SIMD per-thread
+  scaling を見るため measure 時は ``RAYON_NUM_THREADS=1`` を推奨
+  (parallel scaling は ``bench_parallel_scaling.py`` 担当).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import statistics
+import sys
+import time
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_N_VALUES = (16, 18, 20)
+DEFAULT_REPEAT = 7
+DEFAULT_WARMUP = 2
+# SIMD カーネルが特化する i の集合.
+SIMD_TARGET_I_VALUES = (0, 1, 2)
+
+
+def _measure_apply_h(n: int, h_x: np.ndarray, repeat: int, warmup: int) -> list[float]:
+    """`_rust.apply_h_kryanneal_py` の wall time を repeat 回計測して返す.
+
+    warmup 回数だけ捨てた後, repeat 回の wall time を秒単位で返す.
+    """
+    from kryanneal import _rust  # pyright: ignore[reportMissingImports]
+
+    dim = 1 << n
+    rng = np.random.default_rng(0xBEEF_FACE ^ n)
+    h_p_diag = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
+    v = (
+        rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)
+    ).astype(np.complex128)
+    a_t = float(rng.uniform(-1.0, 1.0))
+    b_t = float(rng.uniform(-1.0, 1.0))
+
+    for _ in range(warmup):
+        _ = _rust.apply_h_kryanneal_py(v, h_x, h_p_diag, a_t, b_t)
+
+    timings: list[float] = []
+    for _ in range(repeat):
+        t0 = time.perf_counter()
+        _ = _rust.apply_h_kryanneal_py(v, h_x, h_p_diag, a_t, b_t)
+        t1 = time.perf_counter()
+        timings.append(t1 - t0)
+    return timings
+
+
+def _build_h_x(n: int, mode: str) -> np.ndarray:
+    """h_x ベクトルを mode に応じて構築.
+
+    - ``all-i``: 全要素 1.
+    - ``i012-focus``: 先頭 3 要素のみ 1, 残りは 0 (i = 0, 1, 2 のみ寄与).
+    """
+    h_x = np.zeros(n, dtype=np.float64)
+    if mode == "all-i":
+        h_x[:] = 1.0
+    elif mode == "i012-focus":
+        # n < 3 だと i012-focus の意味が無いので呼び出し側で除外する.
+        h_x[: min(3, n)] = 1.0
+    else:
+        raise ValueError(f"unknown mode {mode!r}")
+    return h_x
+
+
+def _machine_info(label: str) -> dict[str, Any]:
+    info: dict[str, Any] = {
+        "label": label,
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "processor": platform.processor() or "unknown",
+        "python_version": platform.python_version(),
+        "numpy_version": np.__version__,
+        "cpu_count_logical": os.cpu_count(),
+        "timestamp_utc": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "rayon_num_threads_env": os.environ.get("RAYON_NUM_THREADS"),
+    }
+    try:
+        import kryanneal
+        from kryanneal import _rust  # pyright: ignore[reportMissingImports]
+
+        info["kryanneal_version"] = getattr(kryanneal, "__version__", "unknown")
+        info["__has_blas__"] = bool(getattr(_rust, "__has_blas__", False))
+        info["__has_rayon__"] = bool(getattr(_rust, "__has_rayon__", False))
+        info["__has_simd__"] = bool(getattr(_rust, "__has_simd__", False))
+    except ImportError:
+        info["kryanneal_version"] = "import-failed"
+        info["__has_blas__"] = None
+        info["__has_rayon__"] = None
+        info["__has_simd__"] = None
+    return info
+
+
+def mode_measure(args: argparse.Namespace) -> int:
+    """1 build profile 分の measure を走らせて JSON に書き出す."""
+    import kryanneal
+
+    if args.blas_threads is not None:
+        kryanneal.set_blas_threads(args.blas_threads)
+
+    machine = _machine_info(args.label)
+
+    trials: list[dict[str, Any]] = []
+    for n in args.n_values:
+        if n < 3:
+            print(f"[measure] skip n={n} (n < 3, SIMD i=2 が踏めない)", flush=True)
+            continue
+        for mode in ("all-i", "i012-focus"):
+            h_x = _build_h_x(n, mode)
+            print(f"[measure] n={n} dim={1 << n} mode={mode}", flush=True)
+            timings = _measure_apply_h(n, h_x, repeat=args.repeat, warmup=args.warmup)
+            for trial_idx, t in enumerate(timings):
+                trials.append(
+                    {
+                        "label": args.label,
+                        "n": n,
+                        "dim": 1 << n,
+                        "mode": mode,
+                        "trial": trial_idx,
+                        "wall_sec": t,
+                    }
+                )
+            print(
+                f"  median={statistics.median(timings):.6e}s, "
+                f"min={min(timings):.6e}s, max={max(timings):.6e}s",
+                flush=True,
+            )
+
+    out: dict[str, Any] = {
+        "machine_info": machine,
+        "args": {
+            "n_values": list(args.n_values),
+            "repeat": args.repeat,
+            "warmup": args.warmup,
+            "blas_threads": args.blas_threads,
+        },
+        "trials": trials,
+    }
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+    print(f"[measure] wrote {out_path}")
+    return 0
+
+
+def _summarize_median(trials: list[dict[str, Any]]) -> dict[tuple[int, str], float]:
+    """(n, mode) ごとの median wall_sec を返す."""
+    buckets: dict[tuple[int, str], list[float]] = {}
+    for r in trials:
+        buckets.setdefault((int(r["n"]), str(r["mode"])), []).append(float(r["wall_sec"]))
+    return {key: statistics.median(vs) for key, vs in buckets.items()}
+
+
+def mode_compare(args: argparse.Namespace) -> int:
+    """SIMD ON / OFF の JSON を読んで speedup table を MD + CSV で出す."""
+    on_data = json.loads(Path(args.simd_on).read_text(encoding="utf-8"))
+    off_data = json.loads(Path(args.simd_off).read_text(encoding="utf-8"))
+
+    # build flags の sanity check.
+    on_info = on_data["machine_info"]
+    off_info = off_data["machine_info"]
+    if on_info.get("__has_simd__") is not True:
+        print(
+            f"[compare] WARNING: --simd-on file has __has_simd__={on_info.get('__has_simd__')!r} "
+            "(expected True)",
+            file=sys.stderr,
+        )
+    if off_info.get("__has_simd__") is not False:
+        print(
+            f"[compare] WARNING: --simd-off file has __has_simd__={off_info.get('__has_simd__')!r} "
+            "(expected False)",
+            file=sys.stderr,
+        )
+
+    on_medians = _summarize_median(on_data["trials"])
+    off_medians = _summarize_median(off_data["trials"])
+    keys = sorted(set(on_medians.keys()) | set(off_medians.keys()))
+
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # CSV
+    csv_path = out_dir / "bench_simd_scaling.csv"
+    with csv_path.open("w", encoding="utf-8") as f:
+        f.write("n,dim,mode,simd_off_median_sec,simd_on_median_sec,speedup\n")
+        for (n, mode) in keys:
+            on = on_medians.get((n, mode))
+            off = off_medians.get((n, mode))
+            speedup = (off / on) if (on and off and on > 0) else None
+            f.write(
+                f"{n},{1 << n},{mode},"
+                f"{off if off is not None else ''},"
+                f"{on if on is not None else ''},"
+                f"{speedup if speedup is not None else ''}\n"
+            )
+
+    # MD
+    md_path = out_dir / "bench_simd_scaling.md"
+    lines: list[str] = []
+    lines.append("# bench_simd_scaling (Phase 6 C2, issue #63)")
+    lines.append("")
+    lines.append("`apply_h_kryanneal` per-pass time の SIMD ON/OFF 比較.")
+    lines.append("")
+    lines.append("## Machine info (simd-on side)")
+    lines.append("")
+    for k, v in on_info.items():
+        lines.append(f"- **{k}**: {v}")
+    lines.append("")
+    lines.append("## Machine info (simd-off side)")
+    lines.append("")
+    for k, v in off_info.items():
+        lines.append(f"- **{k}**: {v}")
+    lines.append("")
+    lines.append("## Per-call median wall time and speedup")
+    lines.append("")
+    lines.append(
+        "| n | dim | mode | simd-off median (ms) | simd-on median (ms) | "
+        "speedup (off / on) |"
+    )
+    lines.append("|---|---|---|---|---|---|")
+    for (n, mode) in keys:
+        on = on_medians.get((n, mode))
+        off = off_medians.get((n, mode))
+        speedup = (off / on) if (on and off and on > 0) else float("nan")
+        on_ms = (on * 1e3) if on is not None else float("nan")
+        off_ms = (off * 1e3) if off is not None else float("nan")
+        lines.append(
+            f"| {n} | {1 << n} | {mode} | {off_ms:.4f} | {on_ms:.4f} | {speedup:.2f}× |"
+        )
+    lines.append("")
+    lines.append(
+        "issue #63 acceptance: N=18 `i012-focus` で speedup ≥ 1.5× を満たすこと."
+    )
+    lines.append("")
+    md_path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"[compare] wrote {csv_path}")
+    print(f"[compare] wrote {md_path}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = p.add_subparsers(dest="mode", required=True)
+
+    p_measure = sub.add_parser(
+        "measure", help="1 build profile 分の measure を JSON 出力"
+    )
+    p_measure.add_argument(
+        "--n-values",
+        type=lambda s: [int(x) for x in s.split(",")],
+        default=list(DEFAULT_N_VALUES),
+        help=f"sweep する N (default {','.join(str(n) for n in DEFAULT_N_VALUES)})",
+    )
+    p_measure.add_argument("--repeat", type=int, default=DEFAULT_REPEAT)
+    p_measure.add_argument("--warmup", type=int, default=DEFAULT_WARMUP)
+    p_measure.add_argument(
+        "--blas-threads", type=int, default=1, help="BLAS thread 固定数 (default 1)"
+    )
+    p_measure.add_argument(
+        "--label",
+        type=str,
+        required=True,
+        choices=("simd-on", "simd-off"),
+        help="build profile label (compare 側で識別に使う)",
+    )
+    p_measure.add_argument(
+        "--output", type=str, required=True, help="出力 JSON path"
+    )
+
+    p_compare = sub.add_parser(
+        "compare", help="SIMD ON / OFF JSON を統合して MD + CSV 出力"
+    )
+    p_compare.add_argument("--simd-on", type=str, required=True)
+    p_compare.add_argument("--simd-off", type=str, required=True)
+    p_compare.add_argument("--output-dir", type=str, required=True)
+
+    # legacy --mode <name> も許容 (argparse subcommand を flag 互換に).
+    args = p.parse_args(argv)
+
+    if args.mode == "measure":
+        return mode_measure(args)
+    elif args.mode == "compare":
+        return mode_compare(args)
+    else:
+        p.error(f"unknown mode {args.mode!r}")
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

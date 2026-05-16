@@ -733,7 +733,8 @@ fn apply_h(
     for i in 0..n {
         let coeff = -a_t * h_x[i];
         let mask = 1usize << i;
-        // ※ inner loop は cache-blocking + SIMD 余地あり (Phase 6 で対応)
+        // i ∈ {0,1,2} は Phase 6 C2 (issue #63) で wide::f64x4 特化版に dispatch.
+        // i ≥ 3 は scalar inner loop のまま (stride ≥ 8 で SIMD 利得が小さい).
         for k in 0..dim {
             y[k] += Complex64::new(coeff, 0.0) * v[k ^ mask];
         }
@@ -754,8 +755,16 @@ fn apply_h(
   diag pass + 全 i bit-flip pass を **fuse** (cache-blocked 形)。`y_chunk`
   を L1 cache resident に保つことで後段 SIMD (C2) / cache block-fusion
   (C3) の足場とする。`feature = "rayon"` (default ON) で有効化, scalar
-  単スレッドビルドは `--no-default-features` でフォールバック。**SIMD
-  (Phase 6 C2)** / **cache block-fusion (Phase 6 C3)** は同 closure 内
+  単スレッドビルドは `--no-default-features` でフォールバック。
+- **Phase 6 C2 (issue #63) で `wide::f64x4` 経由の SIMD 特化を導入済み**。
+  `apply_h_kryanneal` の bit-flip pass の i ∈ {0,1,2} (stride 1/2/4 連続
+  アクセス領域) を `simd_kernels::bitflip_iN` に dispatch する。SIMD inner
+  kernel は `apply_h_kryanneal_serial` と `_rayon` の両 path から共通で
+  呼ばれ, rayon path では chunk_size を `SIMD_BLOCK_MAX = 8` Complex64 の
+  倍数に丸めて block-aligned 前提を満たす。i ≥ 3 は scalar inner loop の
+  まま (stride ≥ 8 で SIMD 利得が小さく cache line を跨ぐ; §12 Phase 6 C2)。
+  `feature = "simd"` (default ON) で有効化, `--no-default-features` で
+  scalar fallback。**cache block-fusion (Phase 6 C3)** は同 closure 内
   inner ループに後段で重ねる予定 (§12 Phase 6)。
 - **dim 閾値による rayon dispatch (issue #68, follow-up)**: `apply_h_kryanneal`
   と `apply_single_mode_axis_i` の **public 関数側で `dim < MIN_RAYON_DIM`
@@ -1808,9 +1817,25 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   `2·mask` block 単位の par_chunks_mut + 退化ケース `i=n-1` で split_at_mut
   ペア並列。`feature = "rayon"` (default ON, `--no-default-features` で
   scalar 単スレッドフォールバック)。
-- **SIMD (C2, issue #63, 計画)**: `std::simd` または `wide` クレートで
-  AVX2 / AVX-512 / NEON ターゲット。i=0,1,2 (stride 1/2/4) の連続アクセス
-  領域に集中して適用。C1 の chunk closure inner ループに重ねる前提。
+- **SIMD (C2, issue #63, 実装済み)**: `wide` クレート (stable Rust + 自動
+  target_feature 切替) で f64x4 (AVX2 / AVX-512 / NEON) を使い, `apply_h_kryanneal`
+  の bit-flip pass の i ∈ {0, 1, 2} (stride 1/2/4 連続アクセス領域) を
+  SIMD 特化。i ≥ 3 は scalar inner loop のまま (stride ≥ 8 で SIMD vectorize
+  の利得が小さく cache line を跨ぐ)。`feature = "simd"` (default ON,
+  `--no-default-features` で scalar fallback)。
+  SIMD inner kernel (`simd_kernels::bitflip_i0` / `_i1` / `_i2`) は
+  `apply_h_kryanneal_serial` と `apply_h_kryanneal_rayon` の両 path から
+  共通で呼ばれ, rayon path では chunk_size を `SIMD_BLOCK_MAX = 8` Complex64
+  の倍数に丸めて block-aligned 前提を満たす。SIMD 経路と scalar 経路は各
+  `y[k]` への単一 `coeff * v[k^mask] + y[k]` を独立 lane で並列実行するため
+  **両ビルドで bit-identical または rel < 1e-13** な数値結果を返す
+  (`apply_h_kryanneal_simd_matches_scalar_fuzz_100iter` テスト, src/matvec.rs)。
+  `apply_single_mode_axis_i` の SIMD 特化 (2×2 complex matmul の broadcast +
+  swizzle pattern) は follow-up issue として deferred。
+  実 SIMD 速度向上は build 時の `target-cpu` 設定に依存し, default `x86_64`
+  target では `wide` が scalar fallback を選び正確性のみ提供する
+  (`benchmarks/bench_simd_scaling.py` の本番 sweep は
+  `RUSTFLAGS="-C target-cpu=native"` を前提)。
 - **cache block-fusion (C3, issue #64, 計画)**: 大 N (≥20) で高 i の bit-flip
   pass が DRAM 律速になるのを防ぐため、高 i 群を fuse して L2 cache に
   収まるブロック単位で低 i pass と一緒に走らせる古典テクニック (qsim の

@@ -22,9 +22,16 @@
 //! ディスパッチ (macOS = Apple Accelerate, Linux = system OpenBLAS).
 //! 詳細とフォールバックビルド方法は `Cargo.toml` の `[features]` セクション参照.
 //!
-//! BLAS 経路でビルドされたかどうかは `__has_blas__: bool` 属性で参照可能.
-//! Python 側 `kryanneal.krylov` は import 時に本属性を読み, BLAS 無効ビルド
-//! (scalar fallback) の場合に `RuntimeWarning` を 1 度だけ発する.
+//! Phase 6 で rayon 並列化 (C1 / issue #62) と SIMD 特化 (C2 / issue #63) の
+//! optional feature を追加. それぞれ `rayon` / `simd` feature 経由で有効化し,
+//! いずれも default ON. `--no-default-features` で従来の scalar 単スレッド
+//! 経路に戻る (`Cargo.toml` の `[features]` 節参照).
+//!
+//! BLAS / rayon / SIMD 経路でビルドされたかどうかは `__has_blas__`,
+//! `__has_rayon__`, `__has_simd__` の各 `bool` 属性で参照可能.
+//! Python 側 `kryanneal.krylov` は import 時に `__has_blas__` を読み, BLAS
+//! 無効ビルド (scalar fallback) の場合に `RuntimeWarning` を 1 度だけ発する.
+//! `__has_rayon__` / `__has_simd__` は bench / 計測時の build profile 確認用.
 //!
 //! Python 側 (`kryanneal.krylov`) は本モジュールの import 可否で fast path を
 //! 切替える silent-fallback 設計. Rust 拡張がない環境では Python リファレンス
@@ -51,9 +58,25 @@ mod trotter;
 /// Python 側からは `_rust.__has_blas__` として参照する.
 const HAS_BLAS: bool = cfg!(feature = "blas");
 
+/// 本拡張が `rayon` feature 有効 (matvec / Trotter primitives の L2 並列化,
+/// Phase 6 C1 / issue #62) でビルドされたかを示す compile-time フラグ.
+/// Python 側からは `_rust.__has_rayon__` として参照する. bench / 計測時に
+/// build profile の確認用途.
+const HAS_RAYON: bool = cfg!(feature = "rayon");
+
+/// 本拡張が `simd` feature 有効 (`apply_h_kryanneal` の bit-flip pass i=0,1,2
+/// の `wide::f64x4` 特化, Phase 6 C2 / issue #63) でビルドされたかを示す
+/// compile-time フラグ. Python 側からは `_rust.__has_simd__` として参照する.
+/// `benchmarks/bench_simd_scaling.py` が SIMD ON/OFF build を切り分ける際の
+/// 確認用 (実 SIMD 性能向上は build 時の `target-cpu` 設定に依存する点に
+/// 注意; `wide` が target_feature を見て scalar fallback / 実 SIMD を選択する).
+const HAS_SIMD: bool = cfg!(feature = "simd");
+
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__has_blas__", HAS_BLAS)?;
+    m.add("__has_rayon__", HAS_RAYON)?;
+    m.add("__has_simd__", HAS_SIMD)?;
     m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_py, m)?)?;
     m.add_function(wrap_pyfunction!(matvec::apply_single_mode_axis_i_py, m)?)?;
     m.add_function(wrap_pyfunction!(tridiag::tridiag_eigh_py, m)?)?;

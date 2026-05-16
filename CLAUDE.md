@@ -199,6 +199,31 @@ thread pool が 2 系統並走するため運用ルール:
 - **`--no-default-features` ビルド**: scalar 単スレッド経路に戻り rayon 依存
   なし。`RAYON_NUM_THREADS` は無視される。
 
+## SIMD 経路 (Phase 6 C2, issue #63)
+
+Phase 6 C2 (issue #63) で `apply_h_kryanneal` の bit-flip pass のうち
+i ∈ {0, 1, 2} (stride 1/2/4 連続アクセス領域) を `wide::f64x4` 特化済み
+(`feature = "simd"`, default ON)。
+
+- SIMD inner kernel (`src/matvec.rs::simd_kernels::bitflip_iN`) は
+  `apply_h_kryanneal_serial` と `apply_h_kryanneal_rayon` の両 path から
+  共通で呼ばれる。per-thread 最適化なので rayon 並列化と直交する。
+- rayon path では SIMD カーネルの block-aligned 前提を満たすため
+  chunk_size を `SIMD_BLOCK_MAX = 8` Complex64 の倍数に丸める。
+- **実 SIMD 性能向上は build 時の `target-cpu` 設定に依存する**: default の
+  `x86_64` target では `wide` が scalar fallback ([f64; 4] 相当) を選び
+  正確性のみ提供する。**本番 measure は `RUSTFLAGS="-C target-cpu=native"`
+  を必ず設定する** (AVX2 / AVX-512 / NEON を `wide` の `target_feature` cfg
+  が拾えるようになる)。
+- `apply_single_mode_axis_i` の SIMD 特化 (2×2 complex matmul) は
+  follow-up issue として deferred (本 issue #63 のスコープ外)。
+- **`__has_simd__` / `__has_rayon__` フラグ**: `_rust.__has_simd__: bool` /
+  `_rust.__has_rayon__: bool` が build profile を露出する (`__has_blas__`
+  と同様)。bench スクリプト (`bench_simd_scaling.py`) はこれで build を
+  識別する。
+- **`--no-default-features` ビルド**: SIMD 依存も外れ scalar 経路に戻る。
+  `wide` クレートはリンクされない。
+
 ## 設計判断の出典 (cv_ising 流用箇所)
 
 - CFM4:2 係数: `cv_ising/rust/src/cfm4.rs` の `a_high = 1/4 + √3/6` 等

@@ -10,6 +10,7 @@
 |---|---|---|
 | `bench_per_step.py` | M2 / Trotter / Suzuki S_4 / CFM4:2 / CFM4 adaptive Richardson の per-step wall time を `(method, n)` で sweep. adaptive 経路は `n_steps_actual` (PI controller が accept した実 step 数) と `final_err_vs_ref` (高精度参照解との state 差) も併記 | Phase 1 (M2) → Phase 2 (Trotter / Suzuki S_4) → Phase 3 (CFM4:2) → Phase 4 C3 (adaptive Richardson) |
 | `bench_parallel_scaling.py` | `apply_h_kryanneal` / `apply_single_mode_axis_i` の rayon thread × N sweep. subprocess 起動時に `RAYON_NUM_THREADS` を変えながら physical core 数 vs throughput の knee (memory-bandwidth saturation point) を CSV + md に出力. BLAS thread は 1 固定で rayon 効果を分離する | Phase 6 C1 (issue #62) |
+| `bench_simd_scaling.py` | `apply_h_kryanneal` per-pass time の SIMD ON/OFF 比較. `--mode measure` を異なる build で 2 回回し (`simd-on` / `simd-off` label), `--mode compare` で speedup table を MD/CSV に統合. i=0,1,2 集中時 (h_x=[1,1,1,0,...,0]) と全 i (h_x=all-ones) の 2 モードを取る | Phase 6 C2 (issue #63) |
 | `bench_blas_compare.py` | BLAS feature on/off の同一マシン比較 | Phase 6 予定 |
 | `bench_vs_qutip.py` | QuTiP `sesolve` との fidelity vs wall time | Phase 3 以降予定 |
 
