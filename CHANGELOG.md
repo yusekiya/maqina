@@ -15,7 +15,26 @@
 
 ### Added
 
-- **issue #62 / PR (TBD)**: `src/matvec.rs` の bit-flip pass primitive を
+- **issue #68 / PR (TBD)**: Phase 6 C1 follow-up. 本番 bench (issue #62 sweep)
+  で表面化した 2 つの bias / regression を修正:
+  - `src/matvec.rs`: **dim 閾値 dispatch** (`MIN_RAYON_DIM = 1 << 17`) を
+    public `apply_h_kryanneal` / `apply_single_mode_axis_i` に追加。dim <
+    128K (= N ≤ 16) では rayon barrier overhead が単スレッド時間を超えて
+    regression (N=16 / 2 threads = 0.57× 実測) するため scalar 経路に
+    フォールバック。private `*_rayon` 関数は dispatch を含まず常に rayon
+    実行のままで, rayon-path 自体のテストは `*_rayon` 直接呼出で継続。
+  - `benchmarks/bench_parallel_scaling.py`:
+    - **`trotter_step` cell を追加** (`_rust.trotter_step_py` 1 call =
+      本番ホットパスの per-step cost). 既存 `apply_single_mode_axis_i_sum`
+      は `apply_single_mode_axis_i_py_sum_diagnostic` にリネームし
+      diagnostic 用途として残す (Python wrap の to_vec allocation overhead
+      検出用).
+    - **knee detection を max-speedup baseline + 95% plateau** に置換
+      (旧 "前点比 < 5%" はノイズや regression を knee と誤判定するため,
+      issue #62 の N=16 / 2 threads セルで顕在化). md 表に `max_speedup`
+      / `max @ threads` 列を追加.
+
+- **issue #62 / PR #67**: `src/matvec.rs` の bit-flip pass primitive を
   rayon `par_chunks_mut` 経由で L2 並列化 (Phase 6 C1).
   - `apply_h_kryanneal`: `y` を `(dim / (nth·4))` を目安に chunk 分割し,
     各 chunk closure 内で diag pass + 全 i bit-flip pass を **fuse**

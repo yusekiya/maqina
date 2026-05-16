@@ -58,13 +58,24 @@ artefact は merge 後 issue コメントとして付与する.
 ``benchmarks/results/<YYYYMMDD-HHMMSS>/`` 配下に:
 
 - ``bench_parallel_scaling.csv``: 全 trial 生データ (n, dim, threads, kernel,
-  trial, wall_sec, calls_per_sec). ``kernel`` は ``apply_h_kryanneal`` と
-  ``apply_single_mode_axis_i_sum`` (= n サイト全 i を 1 回ずつ apply する
-  Trotter step 相当の合計).
+  trial, wall_sec, calls_per_sec). ``kernel`` は次の 3 種:
+    - ``apply_h_kryanneal``: matvec primitive 単発 (Lanczos / CFM4:2 の
+      ホットパスを 1 call 単位で計測).
+    - ``trotter_step``: ``_rust.trotter_step_py`` 1 回 = full Strang Trotter
+      step (phase pass + 全 i bit-flip pass + phase pass). 本番ホットパス
+      (`trotter_step` を loop で叩く path) の per-step cost を最も忠実に表す
+      (issue #68).
+    - ``apply_single_mode_axis_i_py_sum_diagnostic``: Python 側で
+      ``for i in range(n): _rust.apply_single_mode_axis_i_py(...)`` を回した
+      合計時間. **本番ホットパスではなく diagnostic 用** (Python wrap の
+      to_vec allocation overhead 検出, issue #68). per-i wrap allocation が
+      支配するため rayon scaling は見えない. 実際のホットパスは
+      ``trotter_step`` 列を見ること.
 - ``bench_parallel_scaling.md``: 集計表 (n × threads 行列の median wall_sec /
-  speedup vs threads=1 / efficiency) と **メモリ帯域律速点** (thread 数を
-  増やしても rate が伸びなくなる knee = 連続 2 点で speedup 改善 < 5% の
-  最初の thread 数) を機械情報と合わせて記録.
+  speedup vs threads=1 / max speedup / efficiency) と **メモリ帯域律速点**
+  (knee = thread 数を増やしても speedup が max の 95% を維持する最小 thread
+  数, smoothing + plateau detection で regression に強いヒューリスティック)
+  を機械情報と合わせて記録 (issue #68 で前点比版から置換).
 """
 
 from __future__ import annotations
@@ -87,7 +98,10 @@ DEFAULT_N_VALUES = (16, 18, 20)
 DEFAULT_THREADS_LIST = (1, 2, 4, 8, 16, 32, 64)
 DEFAULT_REPEAT = 5
 DEFAULT_WARMUP = 1
-KNEE_IMPROVEMENT_THRESHOLD = 0.05  # 5% 未満の伸びを knee と判定
+# knee = max_speedup の 95% を維持する最小 thread 数 (smoothing + plateau
+# detection). 旧 "前点比 < 5%" 版は regression (例: 1→2 threads で 0.57×)
+# を knee と誤判定する問題があったため issue #68 で置換.
+KNEE_PLATEAU_TOLERANCE = 0.05  # max の 5% 下まで plateau とみなす
 
 
 @dataclasses.dataclass
@@ -158,7 +172,35 @@ def child_run(
             )
         )
 
-    # ---- apply_single_mode_axis_i, 全 i サイト合計 (Trotter step 相当) ----
+    # ---- trotter_step (full Strang step, 本番ホットパス) ----
+    # `_rust.trotter_step_py` 1 回 = phase pass + 全 i bit-flip pass + phase pass
+    # を Rust 内部で完走する. Python 越境は 1 回だけなので per-i wrap allocation
+    # overhead が混入せず, rayon scaling が公平に見える (issue #68).
+    dt = 0.01  # 任意の小値. 計測は wall time だけで数値正確性は問わない.
+    # warm up
+    for _ in range(warmup):
+        _ = _rust.trotter_step_py(psi, h_x, h_p_diag, a_t, b_t, dt, n)
+    for trial in range(repeat):
+        t0 = time.perf_counter()
+        _ = _rust.trotter_step_py(psi, h_x, h_p_diag, a_t, b_t, dt, n)
+        t1 = time.perf_counter()
+        results.append(
+            TrialResult(
+                n=n,
+                dim=dim,
+                threads=threads,
+                kernel="trotter_step",
+                trial=trial,
+                wall_sec=t1 - t0,
+            )
+        )
+
+    # ---- apply_single_mode_axis_i_py_sum_diagnostic (本番ホットパスではない) ----
+    # Python 側で per-i 呼び出しを n 回ループする. `_rust.apply_single_mode_axis_i_py`
+    # は wrap 内で `psi.to_vec()` で 16 MB allocation するため per-call cost が
+    # それで支配される. 本番 Trotter は `trotter_step` 1 call で済むので, この
+    # cell は **Python wrap allocation overhead 診断用** に残してあるだけ
+    # (kernel 名で明示, issue #68).
     # warm up
     for _ in range(warmup):
         psi_warm = psi.copy()
@@ -175,7 +217,7 @@ def child_run(
                 n=n,
                 dim=dim,
                 threads=threads,
-                kernel="apply_single_mode_axis_i_sum",
+                kernel="apply_single_mode_axis_i_py_sum_diagnostic",
                 trial=trial,
                 wall_sec=t1 - t0,
             )
@@ -339,37 +381,46 @@ def _write_md(path: Path, results: list[TrialResult], machine: dict) -> None:
             lines.append(" | ".join(row) + " |")
         lines.append("")
 
-        # メモリ帯域律速点 (knee): 連続 2 thread 間で speedup の伸びが
-        # KNEE_IMPROVEMENT_THRESHOLD 未満になる最初の thread 数.
+        # メモリ帯域律速点 (knee): max_speedup の 95% を維持する最小 thread.
+        # smoothing + plateau detection で regression に強いヒューリスティック
+        # (issue #68 で前点比 < 5% 版から置換).
         lines.append(
             f"### {kernel} — knee (memory-bandwidth saturation point, "
-            f"speedup improvement < {KNEE_IMPROVEMENT_THRESHOLD * 100:.0f}%)"
+            f"smallest threads achieving ≥ {(1 - KNEE_PLATEAU_TOLERANCE) * 100:.0f}% of max speedup)"
         )
         lines.append("")
-        lines.append("| n | knee threads | speedup at knee |")
-        lines.append("|---|---|---|")
+        lines.append(
+            "| n | max speedup | max @ threads | knee threads | speedup at knee |"
+        )
+        lines.append("|---|---|---|---|---|")
         for n in n_values:
+            # 全 thread 数の (t, speedup) を集める. base = threads=1 の median.
             base = buckets.get((n, threads_values[0], kernel))
             base_med = float(np.median(base)) if base else float("nan")
-            prev_speedup = 1.0
-            knee_threads: int | None = None
-            knee_speedup: float = float("nan")
-            for t in threads_values[1:]:
+            speedups: list[tuple[int, float]] = []
+            for t in threads_values:
                 vals = buckets.get((n, t, kernel))
                 if not vals or not np.isfinite(base_med):
                     continue
                 med = float(np.median(vals))
-                speedup = base_med / med if med > 0 else float("inf")
-                rel_improve = (speedup - prev_speedup) / max(prev_speedup, 1e-12)
-                if rel_improve < KNEE_IMPROVEMENT_THRESHOLD:
-                    knee_threads = t
-                    knee_speedup = speedup
-                    break
-                prev_speedup = speedup
-            if knee_threads is None:
-                lines.append(f"| {n} | > {threads_values[-1]} (未到達) | — |")
-            else:
-                lines.append(f"| {n} | {knee_threads} | {knee_speedup:.2f}× |")
+                if med <= 0:
+                    continue
+                speedups.append((t, base_med / med))
+            if not speedups:
+                lines.append(f"| {n} | — | — | — | — |")
+                continue
+            max_speedup = max(sp for _, sp in speedups)
+            # max を最初に達成した thread 数 (同じ max を複数の t で取った場合).
+            max_threads = min(t for t, sp in speedups if sp >= max_speedup - 1e-12)
+            # plateau = max の (1 - tolerance) 以上を維持する最小 thread.
+            plateau_floor = max_speedup * (1 - KNEE_PLATEAU_TOLERANCE)
+            knee_threads = min(t for t, sp in speedups if sp >= plateau_floor)
+            # knee における speedup (knee_threads の速度).
+            knee_speedup = next(sp for t, sp in speedups if t == knee_threads)
+            lines.append(
+                f"| {n} | {max_speedup:.2f}× | {max_threads} | "
+                f"{knee_threads} | {knee_speedup:.2f}× |"
+            )
         lines.append("")
 
     path.write_text("\n".join(lines))
