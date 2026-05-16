@@ -428,7 +428,24 @@ dt Suzuki S_4 4 次 Trotter, §5.3) を追加, Phase 3 で `method="cfm4"`
 (固定 dt CFM4:2 commutator-free Magnus, §5.3) を追加, Phase 4 で
 `method="cfm4_adaptive_richardson"` (step-doubling Richardson 推定子 +
 PI controller, §5.3) を追加. それ以外は `NotImplementedError`.
-`save_tlist` / `observables` 引数は Phase 5 以降で有効化する.
+`observables` / `save_tlist` / `store_states` 引数は Phase 5 (issue #47)
+で有効化された. 仕様:
+
+- **`save_tlist=None` (デフォルト) = 最節約モード**: `observables` /
+  `store_states` の指定があると `ValueError` (silent 無視は debug 罠に
+  なるため明示的に弾く). `QuantumResult.times = states = None`,
+  `observables_history = {}`. ただし `probabilities = |psi_final|^2` は
+  どの経路でも常に eager 計算して返す (最終状態の付随情報).
+- **`save_tlist=array`**: 観測時刻軸として採用. 固定 dt 経路は step
+  boundary 列に `save_tlist` 時刻を merge して uneven な `dt` で進み,
+  adaptive 経路は PI controller の `dt` を `next_save_target - t` で
+  クランプして当該時刻を厳密に踏む. `observables` を併用すれば各
+  `save_tlist[i]` 時刻で `obs.expectation(psi)` を評価して
+  `observables_history[name]` に shape `(K,)` で格納し, `store_states=True`
+  なら `states` shape `(K, 2**n)` complex128 で ψ を保存する.
+- 検証: `save_tlist` は dtype float64, 1D, monotonic non-decreasing,
+  範囲 `[t0, t1]`, 非空. `observables` は `dict[str, Observable]` で
+  各 `Observable.diag` 長が `2**n` と整合.
 
 `method="trotter"` / `method="trotter_suzuki4"` は Lanczos を使わないため,
 コンストラクタ引数 `m` / `krylov_tol` は無視される (`"m2"` / `"cfm4"` /
@@ -452,17 +469,25 @@ class QuantumResult:
     n_matvec: int                         # 累積 matvec 呼出
 ```
 
-Phase 1 subset: 本リリース (C6) では fixed-step M2 driver のみが
-提供されるため, 以下の最小フィールドのみを実装する:
+Phase 1-5 subset (issue #47 で Phase 5 拡張完了): 現在の実装は以下のフィールド
+構成. Phase 1 〜 4 のフィールドに加え, Phase 5 で `times` / `states` /
+`probabilities` を末尾に default 付きで追加 (backward compatible).
 
 ```python
 @dataclass(frozen=True, eq=False)
 class QuantumResult:
     psi_final: np.ndarray                 # shape (2**n,) complex128
-    t_history: np.ndarray | None          # 観測量を記録した時刻列
+    t_history: np.ndarray | None          # save_tlist 経路では times と同値
     observables_history: dict[str, np.ndarray]  # name -> shape (K,) 実数
     n_steps: int                          # 実行 step 数
     n_matvec: int                         # 累積 matvec 呼出
+    success: bool = True                  # Phase 4: 駆動成功フラグ
+    method: str = "m2"                    # Phase 4: 実行 propagator 名
+    n_steps_actual: int | None = None     # Phase 4: adaptive 経路の実 step 数
+    m_eff_stats: dict[str, int | float] | None = None  # Phase 4 follow-up
+    times: np.ndarray | None = None       # Phase 5: 観測時刻軸 (save_tlist)
+    states: np.ndarray | None = None      # Phase 5: store_states=True で ψ
+    probabilities: np.ndarray | None = None  # Phase 5: |psi_final|^2 (常時)
 
 @dataclass(frozen=True, eq=False)
 class Trajectory:
@@ -484,13 +509,14 @@ class Trajectory:
   Strang を 5 回呼ぶので Strang 経路の dim-walk 見積もりを 5 倍する;
   issue #22).
 
-追加予定のフィールド:
+追加履歴:
 
-- `times` / `states` (`store_states` / `store_times` 用) → `AnnealingSimulator`
-  と一緒に Phase 5 で追加 (parent issue #1 の Out of scope 表)
 - `success` / `method` / `n_steps_actual` (adaptive driver 用) → Phase 4 で
-  Richardson / M2 embedded 経路と一緒に追加
-- `probabilities` (`|psi_final|^2` の caching) → 必要性が出た時点で追加可能
+  Richardson / M2 embedded 経路と一緒に追加 (済)
+- `m_eff_stats` → Phase 4 follow-up (issue #52 A) で追加 (済)
+- `times` / `states` / `probabilities` → Phase 5 (issue #47) で追加 (済)
+- `AnnealingSimulator` step-wise API → 将来検討 (parent issue #1 の Out of
+  scope 表)
 
 `eq=False` は `IsingProblem` と同じ理由 (ndarray フィールドの既定 `__eq__`
 が `ValueError` になる)。
@@ -1684,9 +1710,15 @@ U(dt) ≈ phase_p(dt/2) · (Π_i R_i(dt)) · phase_p(dt/2)
 
 ### Phase 5: Simulator & Observables (~v0.5)
 
-- `AnnealingSimulator`
-- `Observable` クラス、観測量時系列記録
-- `instantaneous_eigenstates`
+- `Observable` クラス, Z 基底対角 Hermitian 観測量 (issue #46, 済)
+- `QuantumAnnealer.run` の `observables` / `save_tlist` / `store_states`
+  引数を有効化 (issue #47, 済). `QuantumResult` に `times` / `states` /
+  `probabilities` フィールドを追加. 詳細は §4.4. `save_tlist=None` は
+  最節約モードで状態保存なし; 非 None で指定時刻を厳密に踏み (固定 dt:
+  step boundary に merge, adaptive: PI dt クランプ), 観測量時系列と
+  (オプションで) ψ スナップショットを記録する.
+- `AnnealingSimulator` step-wise API (将来検討)
+- `instantaneous_eigenstates` (将来検討)
 
 ### Phase 6: 並列化 + 仕上げ (~v0.6)
 

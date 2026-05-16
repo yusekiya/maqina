@@ -41,11 +41,152 @@ from __future__ import annotations
 
 import importlib
 from types import ModuleType
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
 from kryanneal.schedule import Schedule
+
+if TYPE_CHECKING:
+    from kryanneal.observable import Observable
+
+
+# Phase 5 (issue #47): driver が ``save_tlist`` 経路で組み立てる中間
+# snapshot 構造. ``observables_history`` の value は shape ``(K,)`` float64,
+# ``states`` は ``store_states=True`` のとき shape ``(K, dim)`` complex128,
+# それ以外で ``None``. ``times`` は shape ``(K,)`` float64 で
+# ``save_tlist`` と同一の値. ``save_tlist=None`` 経路ではそもそも driver
+# が ``snapshot=None`` を返すので本辞書は組み立てられない.
+SnapshotData = dict[str, "np.ndarray | dict[str, np.ndarray] | None"]
+
+
+# 時間 merge 用の floor epsilon. ``np.unique`` だけだと
+# step boundary と save_tlist の浮動小数点誤差で「ほぼ同じ時刻」が 2 点に
+# 分離してしまい不要に小さい dt step を作る. ``merge_tol`` で吸収する.
+# 1e-12 は driver の数値精度 (krylov_tol default ``1e-12``) と整合させた
+# 経験値で, schedule.coeffs_at 評価の浮動小数点丸めより十分大きく取る.
+_MERGE_TOL: float = 1e-12
+
+
+class _SnapshotRecorder:
+    """``save_tlist`` 経路で driver が各 step boundary 後に呼ぶ recorder.
+
+    ``save_tlist`` の各点に ψ が到達した瞬間 (driver が boundary をピタリ
+    踏むよう dt を merge / clamp する責務を負う) を ``record(t, psi)`` で
+    通知する. recorder は内部で ``save_tlist[next_index]`` と ``t`` を
+    比較し, 一致したら ``observables`` の expectation と (``store_states``
+    なら) ψ を保存する.
+
+    Parameters
+    ----------
+    save_tlist
+        観測時刻列. shape ``(K,)`` float64, monotonic increasing, ``[t0,
+        t1]`` の範囲. ``QuantumAnnealer.run`` 側で検証済の前提.
+    observables
+        ``{name: Observable}`` の dict もしくは ``None``. 各 ``t = save_tlist[i]``
+        で ``obs.expectation(psi)`` を評価して ``observables_history[name][i]``
+        に書き込む.
+    store_states
+        ``True`` で ``states[i, :] = psi`` を記録する.
+    dim
+        Hilbert 空間次元 ``2**n``. ``states`` の幅を決める.
+
+    Notes
+    -----
+    driver が ``t`` を厳密に save_tlist[next_index] で踏む実装責務がある
+    (固定 dt: step boundary merge, adaptive: dt clamp). recorder は
+    ``abs(t - save_tlist[next_index]) <= _MERGE_TOL`` で一致判定し,
+    一致したら index を進める. 一致しなければ何もしない (driver が将来
+    target を踏むまで待つ).
+    """
+
+    def __init__(
+        self,
+        save_tlist: np.ndarray,
+        observables: "dict[str, Observable] | None",
+        store_states: bool,
+        dim: int,
+    ) -> None:
+        K = int(save_tlist.shape[0])
+        self._save_tlist = save_tlist
+        self._next_idx = 0
+        self._observables = observables
+        if observables is None or len(observables) == 0:
+            self._obs_history: dict[str, np.ndarray] = {}
+        else:
+            self._obs_history = {
+                name: np.empty(K, dtype=np.float64) for name in observables
+            }
+        self._states: np.ndarray | None = (
+            np.empty((K, dim), dtype=np.complex128) if store_states else None
+        )
+
+    def record(self, t: float, psi: np.ndarray) -> None:
+        """``t == save_tlist[next_idx]`` のとき観測量と ψ を保存する.
+
+        複数の target に同時にヒットすることは無い (driver が boundary に
+        必ず 1 つずつ揃えるので) が, 念のため while loop でドレインする
+        (浮動小数点丸めで連続する 2 target が同じ ``t`` に bucket され,
+        merge_tol で同一視されるケースのみ).
+        """
+        while (
+            self._next_idx < self._save_tlist.shape[0]
+            and abs(t - float(self._save_tlist[self._next_idx])) <= _MERGE_TOL
+        ):
+            idx = self._next_idx
+            if self._observables:
+                for name, obs in self._observables.items():
+                    self._obs_history[name][idx] = obs.expectation(psi)
+            if self._states is not None:
+                self._states[idx, :] = psi
+            self._next_idx += 1
+
+    def finalize(self) -> SnapshotData:
+        """``QuantumResult`` 構築用の dict を返す.
+
+        ``times`` は ``save_tlist`` をそのまま返す (driver が踏む順序と同じ
+        なので copy 不要だが numpy 内部で view を渡しても良い).
+        """
+        return {
+            "times": np.ascontiguousarray(self._save_tlist, dtype=np.float64),
+            "states": self._states,
+            "observables_history": self._obs_history,
+        }
+
+
+def _merge_save_tlist_with_uniform(
+    t0: float, t1: float, n_steps: int, save_tlist: np.ndarray
+) -> np.ndarray:
+    """``[t0, t1]`` の等間隔 boundary 列に ``save_tlist`` の時刻を merge する.
+
+    固定 dt 経路で ``save_tlist`` 時刻をピタリ踏むため, 等間隔 step
+    boundary ``[t0, t0+dt, ..., t1]`` と ``save_tlist`` の union を取り
+    sort + dedupe して uneven な boundary 列を返す. 浮動小数点誤差で
+    「ほぼ同じ時刻」が 2 点に分離するのを避けるため ``_MERGE_TOL``
+    で同一視する.
+
+    Parameters
+    ----------
+    t0, t1
+        積分区間.
+    n_steps
+        要求 step 数 (uniform 部分).
+    save_tlist
+        観測時刻列. shape ``(K,)`` float64, monotonic, ``[t0, t1]`` 範囲.
+
+    Returns
+    -------
+    np.ndarray
+        shape ``(M,)`` float64 の uneven boundary 列. 先頭が ``t0``, 末尾が
+        ``t1``, ``save_tlist`` の各点を含む. ``M >= n_steps + 1``.
+    """
+    uniform = np.linspace(t0, t1, int(n_steps) + 1, dtype=np.float64)
+    merged = np.concatenate([uniform, save_tlist.astype(np.float64, copy=False)])
+    merged.sort()
+    # ``np.unique`` だと O(M log M) で安定 sort 済 array に対しても sort し直すが,
+    # ここでは sort 済前提なので diff > tol の点だけ残す形で線形に dedupe する.
+    keep = np.concatenate([[True], np.diff(merged) > _MERGE_TOL])
+    return merged[keep]
 
 
 def _try_import_rust() -> ModuleType | None:
@@ -66,6 +207,7 @@ def _try_import_rust() -> ModuleType | None:
 _rust_mod: ModuleType | None = _try_import_rust()
 
 __all__ = [
+    "SnapshotData",
     "evolve_schedule_adaptive_m2",
     "evolve_schedule_adaptive_richardson",
     "evolve_schedule_cfm4",
@@ -319,13 +461,21 @@ def evolve_schedule_m2(
     *,
     m: int = 24,
     krylov_tol: float = 1e-12,
-) -> tuple[np.ndarray, int]:
+    observables: "dict[str, Observable] | None" = None,
+    save_tlist: np.ndarray | None = None,
+    store_states: bool = False,
+) -> tuple[np.ndarray, int, SnapshotData | None]:
     """固定 dt = (t1 - t0) / n_steps の M2 中点則ドライバ.
 
     各 step で ``schedule.coeffs_at(t + dt/2)`` を評価して
     ``m2_midpoint_step`` を呼ぶ. Rust 拡張が import 済なら
     ``_rust.m2_midpoint_step_py`` を, そうでなければ Python リファレンス
     ``_python_m2_step`` を使う (silent fallback).
+
+    ``save_tlist`` 非 None のとき (Phase 5, issue #47) step boundary 列に
+    ``save_tlist`` の各時刻を ``_merge_save_tlist_with_uniform`` で merge
+    し, uneven な ``dt`` で進めて該当時刻を厳密に踏む. ``save_tlist=None``
+    (default, 最節約モード) では従来通り uniform ``dt`` で進む.
 
     Parameters
     ----------
@@ -341,18 +491,37 @@ def evolve_schedule_m2(
     t0, t1
         積分区間 ``[t0, t1]``. ``t1 > t0`` を要求.
     n_steps
-        固定 step 数 (``n_steps >= 1``).
+        固定 step 数 (``n_steps >= 1``). ``save_tlist`` 非 None のとき
+        実 step 数は ``n_steps + (save_tlist のうち uniform boundary と
+        被らない点の数)`` になる (uneven dt).
     m
         Krylov 部分空間次元.
     krylov_tol
         Lanczos の β 打切り閾値.
+    observables
+        Phase 5 (issue #47) 追加. ``{name: Observable}`` dict もしくは
+        ``None``. ``save_tlist`` 非 None のとき, 各 ``save_tlist[i]`` 時刻で
+        ``obs.expectation(psi)`` を評価して snapshot に蓄積する.
+        ``save_tlist=None`` のとき silent 無視 (最節約モード).
+    save_tlist
+        Phase 5 (issue #47) 追加. shape ``(K,)`` float64 の観測時刻列.
+        monotonic increasing, ``[t0, t1]`` の範囲. 非 None のとき step
+        boundary に merge し snapshot 記録を有効化する. ``None`` (default,
+        最節約モード) で snapshot 無し.
+    store_states
+        Phase 5 (issue #47) 追加. ``True`` かつ ``save_tlist`` 非 None で,
+        snapshot 時刻に ψ を保存する. ``save_tlist=None`` のとき無視.
 
     Returns
     -------
     psi_final : np.ndarray
         shape ``(2**n,)`` complex128 の終端状態.
     n_matvec : int
-        累積 matvec 呼出回数 (Lanczos の ``m`` 回 × ``n_steps`` の見積もり).
+        累積 matvec 呼出回数 (Lanczos の ``m`` 回 × 実 step 数の見積もり).
+    snapshot : SnapshotData | None
+        ``save_tlist=None`` のとき ``None``. 非 None のとき dict
+        ``{"times": np.ndarray, "observables_history": dict[str, np.ndarray],
+        "states": np.ndarray | None}``.
 
     Raises
     ------
@@ -364,14 +533,35 @@ def evolve_schedule_m2(
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
 
-    dt = (float(t1) - float(t0)) / int(n_steps)
     psi = np.ascontiguousarray(psi0, dtype=np.complex128)
     h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
+    dim = int(psi.shape[0])
+
+    recorder = (
+        _SnapshotRecorder(save_tlist, observables, store_states, dim)
+        if save_tlist is not None
+        else None
+    )
+
+    # ``save_tlist`` 非 None のときは step boundary を merge して uneven 列に.
+    if save_tlist is not None:
+        boundaries = _merge_save_tlist_with_uniform(t0, t1, n_steps, save_tlist)
+        assert recorder is not None  # ty narrowing
+        recorder.record(float(boundaries[0]), psi)
+    else:
+        # Phase 1-4 互換: uniform 列を生成して同じ loop で扱う.
+        boundaries = np.linspace(
+            float(t0), float(t1), int(n_steps) + 1, dtype=np.float64
+        )
 
     rust_mod = _rust_mod
-    for k in range(n_steps):
-        t_mid = t0 + (k + 0.5) * dt
+    n_substeps = int(boundaries.shape[0]) - 1
+    for k in range(n_substeps):
+        t_left = float(boundaries[k])
+        t_right = float(boundaries[k + 1])
+        dt_k = t_right - t_left
+        t_mid = 0.5 * (t_left + t_right)
         a_mid, b_mid = schedule.coeffs_at(t_mid)
         if rust_mod is not None:
             psi = rust_mod.m2_midpoint_step_py(
@@ -380,7 +570,7 @@ def evolve_schedule_m2(
                 h_p_diag_arr,
                 a_mid,
                 b_mid,
-                dt,
+                dt_k,
                 m,
                 krylov_tol,
             )
@@ -391,13 +581,16 @@ def evolve_schedule_m2(
                 h_p_diag_arr,
                 a_mid,
                 b_mid,
-                dt,
+                dt_k,
                 m,
                 krylov_tol,
             )
+        if recorder is not None:
+            recorder.record(t_right, psi)
 
-    n_matvec = int(n_steps) * int(m)
-    return psi, n_matvec
+    n_matvec = int(n_substeps) * int(m)
+    snapshot = recorder.finalize() if recorder is not None else None
+    return psi, n_matvec, snapshot
 
 
 def _python_trotter_step(
@@ -498,7 +691,11 @@ def evolve_schedule_trotter(
     t0: float,
     t1: float,
     n_steps: int,
-) -> tuple[np.ndarray, int]:
+    *,
+    observables: "dict[str, Observable] | None" = None,
+    save_tlist: np.ndarray | None = None,
+    store_states: bool = False,
+) -> tuple[np.ndarray, int, SnapshotData | None]:
     """固定 dt = (t1 - t0) / n_steps の Strang Trotter ドライバ.
 
     各 step で ``schedule.coeffs_at(t + dt/2)`` を評価して
@@ -548,15 +745,33 @@ def evolve_schedule_trotter(
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
 
-    dt = (float(t1) - float(t0)) / int(n_steps)
     psi = np.ascontiguousarray(psi0, dtype=np.complex128)
     h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     n = int(h_x_arr.shape[0])
+    dim = int(psi.shape[0])
+
+    recorder = (
+        _SnapshotRecorder(save_tlist, observables, store_states, dim)
+        if save_tlist is not None
+        else None
+    )
+    if save_tlist is not None:
+        boundaries = _merge_save_tlist_with_uniform(t0, t1, n_steps, save_tlist)
+        assert recorder is not None  # ty narrowing
+        recorder.record(float(boundaries[0]), psi)
+    else:
+        boundaries = np.linspace(
+            float(t0), float(t1), int(n_steps) + 1, dtype=np.float64
+        )
 
     rust_mod = _rust_mod
-    for k in range(n_steps):
-        t_mid = t0 + (k + 0.5) * dt
+    n_substeps = int(boundaries.shape[0]) - 1
+    for k in range(n_substeps):
+        t_left = float(boundaries[k])
+        t_right = float(boundaries[k + 1])
+        dt_k = t_right - t_left
+        t_mid = 0.5 * (t_left + t_right)
         a_mid, b_mid = schedule.coeffs_at(t_mid)
         if rust_mod is not None:
             psi = rust_mod.trotter_step_py(
@@ -565,7 +780,7 @@ def evolve_schedule_trotter(
                 h_p_diag_arr,
                 a_mid,
                 b_mid,
-                dt,
+                dt_k,
                 n,
             )
         else:
@@ -575,11 +790,14 @@ def evolve_schedule_trotter(
                 h_p_diag_arr,
                 a_mid,
                 b_mid,
-                dt,
+                dt_k,
             )
+        if recorder is not None:
+            recorder.record(t_right, psi)
 
-    n_matvec = int(n_steps) * (n + 1)
-    return psi, n_matvec
+    n_matvec = int(n_substeps) * (n + 1)
+    snapshot = recorder.finalize() if recorder is not None else None
+    return psi, n_matvec, snapshot
 
 
 def _python_trotter_suzuki4_step(
@@ -662,7 +880,11 @@ def evolve_schedule_trotter_suzuki4(
     t0: float,
     t1: float,
     n_steps: int,
-) -> tuple[np.ndarray, int]:
+    *,
+    observables: "dict[str, Observable] | None" = None,
+    save_tlist: np.ndarray | None = None,
+    store_states: bool = False,
+) -> tuple[np.ndarray, int, SnapshotData | None]:
     """固定 dt = (t1 - t0) / n_steps の Suzuki S_4 Trotter ドライバ.
 
     各 step で 5 sub-step の中点 ``t + offset_k · dt`` (``offset_k ∈ [p/2,
@@ -711,20 +933,37 @@ def evolve_schedule_trotter_suzuki4(
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
 
-    dt = (float(t1) - float(t0)) / int(n_steps)
     psi = np.ascontiguousarray(psi0, dtype=np.complex128)
     h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     n = int(h_x_arr.shape[0])
+    dim = int(psi.shape[0])
     offsets = np.asarray(_SUZUKI4_MID_OFFSETS, dtype=np.float64)
 
+    recorder = (
+        _SnapshotRecorder(save_tlist, observables, store_states, dim)
+        if save_tlist is not None
+        else None
+    )
+    if save_tlist is not None:
+        boundaries = _merge_save_tlist_with_uniform(t0, t1, n_steps, save_tlist)
+        assert recorder is not None  # ty narrowing
+        recorder.record(float(boundaries[0]), psi)
+    else:
+        boundaries = np.linspace(
+            float(t0), float(t1), int(n_steps) + 1, dtype=np.float64
+        )
+
     rust_mod = _rust_mod
-    for k in range(n_steps):
-        t_step_start = t0 + k * dt
+    n_substeps = int(boundaries.shape[0]) - 1
+    for k in range(n_substeps):
+        t_left = float(boundaries[k])
+        t_right = float(boundaries[k + 1])
+        dt_k = t_right - t_left
         a_list = np.empty(5, dtype=np.float64)
         b_list = np.empty(5, dtype=np.float64)
         for j in range(5):
-            t_mid = t_step_start + float(offsets[j]) * dt
+            t_mid = t_left + float(offsets[j]) * dt_k
             a_mid, b_mid = schedule.coeffs_at(t_mid)
             a_list[j] = a_mid
             b_list[j] = b_mid
@@ -735,7 +974,7 @@ def evolve_schedule_trotter_suzuki4(
                 h_p_diag_arr,
                 a_list,
                 b_list,
-                dt,
+                dt_k,
                 n,
             )
         else:
@@ -745,11 +984,14 @@ def evolve_schedule_trotter_suzuki4(
                 h_p_diag_arr,
                 a_list,
                 b_list,
-                dt,
+                dt_k,
             )
+        if recorder is not None:
+            recorder.record(t_right, psi)
 
-    n_matvec = int(n_steps) * 5 * (n + 1)
-    return psi, n_matvec
+    n_matvec = int(n_substeps) * 5 * (n + 1)
+    snapshot = recorder.finalize() if recorder is not None else None
+    return psi, n_matvec, snapshot
 
 
 def _python_cfm4_step(
@@ -843,7 +1085,10 @@ def evolve_schedule_cfm4(
     *,
     m: int = 24,
     krylov_tol: float = 1e-12,
-) -> tuple[np.ndarray, int]:
+    observables: "dict[str, Observable] | None" = None,
+    save_tlist: np.ndarray | None = None,
+    store_states: bool = False,
+) -> tuple[np.ndarray, int, SnapshotData | None]:
     """固定 dt = (t1 - t0) / n_steps の CFM4:2 ドライバ.
 
     各 step でガウス-ルジャンドル 2 点ノード ``t + c_1·dt`` / ``t + c_2·dt``
@@ -895,16 +1140,33 @@ def evolve_schedule_cfm4(
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
 
-    dt = (float(t1) - float(t0)) / int(n_steps)
     psi = np.ascontiguousarray(psi0, dtype=np.complex128)
     h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
+    dim = int(psi.shape[0])
+
+    recorder = (
+        _SnapshotRecorder(save_tlist, observables, store_states, dim)
+        if save_tlist is not None
+        else None
+    )
+    if save_tlist is not None:
+        boundaries = _merge_save_tlist_with_uniform(t0, t1, n_steps, save_tlist)
+        assert recorder is not None  # ty narrowing
+        recorder.record(float(boundaries[0]), psi)
+    else:
+        boundaries = np.linspace(
+            float(t0), float(t1), int(n_steps) + 1, dtype=np.float64
+        )
 
     rust_mod = _rust_mod
-    for k in range(n_steps):
-        t_step_start = t0 + k * dt
-        t_s1 = t_step_start + _CFM4_C1 * dt
-        t_s2 = t_step_start + _CFM4_C2 * dt
+    n_substeps = int(boundaries.shape[0]) - 1
+    for k in range(n_substeps):
+        t_left = float(boundaries[k])
+        t_right = float(boundaries[k + 1])
+        dt_k = t_right - t_left
+        t_s1 = t_left + _CFM4_C1 * dt_k
+        t_s2 = t_left + _CFM4_C2 * dt_k
         a_s1, b_s1 = schedule.coeffs_at(t_s1)
         a_s2, b_s2 = schedule.coeffs_at(t_s2)
         if rust_mod is not None:
@@ -919,7 +1181,7 @@ def evolve_schedule_cfm4(
                 b_s1,
                 a_s2,
                 b_s2,
-                dt,
+                dt_k,
                 m,
                 krylov_tol,
             )
@@ -932,13 +1194,16 @@ def evolve_schedule_cfm4(
                 b_s1,
                 a_s2,
                 b_s2,
-                dt,
+                dt_k,
                 m,
                 krylov_tol,
             )
+        if recorder is not None:
+            recorder.record(t_right, psi)
 
-    n_matvec = int(n_steps) * 2 * int(m)
-    return psi, n_matvec
+    n_matvec = int(n_substeps) * 2 * int(m)
+    snapshot = recorder.finalize() if recorder is not None else None
+    return psi, n_matvec, snapshot
 
 
 def _python_cfm4_step_with_m2_estimate(
@@ -1512,8 +1777,10 @@ def evolve_schedule_adaptive_richardson(
     growth_max: float = 4.0,
     max_rejects: int = 50,
     richardson_extrapolate: bool = False,
+    observables: "dict[str, Observable] | None" = None,
     save_tlist: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray]:
+    store_states: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, SnapshotData | None]:
     """CFM4:2 + step-doubling Richardson 推定子による adaptive dt ドライバ.
 
     PI controller (``docs/design.md`` §5.3) で local error を ``tol_step``
@@ -1542,8 +1809,20 @@ def evolve_schedule_adaptive_richardson(
     richardson_extrapolate
         ``True`` で外挿後の ``ψ_acc`` を accept 時の状態とする
         (実効 6 次精度; 既定 ``False``).
+    observables
+        Phase 5 (issue #47) 追加. ``{name: Observable}`` dict もしくは
+        ``None``. ``save_tlist`` 非 None のとき各 ``save_tlist[i]`` 時刻で
+        ``obs.expectation(psi)`` を評価する. ``save_tlist=None`` で silent
+        無視 (最節約モード).
     save_tlist
-        Phase 5 予約 (現状 ``None`` のみ受付け).
+        Phase 5 (issue #47) 追加. shape ``(K,)`` float64 の観測時刻列.
+        monotonic increasing, ``[t0, t1]`` の範囲. 非 None のとき adaptive
+        の dt を ``next_save_target - t`` でクランプして当該時刻を厳密に
+        踏み, snapshot 記録を有効化する. ``None`` (default, 最節約モード)
+        で snapshot 無し.
+    store_states
+        Phase 5 (issue #47) 追加. ``True`` かつ ``save_tlist`` 非 None で,
+        snapshot 時刻に ψ を保存する.
 
     Returns
     -------
@@ -1563,16 +1842,16 @@ def evolve_schedule_adaptive_richardson(
         するため. β_k 早期打切により ``m_eff < m`` になる step では
         ``m_eff_sum`` が ``6m`` 未満になり, ``n_matvec`` 推定 (現状
         ``n_steps_actual · 6m``) より実コストは小さい.
+    snapshot : SnapshotData | None
+        ``save_tlist=None`` のとき ``None``. 非 None のとき dict
+        ``{"times": np.ndarray, "observables_history": dict[str, np.ndarray],
+        "states": np.ndarray | None}``.
 
     Raises
     ------
-    ValueError, NotImplementedError, RuntimeError
+    ValueError, RuntimeError
         ``evolve_schedule_adaptive_m2`` と同様.
     """
-    if save_tlist is not None:
-        raise NotImplementedError(
-            "save_tlist is reserved for Phase 5; pass None in Phase 4."
-        )
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
     if not (dt0 > 0.0 and dt_min > 0.0 and dt_min <= dt0):
@@ -1595,6 +1874,23 @@ def evolve_schedule_adaptive_richardson(
     psi = np.ascontiguousarray(psi0, dtype=np.complex128)
     h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
+    dim = int(psi.shape[0])
+
+    # Phase 5 (issue #47): save_tlist 経路で snapshot を記録する.
+    # adaptive driver では PI controller の dt を ``next_save_target - t`` で
+    # クランプして save_tlist の各点を厳密に踏ませる. 踏んだ瞬間に recorder
+    # が ``observables`` の評価と (``store_states`` なら) ψ の保存を行う.
+    recorder = (
+        _SnapshotRecorder(save_tlist, observables, store_states, dim)
+        if save_tlist is not None
+        else None
+    )
+    save_targets = (
+        np.ascontiguousarray(save_tlist, dtype=np.float64)
+        if save_tlist is not None
+        else None
+    )
+    next_save_idx = 0
 
     rust_mod = _rust_mod
     t = float(t0)
@@ -1610,8 +1906,25 @@ def evolve_schedule_adaptive_richardson(
     # cumulative cost の観点では sunk だが本 history には含めない
     # (PI accept ステップ数とインデックスを揃える設計).
     m_eff_hist: list[int] = []
+    # 初期時刻 ``t0`` が ``save_tlist[0]`` と一致するなら先頭 snapshot を取る.
+    if recorder is not None and save_targets is not None:
+        recorder.record(t, psi)
+        while (
+            next_save_idx < save_targets.shape[0]
+            and abs(t - float(save_targets[next_save_idx])) <= _MERGE_TOL
+        ):
+            next_save_idx += 1
     while t < t_end:
         dt_try = min(dt, t_end - t)
+        # save_tlist の次 target で dt をクランプ. クランプしたフラグを残し,
+        # accept されたときその時刻で recorder.record を呼ぶ.
+        clamped_to_target = False
+        if save_targets is not None and next_save_idx < save_targets.shape[0]:
+            target = float(save_targets[next_save_idx])
+            remaining = target - t
+            if 0.0 < remaining <= dt_try + _MERGE_TOL:
+                dt_try = remaining
+                clamped_to_target = True
         half_dt = 0.5 * dt_try
         # full-step ノード (dt) と half-step×2 ノード (dt/2 × 2) を pre-eval.
         t_s1_full = t + _CFM4_C1 * dt_try
@@ -1660,6 +1973,17 @@ def evolve_schedule_adaptive_richardson(
             dt_hist.append(dt_try)
             m_eff_hist.append(int(m_eff_sum))
             n_consecutive_rejects = 0
+            # save_tlist 経路: target にピタリ到達したら snapshot を取り
+            # next_save_idx を進める. ``clamped_to_target`` で意図的に
+            # 縮めた step だけが該当 (target を超えるケースは無い).
+            if recorder is not None and save_targets is not None:
+                if clamped_to_target:
+                    recorder.record(t, psi)
+                    while (
+                        next_save_idx < save_targets.shape[0]
+                        and abs(t - float(save_targets[next_save_idx])) <= _MERGE_TOL
+                    ):
+                        next_save_idx += 1
             dt = _pi_dt_next(
                 dt_try,
                 err,
@@ -1681,10 +2005,12 @@ def evolve_schedule_adaptive_richardson(
                 )
             dt = max(dt_try * 0.5, dt_min)
 
+    snapshot = recorder.finalize() if recorder is not None else None
     return (
         psi,
         np.asarray(t_hist, dtype=np.float64),
         np.asarray(dt_hist, dtype=np.float64),
         int(n_rejects),
         np.asarray(m_eff_hist, dtype=np.int64),
+        snapshot,
     )
