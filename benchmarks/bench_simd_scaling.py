@@ -31,16 +31,23 @@ parent/child 自動切替はせず, **操作員が異なる build で 2 回 meas
         --output benchmarks/results/bench_simd/simd-on.json
 
     # 2. SIMD OFF (rayon + blas のみ, simd feature off) で measure
-    #    `MATURIN_PEP517_ARGS` で feature を渡し直す (default を上書き).
-    MATURIN_PEP517_ARGS="--no-default-features --features blas,rayon" \\
-        RUSTFLAGS="-C target-cpu=native" \\
-        uv run maturin develop --uv --release
+    #    `maturin develop` は PEP 517 backend を介さず cargo を直接呼ぶので,
+    #    `MATURIN_PEP517_ARGS` は **無視される** 点に注意. feature 制御は
+    #    `maturin develop --no-default-features --features ...` で直接渡す.
+    #    `extension-module` は pyproject.toml の `[tool.maturin] features` 経由で
+    #    通常自動付与されるが, `--features` を明示すると上書きされるため一緒に
+    #    渡し直す (これがないと libpython リンクエラーになる).
+    RUSTFLAGS="-C target-cpu=native" \\
+        uv run maturin develop --uv --release \\
+        --no-default-features --features extension-module,blas,rayon
+    # build flag 確認 (期待: __has_simd__ = False)
+    uv run python -c "from kryanneal import _rust; print('simd:', _rust.__has_simd__)"
     uv run python benchmarks/bench_simd_scaling.py \\
         --mode measure --label simd-off \\
         --output benchmarks/results/bench_simd/simd-off.json
 
     # 3. SIMD ON build に戻して compare → markdown + CSV 出力
-    uv run maturin develop --uv --release
+    RUSTFLAGS="-C target-cpu=native" uv run maturin develop --uv --release
     uv run python benchmarks/bench_simd_scaling.py \\
         --mode compare \\
         --simd-on benchmarks/results/bench_simd/simd-on.json \\
@@ -219,7 +226,9 @@ def _summarize_median(trials: list[dict[str, Any]]) -> dict[tuple[int, str], flo
     """(n, mode) ごとの median wall_sec を返す."""
     buckets: dict[tuple[int, str], list[float]] = {}
     for r in trials:
-        buckets.setdefault((int(r["n"]), str(r["mode"])), []).append(float(r["wall_sec"]))
+        buckets.setdefault((int(r["n"]), str(r["mode"])), []).append(
+            float(r["wall_sec"])
+        )
     return {key: statistics.median(vs) for key, vs in buckets.items()}
 
 
@@ -255,7 +264,7 @@ def mode_compare(args: argparse.Namespace) -> int:
     csv_path = out_dir / "bench_simd_scaling.csv"
     with csv_path.open("w", encoding="utf-8") as f:
         f.write("n,dim,mode,simd_off_median_sec,simd_on_median_sec,speedup\n")
-        for (n, mode) in keys:
+        for n, mode in keys:
             on = on_medians.get((n, mode))
             off = off_medians.get((n, mode))
             speedup = (off / on) if (on and off and on > 0) else None
@@ -290,7 +299,7 @@ def mode_compare(args: argparse.Namespace) -> int:
         "speedup (off / on) |"
     )
     lines.append("|---|---|---|---|---|---|")
-    for (n, mode) in keys:
+    for n, mode in keys:
         on = on_medians.get((n, mode))
         off = off_medians.get((n, mode))
         speedup = (off / on) if (on and off and on > 0) else float("nan")
@@ -335,9 +344,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=("simd-on", "simd-off"),
         help="build profile label (compare 側で識別に使う)",
     )
-    p_measure.add_argument(
-        "--output", type=str, required=True, help="出力 JSON path"
-    )
+    p_measure.add_argument("--output", type=str, required=True, help="出力 JSON path")
 
     p_compare = sub.add_parser(
         "compare", help="SIMD ON / OFF JSON を統合して MD + CSV 出力"

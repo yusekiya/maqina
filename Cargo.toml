@@ -22,9 +22,25 @@ crate-type = ["cdylib", "rlib"]
 #   しておくこと.
 #
 # BLAS が利用できない環境向けのフォールバックとして
-# `cargo build --no-default-features` (maturin/uv では
-# `MATURIN_PEP517_ARGS="--no-default-features"`) で純 Rust の scalar ループ
-# 経路をビルドできる. 数値結果は両経路で 1e-13 相対精度以内で一致する.
+# `cargo build --no-default-features` で純 Rust の scalar ループ経路をビルド
+# できる. 数値結果は両経路で 1e-13 相対精度以内で一致する.
+#
+# maturin 経由で同じことをするときの feature 制御は **build 経路で 2 系統に
+# 分かれる** 点に注意:
+#
+#   * **wheel build (PEP 517 backend 経由, `pip install` / `uv build` /
+#     `python -m build` 等)**: 環境変数 `MATURIN_PEP517_ARGS` に cargo
+#     向け追加引数を入れる. 例:
+#       `MATURIN_PEP517_ARGS="--no-default-features --features extension-module,blas,rayon" \`
+#       `    uv pip install .`
+#   * **`maturin develop` 経由 (本プロジェクトの日常ビルド経路)**: PEP 517
+#     backend を介さず cargo を直接呼ぶため `MATURIN_PEP517_ARGS` は **無視
+#     される**. feature 制御は `maturin develop` 直下のフラグで渡す:
+#       `uv run maturin develop --uv --release \`
+#       `    --no-default-features --features extension-module,blas,rayon`
+#     `extension-module` を明示するのは, `--features` を渡すと
+#     `[tool.maturin] features = ["extension-module"]` (pyproject.toml) 側の
+#     設定が上書きされるため. 落とすと libpython 未解決でリンク失敗する.
 #
 # `extension-module`: pyo3 を Python 拡張モード (libpython を静的にリンク
 # せず, ホスト Python 側でシンボルを供給する) でビルドする. wheel ビルドでは
