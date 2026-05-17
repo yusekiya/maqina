@@ -562,3 +562,25 @@ issue #79 本文に列挙されていた alternative:
   または大規模 N で真の DRAM bound が観測されたら新 issue を立てる方が
   scope が明確.
 
+##### Phase 6 follow-up: Python bench alloc noise 部分解消 (issue #85, 2026-05-17)
+
+§5.1.4 で得た「Python bench (`bench_*.py`) は `apply_h_kryanneal_py` の
+allocate-and-return 経路の alloc/copy が wall time の大半を占めるので
+Rust 側 micro-optimization の検証には不適」という知見を受け, **`apply_h_kryanneal`
+の Python 入口に in-place 版 `apply_h_kryanneal_into_py` を追加** した
+(issue #85, `docs/design/07-rust-extension.md` §7.3.1).
+
+issue #85 で移行した call site は以下:
+
+- `python/kryanneal/eigenstates.py::_eigenstates_lanczos` (m=64 Krylov loop)
+- `python/kryanneal/eigenstates.py::_eigenstates_exact` (dim 列ループ)
+- `benchmarks/bench_block_fusion.py::_measure_apply_h_kryanneal`
+- `benchmarks/bench_simd_scaling.py::_measure_apply_h`
+- `benchmarks/bench_parallel_scaling.py::child_run` (apply_h_kryanneal セクション)
+
+bench 計測域から alloc/copy を排除することで, 本節 §5.1.4 で archive した
+「真の compute regression」と「Python bench noise が見せかけた regression」を
+今後区別しやすくする (perf binary は Rust 単独計測経路として残置, 用途分担:
+in-place bench = Python 側 API も含めた realistic な per-step 計測,
+perf binary = Rust kernel 単独の hardware counter 計測).
+

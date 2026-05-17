@@ -74,9 +74,11 @@ LAPACK を引っ張ってくる ROI が低い。本パッケージは **`ndarray
 ### 7.3 `apply_h_kryanneal` の Python 公開
 
 Rust 内では closure として完結させるが、Python リファレンス / テスト
-比較のため **公開関数として 1 つ export** する:
+比較のため **公開関数として 2 つ export** する (allocate-and-return と
+in-place 版のペア; 後者は Phase 6 follow-up issue #85 で追加):
 
 ```rust
+// 7.3.a allocate-and-return 版 (Phase 1 から存在).
 #[pyfunction]
 fn apply_h_kryanneal_py(
     py: Python<'_>,
@@ -86,10 +88,60 @@ fn apply_h_kryanneal_py(
     a_t: f64,
     b_t: f64,
 ) -> PyResult<Py<PyArray1<Complex64>>>;
+
+// 7.3.b in-place 版 (issue #85, Phase 6 follow-up).
+#[pyfunction]
+fn apply_h_kryanneal_into_py(
+    v: PyReadonlyArray1<Complex64>,
+    y_out: PyReadwriteArray1<Complex64>,
+    h_x: PyReadonlyArray1<f64>,
+    h_p_diag: PyReadonlyArray1<f64>,
+    a_t: f64,
+    b_t: f64,
+) -> PyResult<()>;
 ```
 
 Python 側で `apply_h_kryanneal_py(...)` と `(A · h_x ⊗ X) + (B · diag)` を
-qutip / 手書きで比べる単体テストを書く。
+qutip / 手書きで比べる単体テストを書く (`tests/test_matvec.py`)。両者の
+bit-for-bit 一致は `test_apply_h_kryanneal_into_py_matches_alloc_variant_bitwise`
+で固定する。
+
+#### 7.3.1 in-place 版の運用方針 (issue #85)
+
+`apply_h_kryanneal_py` は呼び出しごとに `dim · 16 B` の `complex128`
+array を新規 allocate する。`dim = 2^20` で 16 MB / 1 call, m=64 の Krylov
+loop なら 1 回の `lowest_eigenstates(method="lanczos")` で ~1 GB の不要な
+heap traffic になる。Phase 6 D の bench 検証 (issue #79) で **Python bench
+で観測した N=18 の 0.53× regression は実は alloc/GC noise**, Rust kernel
+の micro 効果が完全に埋もれていた、という重要な知見が出た。
+
+そのため **性能を出したい Python 側ループからは in-place 版を使う**:
+
+```python
+y_out = np.empty(dim, dtype=np.complex128)  # ループ外で 1 回確保
+for ...:
+    _rust.apply_h_kryanneal_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
+    # y_out が H(t)·v で上書きされる
+```
+
+`apply_h_kryanneal` 本体は `y` を **上書き** (additive ではなく) するため、
+caller は `np.zeros` ではなく `np.empty` で確保して構わない。
+
+主な call site (issue #85 で移行済み):
+
+| call site | 移行前 alloc / call 上位 |
+|---|---|
+| `python/kryanneal/eigenstates.py::_eigenstates_lanczos` | `dim·16 B` × m (=64) |
+| `python/kryanneal/eigenstates.py::_eigenstates_exact` | `dim·16 B` × 2^n |
+| `benchmarks/bench_block_fusion.py` | `dim·16 B` × repeat (warmup + 計測域) |
+| `benchmarks/bench_simd_scaling.py` | 同上 |
+| `benchmarks/bench_parallel_scaling.py` | 同上 |
+
+allocate-and-return 版は **参照実装比較とテスト用** の補助 API として
+維持する (既存 docstring 例・テストとの後方互換性のため)。step 系
+`_py` wrap (`trotter_step_py` / `m2_midpoint_step_py` /
+`trotter_suzuki4_step_py` / `apply_single_mode_axis_i_py`) の in-place 化は
+本 issue では扱わず、需要が出たら別 issue で対応する。
 
 ### 7.4 Cargo features
 

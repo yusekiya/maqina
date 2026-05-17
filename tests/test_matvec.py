@@ -100,6 +100,71 @@ def test_apply_h_kryanneal_py_simd_path_smoke_for_i0_i1_i2() -> None:
     assert rel < 1e-13, f"SIMD-path apply_h_kryanneal_py rel={rel} >= 1e-13"
 
 
+def test_apply_h_kryanneal_into_py_matches_alloc_variant_bitwise() -> None:
+    """``apply_h_kryanneal_into_py`` の結果が ``apply_h_kryanneal_py`` と
+    **bit-for-bit** 一致する (issue #85 acceptance).
+
+    両者は内部で同じ ``apply_h_kryanneal`` を呼ぶので, ``y`` を新規 alloc
+    して返すか caller 提供の buffer に上書きするかが唯一の違い. 演算順序
+    は完全に同一なので bit-identical を期待する.
+
+    SIMD path を踏みやすいよう n=5 (i ∈ {0,1,2} の SIMD block ≤ dim) で
+    実施する.
+    """
+    _rust = pytest.importorskip("kryanneal._rust")
+
+    n = 5
+    dim = 1 << n
+    rng = np.random.default_rng(20260518)
+    h_x = rng.uniform(-1.0, 1.0, size=n).astype(np.float64)
+    h_p_diag = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
+    v = (
+        rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)
+    ).astype(np.complex128)
+    a_t = float(rng.uniform(-1.0, 1.0))
+    b_t = float(rng.uniform(-1.0, 1.0))
+
+    y_alloc = _rust.apply_h_kryanneal_py(v, h_x, h_p_diag, a_t, b_t)
+
+    y_inplace = np.empty(dim, dtype=np.complex128)
+    ret = _rust.apply_h_kryanneal_into_py(v, y_inplace, h_x, h_p_diag, a_t, b_t)
+    assert ret is None  # PyResult<()> は Python では None.
+
+    # 演算順序が同じなので bit-identical を期待 (`np.array_equal` は
+    # NaN 同士を等価とみなさないが, ここでは NaN は出ない前提).
+    assert np.array_equal(y_inplace, y_alloc), (
+        f"in-place / alloc 変種が bitwise 一致しない: max abs diff = "
+        f"{np.max(np.abs(y_inplace - y_alloc))}"
+    )
+
+    # contract: caller の buffer がそのまま書き換わる.
+    assert y_inplace.shape == (dim,)
+    assert y_inplace.dtype == np.complex128
+
+
+def test_apply_h_kryanneal_into_py_rejects_wrong_shape() -> None:
+    """``apply_h_kryanneal_into_py`` の境界チェック.
+
+    ``y_out`` の長さが ``dim = 2^len(h_x)`` と不一致なら ``ValueError``.
+    """
+    _rust = pytest.importorskip("kryanneal._rust")
+
+    n = 3
+    dim = 1 << n
+    rng = np.random.default_rng(20260518)
+    h_x = rng.uniform(-1.0, 1.0, size=n).astype(np.float64)
+    h_p_diag = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
+    v = (
+        rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)
+    ).astype(np.complex128)
+    a_t, b_t = 0.5, 0.5
+
+    # 長さ違いの y_out で ValueError を期待.
+    y_wrong = np.empty(dim + 1, dtype=np.complex128)
+    with pytest.raises(ValueError, match="y_out length"):
+        _rust.apply_h_kryanneal_into_py(v, y_wrong, h_x, h_p_diag, a_t, b_t)
+
+
 @pytest.mark.parametrize("i", [0, 1, 2])
 def test_apply_single_mode_axis_i_py_simd_path_smoke(i: int) -> None:
     """``_rust.apply_single_mode_axis_i_py`` の SIMD 経路 smoke (issue #71).

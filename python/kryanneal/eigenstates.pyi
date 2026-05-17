@@ -12,10 +12,12 @@
 
 実装方針:
 
-* ``method="lanczos"`` (default): Python ループから ``_rust.apply_h_kryanneal_py``
-  を呼んで Krylov 部分空間 (次元 ``m``, default 64) を構築し,
-  ``_rust.tridiag_eigh_py`` で三重対角の完全固有分解を取って下位 ``k`` 個の
-  Ritz vector を再構築する. 新規 Rust 関数は追加せず, 既存 primitive を
+* ``method="lanczos"`` (default): Python ループから
+  ``_rust.apply_h_kryanneal_into_py`` (in-place 版) を呼んで Krylov 部分空間
+  (次元 ``m``, default 64) を構築し, ``_rust.tridiag_eigh_py`` で三重対角の
+  完全固有分解を取って下位 ``k`` 個の Ritz vector を再構築する.
+  ``w`` buffer を loop 外で 1 回確保し再利用することで境界の alloc/copy
+  overhead を回避する (issue #85). 新規 Rust 関数は追加せず, 既存 primitive を
   Python ループで組み合わせる方針 (固有値計算は時間発展に比べて頻度が
   低く Python 越境のオーバヘッドは無視できる).
 * ``method="exact"``: ``n <= 12`` 制限で dense ``H(t)`` を組み立て
