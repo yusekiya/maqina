@@ -237,6 +237,71 @@ i ∈ {0, 1, 2} を SIMD 特化 (`feature = "simd"`, default ON)。
 - **`--no-default-features` ビルド**: SIMD 依存も外れ scalar 経路に戻る。
   `wide` クレートはリンクされない。
 
+## perf 計測用 binary (Phase 6 D follow-up, issue #79)
+
+`apply_h_kryanneal` の真の bottleneck (DRAM bound / L3 contention / barrier
+等のどれか) を Linux `perf stat` で hardware counter から特定するための
+pure-Rust 計測 binary が `src/bin/perf_apply_h.rs` にある. Python の
+`bench_block_fusion.py` は wall-time だけしか出さないため切り分けに不十分.
+
+ビルド:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_apply_h
+```
+
+`apply_h_kryanneal` は本 binary から呼べるよう `pub fn` に上げ,
+`crate::bench_api` (`src/lib.rs`) で再 export している. Python 側 API
+(`_rust.apply_h_kryanneal_py`) には影響なし.
+
+計測例 (Linux, AMD EPYC で実証済み):
+
+```bash
+# 基本: IPC + cache
+RAYON_NUM_THREADS=64 perf stat \
+    -e cycles,instructions,branch-misses \
+    -e cache-references,cache-misses \
+    -e L1-dcache-loads,L1-dcache-load-misses \
+    -e dTLB-loads,dTLB-load-misses \
+    -- ./target/release/perf_apply_h 20 500
+
+# AMD Zen 3 専用: L2 fill latency / stall (issue #79 で実用したセット)
+RAYON_NUM_THREADS=64 perf stat \
+    -e cycles,instructions,branch-misses \
+    -e stalled-cycles-backend,stalled-cycles-frontend \
+    -e l2_request_g1.all_no_prefetch,l2_cache_req_stat.ic_dc_miss_in_l2 \
+    -e l2_latency.l2_cycles_waiting_on_fills \
+    -- ./target/release/perf_apply_h 20 500
+```
+
+binary は stderr に wall time / per-iter time / sink (DCE 防止) を出し,
+stdout は空に保つ (perf の出力を汚さない).
+
+## Phase 6 D 実験と未採用の根拠 (issue #79, 2026-05-17)
+
+Phase D で `apply_h_kryanneal_rayon` を **連続 k 個の高 i を group-fused
+3-phase 形** に書き換える試み (DRAM v traffic を `dim · (1 + h_baseline) →
+dim · (1 + h_naive)` に削減する設計) を行ったが, **本 Linux サーバー
+(AMD EPYC 7713P, 64 物理コア, L2 = 512 KB/core, L3 = 32 MB/CCX × 8) で
+perf 計測した結果 N=20 で 50% 真の compute regression を確認** し,
+revert. 詳細な perf 値と判断は `docs/design.md` §5.1.4 にアーカイブ.
+
+要点だけ抜粋:
+
+- C1 baseline は IPC=2.98 (Zen 3 理論 max の 60-75%) で **既に compute-near-peak**.
+  「DRAM bandwidth bound だから traffic 削減すれば改善」前提が成立しなかった.
+- Phase D の chunk 跨ぎ XOR access pattern が HW prefetcher を破壊し,
+  per-L2-miss avg latency が 195 → 251 cycles (+30%) に劣化.
+- cache-miss rate は baseline/after とも 3-7% で **DRAM access はそもそも
+  少なかった**. 真の bottleneck は L2 fill latency (L3 / cross-CCX).
+- N=18 は実質変化なし (Python bench で見えた 0.53× は alloc/GC noise).
+
+issue #79 で B (SIMD i≥3), C (prefetch), D (streaming store) として残されていた
+代替カードも **IPC 3.0 baseline 前提では効果薄** が予想されるため別途
+sub-issue 化していない. 再挑戦時は `src/bin/perf_apply_h.rs` + perf stat で
+ハードウェア counter を最初に取り「何 bound か」を確認してから設計に入る運用.
+
+
 ## 設計判断の出典 (cv_ising 流用箇所)
 
 - CFM4:2 係数: `cv_ising/rust/src/cfm4.rs` の `a_high = 1/4 + √3/6` 等

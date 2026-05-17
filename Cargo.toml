@@ -12,6 +12,15 @@ name = "_rust"
 #         ビルドできない.
 crate-type = ["cdylib", "rlib"]
 
+# `perf_apply_h`: Phase 6 D (issue #79) follow-up. `apply_h_kryanneal` を
+# N 回呼ぶだけの pure-Rust binary. Linux `perf stat` で hardware counter
+# (cache miss / DRAM controller throughput / stall reasons) を取り
+# 真のボトルネックを特定するために使う. cargo build --release --bin perf_apply_h
+# で生成. 詳細は `src/bin/perf_apply_h.rs` の docstring 参照.
+[[bin]]
+name = "perf_apply_h"
+path = "src/bin/perf_apply_h.rs"
+
 [features]
 # `blas`: link a system BLAS so `lanczos_propagate` の Level-1 / Level-2 ops を
 # CBLAS 経由で実行する. target ごとに backend を自動選択する:
