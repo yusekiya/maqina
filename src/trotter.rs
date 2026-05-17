@@ -173,7 +173,7 @@ fn build_axis_unitaries(h_x_slice: &[f64], a_t: f64, dt: f64, out_slice: &mut [[
 /// - `h_x.len() != n`
 /// - `h_p_diag.len() != 1 << n`
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn trotter_step(
+pub fn trotter_step(
     psi: &mut [Complex64],
     h_x: &[f64],
     h_p_diag: &[f64],
