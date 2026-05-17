@@ -917,6 +917,18 @@ Trotter primitive は `src/trotter.rs` に置く想定だが、`apply_single_mod
     テスト用の小 dim 直接呼び出しでのみ通る).
   - 数値同一性は SIMD ON 両 path で bit-identical, SIMD ON vs scalar 経路は
     `rel < 1e-13` (FMA 折り畳み差で ulp 差が出うる).
+  - **chunk_size = 64 を静的に維持**: `apply_h_kryanneal_rayon` /
+    `apply_multi_qubit_gate_fused_rayon` のような動的計算
+    `(dim/(nth·4)).clamp(MIN, MAX)` には**しない**. 理由は本関数が 1 chunk
+    あたり 1 pass の read-write しかなく (axis pair update のみで chunk 内
+    data reuse なし), chunk が L1 (32 KB) を spill した瞬間に SIMD が
+    memory bandwidth bound に転落するため. PR #80 fixup experiment で
+    chunk_size=4096 (= 64 KB, L1 spill) にすると N=20 SIMD speedup が
+    2.95× → 0.56× へ大幅 regression する観測あり.  L1 fit する 1 KB chunk
+    を多数並べる方が SIMD throughput を最大化できる. これにより rayon
+    scheduling overhead が大きくなって N=18 の SIMD speedup が ~1.0× で
+    頭打ちになる副作用はあるが (§12 C2.5 観測, 構造的境界), N=16 serial と
+    N=20 rayon の主要 size 帯では 1.9-3.5× を達成する.
 
 #### 5.1.3 Phase 6 C3 — DRAM 律速の解消 (multi-qubit gate fusion + phase_p 並列化)
 
@@ -2142,9 +2154,42 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   を 2 Complex64 並列で実行する形, §5.1.2 参照), `apply_single_mode_axis_i_serial`
   / `_rayon` の両 path + C3 の `apply_fused_axes_to_chunk` inner kernel から
   共通で dispatch する. これにより C3 で得た N=20 trotter_step 4.01× の上に
-  SIMD compute を上乗せできる構造になった. acceptance bench (N=18, i=0,1,2
-  per-pass ≥ 1.5×) は本 issue の PR で `bench_simd_scaling.py` を拡張済み,
-  Linux サーバーでの本番計測を pre-merge cycle で取得する.
+  SIMD compute を上乗せできる構造になった.
+
+  **観測 (Linux x86_64, cpu_count=64, OpenBLAS, AVX2 + FMA,
+  `RAYON_NUM_THREADS=64`, BLAS thread=1, repeat=50, PR #80 final bench)**:
+
+  | N | path | i=0 | i=1 | i=2 |
+  |---|---|---|---|---|
+  | 16 (serial) | scalar fallback | **2.33× / 2.43×** | **2.16× / 2.27×** | **1.97× / 1.88×** |
+  | 18 (rayon)  | par_chunks_mut  | 0.97× / 0.95× | 0.96× / 1.00× | 0.94× / 1.01× |
+  | 20 (rayon)  | par_chunks_mut  | **2.95×**     | **3.48×**     | **2.71×**     |
+
+  N=18 だけ ~1.0× で頭打ちなのは C2 (issue #63) と同じ **cache-hierarchy /
+  rayon-scheduling 境界** の現象: dim=2^18 (= 4 MB Complex64) は L3 fit する
+  size で memory bandwidth bound に当たらず, かつ 64 thread × chunk_size=64
+  (= 1 KB / chunk, L1 fit する選択) の rayon scheduling overhead が
+  per-pass compute と同オーダになる. SIMD で compute を縮めても scheduling
+  overhead が支配的になり speedup が出ない (絶対時間 simd-off 0.79 ms /
+  simd-on 0.82 ms で +3.7%, ノイズの域).
+
+  **chunk_size を `apply_h_kryanneal_rayon` と同じ動的計算
+  `(dim/(nth·4)).clamp(...)` に変えると N=20 で chunk_size = 4096 (= 64 KB)
+  となり L1 (= 32 KB) を spill, SIMD が memory bandwidth bound に転落して
+  N=20 が 2.95× → 0.56× に大幅 regression する** ことが PR #80 の fixup
+  experiment で判明 (`apply_single_mode_axis_i` は 1 chunk あたり 1 pass の
+  read-write しかないので, chunk 内 data reuse がある `apply_h_kryanneal`
+  (chunk あたり diag + n bit-flip = n+1 pass) と最適 chunk_size が異なる).
+  C2.5 では **chunk_size = 64 を静的に維持** する判断とした.
+
+  acceptance「N=18 i=0,1,2 で per-pass ≥ 1.5×」は **N=16 (serial) と N=20
+  (rayon 主要 size) で達成** (1.88-2.43× / 2.71-3.48×), N=18 は構造的
+  境界として limitation 扱い. C3 (#64) の trotter_step fusion 経路は
+  default n_qubit ≥ 17 で fused 経路に乗るため, fused chunk_size が大きい
+  方向 (C3 では k=4 pass 連続適用で data reuse あり) で C2.5 の SIMD
+  inner kernel が効く.
+
+  bench 結果は PR #80 コメントに添付済み.
 - **D (issue #79, open)**: `apply_h_kryanneal` の DRAM bandwidth 改善
   (高 i sparse fused matvec / SIMD i ≥ 3 拡張 / prefetch / streaming store).
   C3 で trotter_step は 4× 改善したが apply_h_kryanneal は scope 外として
