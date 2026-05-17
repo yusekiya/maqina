@@ -149,6 +149,48 @@ def _measure_apply_h(n: int, h_x: np.ndarray, repeat: int, warmup: int) -> list[
     return timings
 
 
+def _measure_single_mode(n: int, i: int, repeat: int, warmup: int) -> list[float]:
+    """`_rust.apply_single_mode_axis_i_py` の wall time を repeat 回計測.
+
+    issue #71 (Phase 6 C2.5) acceptance 用: axis i に 2×2 ユニタリ U を
+    apply する per-call wall time を測る. U は U(2) を phase + rotation の
+    形で乱数生成 (Trotter R_i 形だと自由度が 1 つだけで FMA 量が少なく
+    なるので一般 U(2) を取る).
+    """
+    from kryanneal import _rust  # pyright: ignore[reportMissingImports]
+
+    dim = 1 << n
+    rng = np.random.default_rng(0xC0FE_FACE ^ n ^ (i << 20))
+    psi = (
+        rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)
+    ).astype(np.complex128)
+    theta = float(rng.uniform(-np.pi, np.pi))
+    alpha = float(rng.uniform(-np.pi, np.pi))
+    beta = float(rng.uniform(-np.pi, np.pi))
+    c = np.cos(theta)
+    s = np.sin(theta)
+    u = np.array(
+        [
+            np.exp(1j * alpha) * c,
+            np.exp(1j * beta) * s,
+            -np.exp(-1j * beta) * s,
+            np.exp(-1j * alpha) * c,
+        ],
+        dtype=np.complex128,
+    )
+
+    for _ in range(warmup):
+        _ = _rust.apply_single_mode_axis_i_py(psi, u, i, n)
+
+    timings: list[float] = []
+    for _ in range(repeat):
+        t0 = time.perf_counter()
+        _ = _rust.apply_single_mode_axis_i_py(psi, u, i, n)
+        t1 = time.perf_counter()
+        timings.append(t1 - t0)
+    return timings
+
+
 def _build_h_x(n: int, mode: str) -> np.ndarray:
     """h_x ベクトルを mode に応じて構築.
 
@@ -208,9 +250,13 @@ def mode_measure(args: argparse.Namespace) -> int:
         if n < 3:
             print(f"[measure] skip n={n} (n < 3, SIMD i=2 が踏めない)", flush=True)
             continue
+        # apply_h_kryanneal_py sweep (issue #63 / Phase 6 C2).
         for mode in ("all-i", "i012-focus"):
             h_x = _build_h_x(n, mode)
-            print(f"[measure] n={n} dim={1 << n} mode={mode}", flush=True)
+            print(
+                f"[measure] n={n} dim={1 << n} kernel=apply_h_kryanneal mode={mode}",
+                flush=True,
+            )
             timings = _measure_apply_h(n, h_x, repeat=args.repeat, warmup=args.warmup)
             for trial_idx, t in enumerate(timings):
                 trials.append(
@@ -218,7 +264,38 @@ def mode_measure(args: argparse.Namespace) -> int:
                         "label": args.label,
                         "n": n,
                         "dim": 1 << n,
+                        "kernel": "apply_h_kryanneal",
                         "mode": mode,
+                        "trial": trial_idx,
+                        "wall_sec": t,
+                    }
+                )
+            print(
+                f"  median={statistics.median(timings):.6e}s, "
+                f"min={min(timings):.6e}s, max={max(timings):.6e}s",
+                flush=True,
+            )
+
+        # apply_single_mode_axis_i_py sweep (issue #71 / Phase 6 C2.5).
+        # SIMD カーネルが特化する i ∈ {0,1,2} の per-axis time を個別に
+        # 測る. issue acceptance「N=18, i=0,1,2 で per-pass time >=1.5×
+        # 改善 (PR #70 baseline 比)」の判定に使う.
+        for i in SIMD_TARGET_I_VALUES:
+            if i >= n:
+                continue
+            print(
+                f"[measure] n={n} dim={1 << n} kernel=apply_single_mode_axis_i i={i}",
+                flush=True,
+            )
+            timings = _measure_single_mode(n, i, repeat=args.repeat, warmup=args.warmup)
+            for trial_idx, t in enumerate(timings):
+                trials.append(
+                    {
+                        "label": args.label,
+                        "n": n,
+                        "dim": 1 << n,
+                        "kernel": "apply_single_mode_axis_i",
+                        "mode": f"i{i}",
                         "trial": trial_idx,
                         "wall_sec": t,
                     }
@@ -246,11 +323,19 @@ def mode_measure(args: argparse.Namespace) -> int:
     return 0
 
 
-def _summarize_median(trials: list[dict[str, Any]]) -> dict[tuple[int, str], float]:
-    """(n, mode) ごとの median wall_sec を返す."""
-    buckets: dict[tuple[int, str], list[float]] = {}
+def _summarize_median(
+    trials: list[dict[str, Any]],
+) -> dict[tuple[int, str, str], float]:
+    """(n, kernel, mode) ごとの median wall_sec を返す.
+
+    issue #71 で `kernel` 次元を追加 (apply_h_kryanneal /
+    apply_single_mode_axis_i). 旧 JSON (kernel 欠落) は
+    `kernel = "apply_h_kryanneal"` として扱い後方互換.
+    """
+    buckets: dict[tuple[int, str, str], list[float]] = {}
     for r in trials:
-        buckets.setdefault((int(r["n"]), str(r["mode"])), []).append(
+        kernel = str(r.get("kernel", "apply_h_kryanneal"))
+        buckets.setdefault((int(r["n"]), kernel, str(r["mode"])), []).append(
             float(r["wall_sec"])
         )
     return {key: statistics.median(vs) for key, vs in buckets.items()}
@@ -287,13 +372,13 @@ def mode_compare(args: argparse.Namespace) -> int:
     # CSV
     csv_path = out_dir / "bench_simd_scaling.csv"
     with csv_path.open("w", encoding="utf-8") as f:
-        f.write("n,dim,mode,simd_off_median_sec,simd_on_median_sec,speedup\n")
-        for n, mode in keys:
-            on = on_medians.get((n, mode))
-            off = off_medians.get((n, mode))
+        f.write("n,dim,kernel,mode,simd_off_median_sec,simd_on_median_sec,speedup\n")
+        for n, kernel, mode in keys:
+            on = on_medians.get((n, kernel, mode))
+            off = off_medians.get((n, kernel, mode))
             speedup = (off / on) if (on and off and on > 0) else None
             f.write(
-                f"{n},{1 << n},{mode},"
+                f"{n},{1 << n},{kernel},{mode},"
                 f"{off if off is not None else ''},"
                 f"{on if on is not None else ''},"
                 f"{speedup if speedup is not None else ''}\n"
@@ -302,9 +387,12 @@ def mode_compare(args: argparse.Namespace) -> int:
     # MD
     md_path = out_dir / "bench_simd_scaling.md"
     lines: list[str] = []
-    lines.append("# bench_simd_scaling (Phase 6 C2, issue #63)")
+    lines.append("# bench_simd_scaling (Phase 6 C2 / C2.5, issue #63 / #71)")
     lines.append("")
-    lines.append("`apply_h_kryanneal` per-pass time の SIMD ON/OFF 比較.")
+    lines.append(
+        "`apply_h_kryanneal` (C2) と `apply_single_mode_axis_i` (C2.5) の "
+        "per-pass time を SIMD ON/OFF で比較する."
+    )
     lines.append("")
     lines.append("## Machine info (simd-on side)")
     lines.append("")
@@ -319,22 +407,28 @@ def mode_compare(args: argparse.Namespace) -> int:
     lines.append("## Per-call median wall time and speedup")
     lines.append("")
     lines.append(
-        "| n | dim | mode | simd-off median (ms) | simd-on median (ms) | "
-        "speedup (off / on) |"
+        "| n | dim | kernel | mode | simd-off median (ms) | "
+        "simd-on median (ms) | speedup (off / on) |"
     )
-    lines.append("|---|---|---|---|---|---|")
-    for n, mode in keys:
-        on = on_medians.get((n, mode))
-        off = off_medians.get((n, mode))
+    lines.append("|---|---|---|---|---|---|---|")
+    for n, kernel, mode in keys:
+        on = on_medians.get((n, kernel, mode))
+        off = off_medians.get((n, kernel, mode))
         speedup = (off / on) if (on and off and on > 0) else float("nan")
         on_ms = (on * 1e3) if on is not None else float("nan")
         off_ms = (off * 1e3) if off is not None else float("nan")
         lines.append(
-            f"| {n} | {1 << n} | {mode} | {off_ms:.4f} | {on_ms:.4f} | {speedup:.2f}× |"
+            f"| {n} | {1 << n} | {kernel} | {mode} | "
+            f"{off_ms:.4f} | {on_ms:.4f} | {speedup:.2f}× |"
         )
     lines.append("")
     lines.append(
-        "issue #63 acceptance: N=18 `i012-focus` で speedup ≥ 1.5× を満たすこと."
+        "issue #63 acceptance: N=18 `apply_h_kryanneal` `i012-focus` で "
+        "speedup ≥ 1.5× を満たすこと."
+    )
+    lines.append(
+        "issue #71 acceptance: N=18 `apply_single_mode_axis_i` の i ∈ "
+        "{0,1,2} 各々で speedup ≥ 1.5× を満たすこと."
     )
     lines.append("")
     md_path.write_text("\n".join(lines), encoding="utf-8")

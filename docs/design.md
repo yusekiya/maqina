@@ -896,10 +896,27 @@ Trotter primitive は `src/trotter.rs` に置く想定だが、`apply_single_mod
   [`apply_multi_qubit_gate_fused`] (§5.1.3) 経由で連続 FUSE_K=4 qubit を
   1 chunk closure 内で per-axis 逐次 apply する形に書き換えた (端数のみ本関数で
   個別 apply). barrier 多重化解消で N=20 trotter_step が 4.01× 改善.
-- **C2.5 (#71, open)**: SIMD 特化 (i ∈ {0,1,2}) は follow-up. C2 で
-  `apply_h_kryanneal` 側の `simd_kernels::bitflip_iN` を実装したのと同型の
-  pattern を本関数 (および C3 の `apply_fused_axes_to_chunk` inner kernel)
-  に流用する.
+- **C2.5 (#71, 実装済み)**: SIMD 特化 (i ∈ {0,1,2}) を `wide::f64x4` で導入.
+  C2 で `apply_h_kryanneal` 側に作った `simd_kernels::bitflip_iN` と同じ
+  helper モジュール (`src/matvec.rs::simd_kernels`) に `single_mode_iN` を
+  追加し, 2×2 complex matmul を **complex broadcast + in-register swizzle**
+  で f64x4 化した:
+  - `u_k_re_v = splat(u[k].re)`, `u_k_im_signed_v = [-u[k].im, u[k].im, -u[k].im, u[k].im]`,
+    `x_swap = re/im swap` を用いて `u_k · x_pair = u_k_re_v · x_pair +
+    u_k_im_signed_v · x_swap` を 2 lane (2 Complex64) 並列で計算.
+  - i=0 は 1 block = 2 Complex64 しか入らないので 2 連続 block (= 4 Complex64
+    = 8 f64) を 1 SIMD iter で処理 (vperm2f128 で `[a0,b0,a1,b1]` を
+    `A=[a0,a1], B=[b0,b1]` に deinterleave → 書き戻し時に再 interleave).
+  - i=1, 2 は lo_half / hi_half が f64x4 の倍数で並ぶので deinterleave 不要.
+  - `apply_single_mode_axis_i_serial` / `_rayon` の両 path + C3 の
+    `apply_fused_axes_to_chunk` inner kernel から共通で呼び出され, C3 で得た
+    barrier 多重化解消の効果に SIMD compute を上乗せできる構造.
+  - rayon の `split_at_mut` 退化ケース (block == dim, i = n-1) も SIMD-target
+    な i ∈ {0,1,2} では SIMD 経路にフォールスルーする (実用 dim ≥
+    MIN_RAYON_DIM では i = n-1 が常に 17 以上で SIMD range 外なのでこの分岐は
+    テスト用の小 dim 直接呼び出しでのみ通る).
+  - 数値同一性は SIMD ON 両 path で bit-identical, SIMD ON vs scalar 経路は
+    `rel < 1e-13` (FMA 折り畳み差で ulp 差が出うる).
 
 #### 5.1.3 Phase 6 C3 — DRAM 律速の解消 (multi-qubit gate fusion + phase_p 並列化)
 
@@ -2063,7 +2080,8 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   スキップする短絡 (PR #73) も入っており, sparse h_x で SIMD 効果が最も
   ROI 高く見える `i012-focus` mode bench が成立する。
   `apply_single_mode_axis_i` の SIMD 特化 (2×2 complex matmul の broadcast +
-  swizzle pattern) は follow-up issue として deferred (#71)。
+  swizzle pattern) は **C2.5 (#71) で実装済み** (`simd_kernels::single_mode_iN`,
+  下記参照).
   実 SIMD 速度向上は build 時の `target-cpu` 設定に依存し, default `x86_64`
   target では `wide` が scalar fallback を選び正確性のみ提供する
   (`benchmarks/bench_simd_scaling.py` の本番 sweep は
@@ -2115,12 +2133,18 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   time が N=18 で 1.55×, **N=20 で 4.01× (acceptance 1.3× の 3 倍以上)**,
   N=22 で 2.93× の改善. `apply_h_kryanneal` は本 issue で touch せず
   ≈ 1.0× (regression なし).
-- **C2.5 (issue #71, open)**: `apply_single_mode_axis_i` の SIMD 特化
-  (i ∈ {0,1,2}). C2 では `apply_h_kryanneal` 側のみ SIMD 化したため,
-  trotter_step 経路の axis_i も同様に SIMD 化する follow-up. C3 (#64) で
-  `apply_multi_qubit_gate_fused` の inner kernel が `apply_single_mode_axis_i`
-  と同型の 2-pair update を使う構造になったため, C2.5 完了で C3 の効果
-  (N=20 trotter_step 4.01×) をさらに増幅できる見込み.
+- **C2.5 (issue #71, 実装済み)**: `apply_single_mode_axis_i` の SIMD 特化
+  (i ∈ {0,1,2}). C2 で `apply_h_kryanneal` 側のみ SIMD 化したため,
+  trotter_step 経路の axis_i も `wide::f64x4` で SIMD 化する follow-up.
+  `simd_kernels::single_mode_iN` を 2×2 complex matmul の **complex
+  broadcast + swizzle pattern** で実装し
+  (`u_k · x_pair = splat(u[k].re) · x_pair + [-u[k].im, u[k].im, ...] · x_swap`
+  を 2 Complex64 並列で実行する形, §5.1.2 参照), `apply_single_mode_axis_i_serial`
+  / `_rayon` の両 path + C3 の `apply_fused_axes_to_chunk` inner kernel から
+  共通で dispatch する. これにより C3 で得た N=20 trotter_step 4.01× の上に
+  SIMD compute を上乗せできる構造になった. acceptance bench (N=18, i=0,1,2
+  per-pass ≥ 1.5×) は本 issue の PR で `bench_simd_scaling.py` を拡張済み,
+  Linux サーバーでの本番計測を pre-merge cycle で取得する.
 - **D (issue #79, open)**: `apply_h_kryanneal` の DRAM bandwidth 改善
   (高 i sparse fused matvec / SIMD i ≥ 3 拡張 / prefetch / streaming store).
   C3 で trotter_step は 4× 改善したが apply_h_kryanneal は scope 外として

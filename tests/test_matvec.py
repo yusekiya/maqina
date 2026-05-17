@@ -98,3 +98,76 @@ def test_apply_h_kryanneal_py_simd_path_smoke_for_i0_i1_i2() -> None:
 
     rel = float(np.linalg.norm(y - y_expected) / max(np.linalg.norm(y_expected), 1.0))
     assert rel < 1e-13, f"SIMD-path apply_h_kryanneal_py rel={rel} >= 1e-13"
+
+
+@pytest.mark.parametrize("i", [0, 1, 2])
+def test_apply_single_mode_axis_i_py_simd_path_smoke(i: int) -> None:
+    """``_rust.apply_single_mode_axis_i_py`` の SIMD 経路 smoke (issue #71).
+
+    Phase 6 C2.5 で `apply_single_mode_axis_i` の i ∈ {0,1,2} を
+    `wide::f64x4` 特化版 (`simd_kernels::single_mode_iN`) に dispatch する
+    変更を入れた. Python 越境後にも dense Kronecker 参照 (`I ⊗ ... ⊗ U_i ⊗
+    ... ⊗ I`) と ``rel < 1e-13`` で一致することを smoke 確認する役割.
+    Rust 単体テスト ``simd_single_mode_kernels_match_scalar_fuzz_100iter`` で
+    fuzz 網羅済み.
+
+    n=5 (dim=32) は SIMD i=2 (block=8) を 4 block 踏み, i=0,1 はその上を
+    なぞる最小サイズ. n を小さく保ち rel が ulp 累積で破綻しないことも
+    同時確認.
+    """
+    _rust = pytest.importorskip("kryanneal._rust")
+
+    n = 5
+    dim = 1 << n
+    rng = np.random.default_rng(20260517 ^ (i << 8))
+    psi = (
+        rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)
+    ).astype(np.complex128)
+    # ランダム U(2): Trotter R_i(θ) = cos θ · I + i sin θ · X 形を採用すると
+    # `[c, i·s, i·s, c]` で 1 自由度しか踏めないので, より一般な U(2) を
+    # phase + rotation で組む.
+    theta = float(rng.uniform(-np.pi, np.pi))
+    alpha = float(rng.uniform(-np.pi, np.pi))
+    beta = float(rng.uniform(-np.pi, np.pi))
+    c = np.cos(theta)
+    s = np.sin(theta)
+    u = np.array(
+        [
+            np.exp(1j * alpha) * c,
+            np.exp(1j * beta) * s,
+            -np.exp(-1j * beta) * s,
+            np.exp(-1j * alpha) * c,
+        ],
+        dtype=np.complex128,
+    )
+
+    # 被テスト: SIMD 経路 (default build) を踏む.
+    psi_actual = _rust.apply_single_mode_axis_i_py(psi, u, i, n)
+
+    # 参照: dense `I ⊗ ... ⊗ U_i ⊗ ... ⊗ I` を直接構築する (kryanneal の
+    # bit 規約: bit 0 = LSB, `psi[k]` の bit_i(k)=0 / =1 が pair (lo, hi) を
+    # 形成). U_full[k, k]      = u[0] if bit_i(k)=0 else u[3]
+    #         U_full[k, k^mask] = u[1] if bit_i(k)=0 else u[2]
+    mask = 1 << i
+    u_full = np.zeros((dim, dim), dtype=np.complex128)
+    for k in range(dim):
+        if (k & mask) == 0:
+            u_full[k, k] = u[0]
+            u_full[k, k ^ mask] = u[1]
+        else:
+            u_full[k, k] = u[3]
+            u_full[k, k ^ mask] = u[2]
+    psi_expected = u_full @ psi
+
+    rel = float(
+        np.linalg.norm(psi_actual - psi_expected)
+        / max(np.linalg.norm(psi_expected), 1.0)
+    )
+    assert rel < 1e-13, (
+        f"SIMD-path apply_single_mode_axis_i_py i={i} rel={rel} >= 1e-13"
+    )
+
+    # PyO3 wrap contract.
+    assert isinstance(psi_actual, np.ndarray)
+    assert psi_actual.shape == (dim,)
+    assert psi_actual.dtype == np.complex128
