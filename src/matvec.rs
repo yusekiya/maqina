@@ -107,11 +107,18 @@ const SIMD_BLOCK_MAX: usize = 8;
 #[cfg(feature = "rayon")]
 const MIN_RAYON_DIM: usize = 1 << 17;
 
-/// `apply_h_kryanneal` の bit-flip pass の i ∈ {0, 1, 2} (stride 1/2/4 連続
-/// アクセス領域) を `wide::f64x4` で SIMD 特化するカーネル群 (issue #63
-/// Phase 6 C2).
+/// `apply_h_kryanneal` の bit-flip pass と `apply_single_mode_axis_i` の
+/// 2×2 ユニタリ pair update の i ∈ {0, 1, 2} (stride 1/2/4 連続アクセス領域)
+/// を `wide::f64x4` で SIMD 特化するカーネル群.
 ///
-/// # 設計
+/// - `bitflip_i{0,1,2}`: `apply_h_kryanneal` の bit-flip pass
+///   (`y[k] += coeff · v[k ^ mask]`) 用 (issue #63 Phase 6 C2).
+/// - `single_mode_i{0,1,2}`: `apply_single_mode_axis_i` /
+///   `apply_fused_axes_to_chunk` (Phase 6 C3) の 2×2 ユニタリ pair update
+///   (`new_lo = u[0]·a + u[1]·b`, `new_hi = u[2]·a + u[3]·b`) 用
+///   (issue #71 Phase 6 C2.5).
+///
+/// # bit-flip pass の設計
 ///
 /// bit-flip pass の操作 `y[k] += coeff * v[k ^ mask]` は, `block = 2 * mask`
 /// 単位で見ると **block 内の前半と後半を入れ替えた v を後半 / 前半に足し
@@ -163,6 +170,30 @@ const MIN_RAYON_DIM: usize = 1 << 17;
 /// `y[k] + coeff * v[k ^ mask]` の単一 fadd になる. このため SIMD ON/OFF
 /// 両ビルドで **bit-identical** な結果になることを期待する (テスト
 /// `apply_h_kryanneal_simd_matches_serial` で検証).
+///
+/// `single_mode_iN` の方は 2×2 complex matmul を **complex broadcast +
+/// in-register swizzle** で f64x4 化する: `u_k = u_k_re + i·u_k_im` の作用
+/// `u_k · x` (`x ∈ Complex64`) を 2 lane (2 Complex64) 並列で
+///
+/// ```text
+/// (u_k · x).re = u_k_re · x.re − u_k_im · x.im
+/// (u_k · x).im = u_k_re · x.im + u_k_im · x.re
+/// ```
+///
+/// と書き下し, `u_k_re_v = splat(u_k.re)`, `u_k_im_signed_v = [−u_k.im,
+/// u_k.im, −u_k.im, u_k.im]`, `x_swap = re/im swap of x_pair` を用意して
+///
+/// ```text
+/// u_k · x_pair = u_k_re_v · x_pair + u_k_im_signed_v · x_swap
+/// ```
+///
+/// を 1 つの `mul_add` + 1 つの `*` で計算する. 全 4 個の `u[0..4]` 適用結果を
+/// FMA で足し合わせると `new_lo`, `new_hi` (各 f64x4) が得られ, in-place で
+/// 書き戻す. SIMD/scalar 経路の演算は各 `psi[k]` への
+/// `u[0]·a + u[1]·b` (lo 側) または `u[2]·a + u[3]·b` (hi 側) の単一値生成で
+/// 算術的に等価だが, FMA 折りたたみ ON/OFF や lane の演算順序差で ulp 差が
+/// 出うるため数値一致は `rel < 1e-13` で評価する (テスト
+/// `simd_single_mode_kernels_match_scalar_fuzz_100iter`).
 #[cfg(feature = "simd")]
 mod simd_kernels {
     use num_complex::Complex64;
@@ -350,6 +381,210 @@ mod simd_kernels {
                 store_f64x4_unaligned(y_chunk.as_mut_ptr().add(4), new_lo_b);
                 store_f64x4_unaligned(y_chunk.as_mut_ptr().add(8), new_hi_a);
                 store_f64x4_unaligned(y_chunk.as_mut_ptr().add(12), new_hi_b);
+            }
+        }
+    }
+
+    // ====================================================================
+    // single_mode_iN: 2×2 complex matmul を broadcast + swizzle で SIMD 化.
+    //
+    // `apply_single_mode_axis_i` の規約: `(psi[lo], psi[hi]) = (a, b)` に
+    // 対し `(new_lo, new_hi) = (u[0]·a + u[1]·b, u[2]·a + u[3]·b)` を
+    // in-place 書き込み. `mask = 1 << i`, `block = 2·mask` で base を
+    // block 単位に進めて全ペアを走査する.
+    //
+    // 各 Complex64 = 2 f64 で, 1 つの `f64x4` には 2 個の Complex64 を載せて
+    // 2 ペア並列で update する. broadcast 形の `u_k_re_v = splat(u[k].re)` と
+    // `u_k_im_signed_v = [−u[k].im, u[k].im, −u[k].im, u[k].im]`, そして
+    // x の re/im を入れ替えた `x_swap` を使って:
+    //
+    //   u_k · x_pair = u_k_re_v · x_pair + u_k_im_signed_v · x_swap   (1 FMA)
+    //
+    // を計算し, `new_lo = u[0]·A + u[1]·B`, `new_hi = u[2]·A + u[3]·B`
+    // (各 f64x4) を 1 block の出力として store する.
+    //
+    // bit-flip 系 (`bitflip_iN`) と違って `apply_single_mode_axis_i` は
+    // **in-place** なので, 1 block 内で load → compute → store の順を守る
+    // 必要がある (compute 後に書き戻した psi を同じ iteration で再 load しない).
+    // chunks_exact_mut(...) の各 chunk 内では load を全て先に行い, store は
+    // 最後にまとめるので問題ない.
+    // ====================================================================
+
+    /// 4 つの `u[k]` から `(u_re_v[k], u_im_signed_v[k])` ペアを一括生成する
+    /// ヘルパ. 4 個 × 2 = 8 個の f64x4 定数を kernel 入口で 1 回だけ準備する.
+    #[inline]
+    fn unpack_u_broadcast(u: &[Complex64; 4]) -> [(f64x4, f64x4); 4] {
+        // 各 u[k] = u[k].re + i·u[k].im について:
+        //   u_re_v       = splat(u[k].re)
+        //   u_im_signed_v = [-u[k].im, u[k].im, -u[k].im, u[k].im]
+        // を用意する. SIMD 内では:
+        //   u[k] · x_pair = u_re_v · x_pair + u_im_signed_v · x_swap
+        // で 2 lane (2 Complex64) 並列に複素積を計算する.
+        let mut out: [(f64x4, f64x4); 4] = [(f64x4::splat(0.0), f64x4::splat(0.0)); 4];
+        for (k, uk) in u.iter().enumerate() {
+            out[k] = (
+                f64x4::splat(uk.re),
+                f64x4::new([-uk.im, uk.im, -uk.im, uk.im]),
+            );
+        }
+        out
+    }
+
+    /// 1 個の `f64x4` (= 2 Complex64) の re/im を要素内で入れ替える.
+    ///
+    /// `[x0.re, x0.im, x1.re, x1.im] -> [x0.im, x0.re, x1.im, x1.re]`.
+    /// LLVM は AVX target で `vpermilpd` (immediate=0x05) 1 命令に折り畳む.
+    #[inline(always)]
+    fn swap_reim(x: f64x4) -> f64x4 {
+        let a = x.to_array();
+        f64x4::new([a[1], a[0], a[3], a[2]])
+    }
+
+    /// `psi` の axis i=0 (mask=1, block=2 Complex64) ペアに 2×2 ユニタリ u を
+    /// in-place 適用する SIMD 特化版 (Phase 6 C2.5, issue #71).
+    ///
+    /// `psi.len()` は `>= 4` かつ `4` の倍数であること. 1 SIMD iteration で
+    /// **2 連続 block (= 4 Complex64 = 8 f64 = 2 × f64x4)** を処理する. 各
+    /// block には 1 ペアしか入らないので, 2 ペアを 1 つの `f64x4` に集めるため
+    /// **deinterleave (lo half load + hi half load → A=[a0,a1], B=[b0,b1])**
+    /// と書き戻し時の **interleave (new_lo, new_hi → block0, block1)** が必要.
+    /// LLVM は AVX target で各々 `vperm2f128` 1 命令に折り畳む.
+    ///
+    /// `apply_single_mode_axis_i_serial` の `n=1` (dim=2) 退化ケースは
+    /// `len < 4` で SIMD 経路をスキップして scalar fallback に流れる.
+    #[inline]
+    pub(super) fn single_mode_i0(psi: &mut [Complex64], u: &[Complex64; 4]) {
+        debug_assert!(psi.len() >= 4, "len must be >= 4 (2 i=0 blocks)");
+        debug_assert_eq!(
+            psi.len() % 4,
+            0,
+            "len must be a multiple of 4 (2 i=0 blocks)"
+        );
+
+        let ub = unpack_u_broadcast(u);
+        let psi_f64 = as_f64_slice_mut(psi);
+        // 1 SIMD iter = 2 blocks = 4 Complex64 = 8 f64.
+        for psi_chunk in psi_f64.chunks_exact_mut(8) {
+            // SAFETY: chunks_exact_mut(8) で 8 f64 = 64 bytes が保証される.
+            unsafe {
+                // block 0 = [a0.re, a0.im, b0.re, b0.im], block 1 = [a1, b1].
+                let blk0 = load_f64x4_unaligned(psi_chunk.as_ptr());
+                let blk1 = load_f64x4_unaligned(psi_chunk.as_ptr().add(4));
+                let blk0_arr = blk0.to_array();
+                let blk1_arr = blk1.to_array();
+                // Deinterleave: A = [a0, a1] (lo halves), B = [b0, b1] (hi halves).
+                let a_v = f64x4::new([blk0_arr[0], blk0_arr[1], blk1_arr[0], blk1_arr[1]]);
+                let b_v = f64x4::new([blk0_arr[2], blk0_arr[3], blk1_arr[2], blk1_arr[3]]);
+                let a_swap = swap_reim(a_v);
+                let b_swap = swap_reim(b_v);
+
+                // u[k] · A / B を 2 ペア並列で.
+                let u0_a = ub[0].0.mul_add(a_v, ub[0].1 * a_swap);
+                let u1_b = ub[1].0.mul_add(b_v, ub[1].1 * b_swap);
+                let u2_a = ub[2].0.mul_add(a_v, ub[2].1 * a_swap);
+                let u3_b = ub[3].0.mul_add(b_v, ub[3].1 * b_swap);
+
+                let new_lo = u0_a + u1_b;
+                let new_hi = u2_a + u3_b;
+
+                // Interleave back: block 0 = [new_a0, new_b0], block 1 = [new_a1, new_b1].
+                let lo_arr = new_lo.to_array();
+                let hi_arr = new_hi.to_array();
+                let out0 = f64x4::new([lo_arr[0], lo_arr[1], hi_arr[0], hi_arr[1]]);
+                let out1 = f64x4::new([lo_arr[2], lo_arr[3], hi_arr[2], hi_arr[3]]);
+                store_f64x4_unaligned(psi_chunk.as_mut_ptr(), out0);
+                store_f64x4_unaligned(psi_chunk.as_mut_ptr().add(4), out1);
+            }
+        }
+    }
+
+    /// `psi` の axis i=1 (mask=2, block=4 Complex64 = 8 f64) ペアに 2×2 ユニタリ
+    /// u を in-place 適用する SIMD 特化版.
+    ///
+    /// `psi.len()` は `>= 4` かつ `4` の倍数であること. 1 SIMD iteration で
+    /// **1 block (= 4 Complex64 = 8 f64 = 2 × f64x4)** を処理する. lo_half と
+    /// hi_half がちょうど 1 個ずつの f64x4 に乗るので **deinterleave 不要**
+    /// (i=0 と違って shuffle が要らない).
+    #[inline]
+    pub(super) fn single_mode_i1(psi: &mut [Complex64], u: &[Complex64; 4]) {
+        debug_assert!(psi.len() >= 4, "len must be >= 4 (i=1 block)");
+        debug_assert_eq!(psi.len() % 4, 0, "len must be a multiple of 4 (i=1 block)");
+
+        let ub = unpack_u_broadcast(u);
+        let psi_f64 = as_f64_slice_mut(psi);
+        // 1 SIMD iter = 1 block = 4 Complex64 = 8 f64. lo_half / hi_half がそれぞれ
+        // 1 つの f64x4 に乗る.
+        for psi_chunk in psi_f64.chunks_exact_mut(8) {
+            // SAFETY: chunks_exact_mut(8).
+            unsafe {
+                let a_v = load_f64x4_unaligned(psi_chunk.as_ptr());
+                let b_v = load_f64x4_unaligned(psi_chunk.as_ptr().add(4));
+                let a_swap = swap_reim(a_v);
+                let b_swap = swap_reim(b_v);
+
+                let u0_a = ub[0].0.mul_add(a_v, ub[0].1 * a_swap);
+                let u1_b = ub[1].0.mul_add(b_v, ub[1].1 * b_swap);
+                let u2_a = ub[2].0.mul_add(a_v, ub[2].1 * a_swap);
+                let u3_b = ub[3].0.mul_add(b_v, ub[3].1 * b_swap);
+
+                let new_lo = u0_a + u1_b;
+                let new_hi = u2_a + u3_b;
+
+                store_f64x4_unaligned(psi_chunk.as_mut_ptr(), new_lo);
+                store_f64x4_unaligned(psi_chunk.as_mut_ptr().add(4), new_hi);
+            }
+        }
+    }
+
+    /// `psi` の axis i=2 (mask=4, block=8 Complex64 = 16 f64) ペアに 2×2
+    /// ユニタリ u を in-place 適用する SIMD 特化版.
+    ///
+    /// `psi.len()` は `>= 8` かつ `8` の倍数であること. 1 SIMD iteration で
+    /// **1 block (= 8 Complex64 = 16 f64 = 4 × f64x4)** を処理する. lo_half
+    /// (4 Complex64) と hi_half (4 Complex64) がそれぞれ 2 個の f64x4 に乗る.
+    /// この block サイズが `SIMD_BLOCK_MAX = 8` (Complex64 単位) に対応する.
+    #[inline]
+    pub(super) fn single_mode_i2(psi: &mut [Complex64], u: &[Complex64; 4]) {
+        debug_assert!(psi.len() >= 8, "len must be >= 8 (i=2 block)");
+        debug_assert_eq!(psi.len() % 8, 0, "len must be a multiple of 8 (i=2 block)");
+
+        let ub = unpack_u_broadcast(u);
+        let psi_f64 = as_f64_slice_mut(psi);
+        // 1 SIMD iter = 1 block = 8 Complex64 = 16 f64 = 4 × f64x4.
+        // lo_half [0..8 f64] = 2 × f64x4 (= a 軸), hi_half [8..16 f64] = 2 × f64x4
+        // (= b 軸).
+        for psi_chunk in psi_f64.chunks_exact_mut(16) {
+            // SAFETY: chunks_exact_mut(16).
+            unsafe {
+                let a_lo = load_f64x4_unaligned(psi_chunk.as_ptr());
+                let a_hi = load_f64x4_unaligned(psi_chunk.as_ptr().add(4));
+                let b_lo = load_f64x4_unaligned(psi_chunk.as_ptr().add(8));
+                let b_hi = load_f64x4_unaligned(psi_chunk.as_ptr().add(12));
+                let a_lo_swap = swap_reim(a_lo);
+                let a_hi_swap = swap_reim(a_hi);
+                let b_lo_swap = swap_reim(b_lo);
+                let b_hi_swap = swap_reim(b_hi);
+
+                // u[0]·A + u[1]·B → new_lo (各 2 × f64x4)
+                let u0_a_lo = ub[0].0.mul_add(a_lo, ub[0].1 * a_lo_swap);
+                let u0_a_hi = ub[0].0.mul_add(a_hi, ub[0].1 * a_hi_swap);
+                let u1_b_lo = ub[1].0.mul_add(b_lo, ub[1].1 * b_lo_swap);
+                let u1_b_hi = ub[1].0.mul_add(b_hi, ub[1].1 * b_hi_swap);
+                let new_lo_a = u0_a_lo + u1_b_lo;
+                let new_lo_b = u0_a_hi + u1_b_hi;
+
+                // u[2]·A + u[3]·B → new_hi
+                let u2_a_lo = ub[2].0.mul_add(a_lo, ub[2].1 * a_lo_swap);
+                let u2_a_hi = ub[2].0.mul_add(a_hi, ub[2].1 * a_hi_swap);
+                let u3_b_lo = ub[3].0.mul_add(b_lo, ub[3].1 * b_lo_swap);
+                let u3_b_hi = ub[3].0.mul_add(b_hi, ub[3].1 * b_hi_swap);
+                let new_hi_a = u2_a_lo + u3_b_lo;
+                let new_hi_b = u2_a_hi + u3_b_hi;
+
+                store_f64x4_unaligned(psi_chunk.as_mut_ptr(), new_lo_a);
+                store_f64x4_unaligned(psi_chunk.as_mut_ptr().add(4), new_lo_b);
+                store_f64x4_unaligned(psi_chunk.as_mut_ptr().add(8), new_hi_a);
+                store_f64x4_unaligned(psi_chunk.as_mut_ptr().add(12), new_hi_b);
             }
         }
     }
@@ -668,10 +903,40 @@ pub(crate) fn apply_single_mode_axis_i(
 
 /// `apply_single_mode_axis_i` の scalar 単スレッド実装. テスト経路から
 /// rayon 結果との bit-identical 比較に使う.
+///
+/// `feature = "simd"` (default ON, Phase 6 C2.5 / issue #71) では i ∈ {0,1,2}
+/// (stride 1/2/4 連続アクセス領域) を [`simd_kernels::single_mode_i0`] /
+/// `_i1` / `_i2` に dispatch する. `dim < SIMD min` の退化ケース (例: i=0
+/// で n=1 → dim=2) は scalar 経路にフォールバック.
 fn apply_single_mode_axis_i_serial(psi: &mut [Complex64], u: &[Complex64; 4], i: usize, n: usize) {
     let dim = 1usize << n;
     let mask = 1usize << i;
     let block = mask << 1; // 2 * mask
+
+    #[cfg(feature = "simd")]
+    {
+        // SIMD dispatch for i ∈ {0,1,2}. min dim 要件:
+        //   i=0 -> psi.len() >= 4 (2-block SIMD iter)
+        //   i=1 -> psi.len() >= 4 (1-block = 2 × f64x4)
+        //   i=2 -> psi.len() >= 8 (1-block = 4 × f64x4 = SIMD_BLOCK_MAX 単位)
+        // dim は power-of-two なので, psi.len() >= min を満たせば倍数条件も自動成立.
+        match i {
+            0 if psi.len() >= 4 => {
+                simd_kernels::single_mode_i0(psi, u);
+                return;
+            }
+            1 if psi.len() >= 4 => {
+                simd_kernels::single_mode_i1(psi, u);
+                return;
+            }
+            2 if psi.len() >= 8 => {
+                simd_kernels::single_mode_i2(psi, u);
+                return;
+            }
+            _ => {}
+        }
+    }
+
     let mut base = 0usize;
     while base < dim {
         for offset in 0..mask {
@@ -711,6 +976,33 @@ fn apply_single_mode_axis_i_rayon(psi: &mut [Complex64], u: &[Complex64; 4], i: 
 
     if block == dim {
         // 単一 block (i == n-1): 上下半分に分けて pair 並列.
+        //
+        // i ∈ {0,1,2} の SIMD 経路を `apply_single_mode_axis_i_serial` と
+        // 揃えるため, `block == dim` のときも SIMD kernel を直接呼ぶ
+        // (Phase 6 C2.5, issue #71). この分岐は dim = block = 2·mask が
+        // 成立する退化ケースで, SIMD-target な i ∈ {0,1,2} では dim ≤ 8 と
+        // 極小. MIN_RAYON_DIM = 2^17 を超える本番 dim では i = n-1 が常に
+        // 17 以上で SIMD range 外なので, ここで rayon 並列性を失うことは
+        // 実用上ない (テスト用の小 dim 直接呼び出しでのみ通る経路).
+        #[cfg(feature = "simd")]
+        {
+            match i {
+                0 if psi.len() >= 4 => {
+                    simd_kernels::single_mode_i0(psi, u);
+                    return;
+                }
+                1 if psi.len() >= 4 => {
+                    simd_kernels::single_mode_i1(psi, u);
+                    return;
+                }
+                2 if psi.len() >= 8 => {
+                    simd_kernels::single_mode_i2(psi, u);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         let (lo_half, hi_half) = psi.split_at_mut(mask);
         lo_half
             .par_iter_mut()
@@ -731,11 +1023,36 @@ fn apply_single_mode_axis_i_rayon(psi: &mut [Complex64], u: &[Complex64; 4], i: 
         } else {
             // block=2 (i=0) なら chunk_size=64, block=4 (i=1) なら 64, ...
             // block * ceil(RAYON_CHUNK_MIN / block) = block の整数倍で最初の
-            // ≥ RAYON_CHUNK_MIN を取る.
+            // ≥ RAYON_CHUNK_MIN を取る. block ≤ 8 では chunk_size = 64 で
+            // SIMD_BLOCK_MAX = 8 の倍数を自動的に満たす (SIMD i ∈ {0,1,2}
+            // dispatch の前提).
             RAYON_CHUNK_MIN.next_multiple_of(block)
         };
         let chunk_size = chunk_size.min(dim);
         psi.par_chunks_mut(chunk_size).for_each(|chunk| {
+            // SIMD dispatch for i ∈ {0,1,2}: chunk_size = 64 (block ≤ 8 のとき)
+            // なので i ≤ 2 で必要な min dim (4 または 8) と chunk.len() % SIMD
+            // chunk size 倍数の要件は両方満たす. block == dim 経路は本 else 枝に
+            // 入らない (上で分岐済み) ので i = n-1 退化ケースとは衝突しない.
+            #[cfg(feature = "simd")]
+            {
+                match i {
+                    0 if chunk.len() >= 4 => {
+                        simd_kernels::single_mode_i0(chunk, u);
+                        return;
+                    }
+                    1 if chunk.len() >= 4 => {
+                        simd_kernels::single_mode_i1(chunk, u);
+                        return;
+                    }
+                    2 if chunk.len() >= 8 => {
+                        simd_kernels::single_mode_i2(chunk, u);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
             let mut local_base = 0usize;
             while local_base < chunk.len() {
                 let sub = &mut chunk[local_base..local_base + block];
@@ -908,6 +1225,35 @@ fn apply_fused_axes_to_chunk(chunk: &mut [Complex64], u_list: &[[Complex64; 4]],
         let i = i_start + j;
         let mask = 1usize << i;
         let block = mask << 1; // = 2 * mask
+
+        // SIMD dispatch for i ∈ {0,1,2} (Phase 6 C2.5, issue #71). C3 (#64) の
+        // fused 経路は同型の 2-pair update を per-axis で逐次実行するので,
+        // C2.5 の SIMD inner kernel を同じく流用できる. これで trotter_step
+        // (連続 k=4 qubit fusion) の最初の 3 axis が SIMD で走る.
+        //
+        // fused rayon の chunk_size は `n_groups · group_block` (group_block =
+        // 2^(i_start+k)) で構築されるが, dim/(nth·4) が非 power-of-2 のときに
+        // n_groups が奇数になり chunk.len() が SIMD min unit (4 or 8 Complex64)
+        // の倍数とならない場合があり得る. その時は scalar fallback に流す.
+        #[cfg(feature = "simd")]
+        {
+            match i {
+                0 if chunk.len() >= 4 && chunk.len().is_multiple_of(4) => {
+                    simd_kernels::single_mode_i0(chunk, u);
+                    continue;
+                }
+                1 if chunk.len() >= 4 && chunk.len().is_multiple_of(4) => {
+                    simd_kernels::single_mode_i1(chunk, u);
+                    continue;
+                }
+                2 if chunk.len() >= 8 && chunk.len().is_multiple_of(8) => {
+                    simd_kernels::single_mode_i2(chunk, u);
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
         let mut local_base = 0usize;
         while local_base + block <= chunk.len() {
             let sub = &mut chunk[local_base..local_base + block];
@@ -1897,6 +2243,175 @@ mod tests {
                     k,
                     y_simd[k],
                     y_scalar[k]
+                );
+            }
+        }
+    }
+
+    // ===== SIMD single-mode kernel (Phase 6 C2.5, issue #71) のテスト =====
+
+    /// 2×2 SIMD single-mode kernel (`simd_kernels::single_mode_iN`) と
+    /// scalar in-place 経路の数値同一性 fuzz.
+    ///
+    /// issue #71 acceptance: ランダム n ∈ {2..=8}, ランダム unitary, 100 iter,
+    /// `rel < 1e-13`. 各 iteration で n, i ∈ {0,1,2} (capped at n-1), unitary,
+    /// psi 初期値 をランダム化する. SIMD と scalar は同じ
+    /// `(new_lo, new_hi) = (u[0]·a + u[1]·b, u[2]·a + u[3]·b)` を計算するが,
+    /// SIMD 側は broadcast + swizzle で FMA 経路に lower するため ulp 差が
+    /// 出うる. `rel < 1e-13` で評価する.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_single_mode_kernels_match_scalar_fuzz_100iter() {
+        let mut rng = Xor64::new(0x715e_c071_5ec0);
+        for iter in 0..100 {
+            // n ∈ {2..=8}, dim = 2^n ∈ {4..256}.
+            let n = 2 + (rng.next_u64() % 7) as usize;
+            let dim = 1usize << n;
+            // i ∈ {0..min(n-1, 2)}; SIMD カーネルは i ∈ {0,1,2} に特化.
+            let i_cap = (n - 1).min(2);
+            let i = (rng.next_u64() % (i_cap as u64 + 1)) as usize;
+
+            let u = random_unitary_2x2(&mut rng);
+            let psi0: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+
+            // SIMD 経路: kernel を直接呼ぶ.
+            let mut psi_simd = psi0.clone();
+            match i {
+                0 => simd_kernels::single_mode_i0(&mut psi_simd, &u),
+                1 => simd_kernels::single_mode_i1(&mut psi_simd, &u),
+                2 => simd_kernels::single_mode_i2(&mut psi_simd, &u),
+                _ => unreachable!("i is capped to {{0,1,2}}"),
+            }
+
+            // Scalar reference: 設計書 §5.1.2 の 2 重ループ形を直接実行.
+            let mut psi_scalar = psi0;
+            let mask = 1usize << i;
+            let block = mask << 1;
+            let mut base = 0usize;
+            while base < dim {
+                for offset in 0..mask {
+                    let lo = base + offset;
+                    let hi = lo + mask;
+                    let a = psi_scalar[lo];
+                    let b = psi_scalar[hi];
+                    psi_scalar[lo] = u[0] * a + u[1] * b;
+                    psi_scalar[hi] = u[2] * a + u[3] * b;
+                }
+                base += block;
+            }
+
+            // 相対誤差.
+            let mut diff_sq = 0.0_f64;
+            let mut ref_sq = 0.0_f64;
+            for k in 0..dim {
+                let d = psi_simd[k] - psi_scalar[k];
+                diff_sq += d.norm_sqr();
+                ref_sq += psi_scalar[k].norm_sqr();
+            }
+            let rel = diff_sq.sqrt() / ref_sq.sqrt().max(1.0);
+            assert!(
+                rel < 1e-13,
+                "iter={}, n={}, i={}: SIMD-vs-scalar single_mode rel={} >= 1e-13",
+                iter,
+                n,
+                i,
+                rel,
+            );
+        }
+    }
+
+    /// SIMD single-mode カーネルの境界ケース (block ぴったりの最小 dim).
+    ///
+    /// - i=0: psi.len() = 4 (2 block ぴったり, SIMD i=0 の 1 SIMD iter).
+    ///   n=1 (dim=2) は SIMD min 未満で `apply_single_mode_axis_i_serial`
+    ///   側で scalar fallback に流れるため, ここでは直接 dim=4 を踏む.
+    /// - i=1: psi.len() = 4 (1 block ぴったり).
+    /// - i=2: psi.len() = 8 (1 block ぴったり = SIMD_BLOCK_MAX).
+    ///
+    /// 各々 scalar reference (in-place 2 重ループ) と要素ごとに比較する.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_single_mode_kernels_min_dim_boundaries() {
+        let mut rng = Xor64::new(0x_b0ad_1234_5678_9abc);
+
+        // 共通: scalar reference を inline で書く.
+        let run_scalar = |psi: &mut [Complex64], u: &[Complex64; 4], i: usize| {
+            let mask = 1usize << i;
+            let block = mask << 1;
+            let dim = psi.len();
+            let mut base = 0usize;
+            while base < dim {
+                for offset in 0..mask {
+                    let lo = base + offset;
+                    let hi = lo + mask;
+                    let a = psi[lo];
+                    let b = psi[hi];
+                    psi[lo] = u[0] * a + u[1] * b;
+                    psi[hi] = u[2] * a + u[3] * b;
+                }
+                base += block;
+            }
+        };
+
+        // i=0, dim=4 (2 block = SIMD 1 iter).
+        {
+            let u = random_unitary_2x2(&mut rng);
+            let psi0: Vec<Complex64> = (0..4).map(|_| rng.complex_signed()).collect();
+            let mut psi_simd = psi0.clone();
+            simd_kernels::single_mode_i0(&mut psi_simd, &u);
+            let mut psi_scalar = psi0;
+            run_scalar(&mut psi_scalar, &u, 0);
+            for k in 0..4 {
+                let diff = (psi_simd[k] - psi_scalar[k]).norm();
+                assert!(
+                    diff < 1e-14,
+                    "i=0, k={}: SIMD={} vs scalar={} (diff={})",
+                    k,
+                    psi_simd[k],
+                    psi_scalar[k],
+                    diff,
+                );
+            }
+        }
+
+        // i=1, dim=4 (1 block).
+        {
+            let u = random_unitary_2x2(&mut rng);
+            let psi0: Vec<Complex64> = (0..4).map(|_| rng.complex_signed()).collect();
+            let mut psi_simd = psi0.clone();
+            simd_kernels::single_mode_i1(&mut psi_simd, &u);
+            let mut psi_scalar = psi0;
+            run_scalar(&mut psi_scalar, &u, 1);
+            for k in 0..4 {
+                let diff = (psi_simd[k] - psi_scalar[k]).norm();
+                assert!(
+                    diff < 1e-14,
+                    "i=1, k={}: SIMD={} vs scalar={} (diff={})",
+                    k,
+                    psi_simd[k],
+                    psi_scalar[k],
+                    diff,
+                );
+            }
+        }
+
+        // i=2, dim=8 (1 block = SIMD_BLOCK_MAX).
+        {
+            let u = random_unitary_2x2(&mut rng);
+            let psi0: Vec<Complex64> = (0..8).map(|_| rng.complex_signed()).collect();
+            let mut psi_simd = psi0.clone();
+            simd_kernels::single_mode_i2(&mut psi_simd, &u);
+            let mut psi_scalar = psi0;
+            run_scalar(&mut psi_scalar, &u, 2);
+            for k in 0..8 {
+                let diff = (psi_simd[k] - psi_scalar[k]).norm();
+                assert!(
+                    diff < 1e-14,
+                    "i=2, k={}: SIMD={} vs scalar={} (diff={})",
+                    k,
+                    psi_simd[k],
+                    psi_scalar[k],
+                    diff,
                 );
             }
         }

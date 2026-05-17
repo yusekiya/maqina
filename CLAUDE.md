@@ -199,28 +199,41 @@ thread pool が 2 系統並走するため運用ルール:
 - **`--no-default-features` ビルド**: scalar 単スレッド経路に戻り rayon 依存
   なし。`RAYON_NUM_THREADS` は無視される。
 
-## SIMD 経路 (Phase 6 C2, issue #63)
+## SIMD 経路 (Phase 6 C2 / C2.5, issue #63 / #71)
 
-Phase 6 C2 (issue #63) で `apply_h_kryanneal` の bit-flip pass のうち
-i ∈ {0, 1, 2} (stride 1/2/4 連続アクセス領域) を `wide::f64x4` 特化済み
-(`feature = "simd"`, default ON)。
+Phase 6 C2 (issue #63) で `apply_h_kryanneal` の bit-flip pass の i ∈
+{0, 1, 2} を `wide::f64x4` 特化, C2.5 (issue #71) で同じく
+`apply_single_mode_axis_i` (Trotter 経路の 2×2 ユニタリ pair update) の
+i ∈ {0, 1, 2} を SIMD 特化 (`feature = "simd"`, default ON)。
 
-- SIMD inner kernel (`src/matvec.rs::simd_kernels::bitflip_iN`) は
-  `apply_h_kryanneal_serial` と `apply_h_kryanneal_rayon` の両 path から
-  共通で呼ばれる。per-thread 最適化なので rayon 並列化と直交する。
+- SIMD inner kernel は `src/matvec.rs::simd_kernels` モジュールに集約:
+  - `bitflip_i{0,1,2}` (C2): `y[k] += coeff · v[k ^ mask]` を broadcast +
+    FMA で計算.
+  - `single_mode_i{0,1,2}` (C2.5): 2×2 complex matmul を **complex
+    broadcast + in-register swizzle** で f64x4 化
+    (`u_k · x_pair = splat(u[k].re) · x_pair + [-u[k].im, u[k].im, ...]
+    · x_swap` の 2 Complex64 並列, 詳細は `simd_kernels` モジュール docstring).
+- `bitflip_iN` は `apply_h_kryanneal_{serial,rayon}` の両 path から,
+  `single_mode_iN` は `apply_single_mode_axis_i_{serial,rayon}` および C3 の
+  `apply_fused_axes_to_chunk` (trotter 経路の multi-qubit fusion inner kernel)
+  から共通で呼ばれる。per-thread 最適化なので rayon 並列化と直交する。
 - rayon path では SIMD カーネルの block-aligned 前提を満たすため
-  chunk_size を `SIMD_BLOCK_MAX = 8` Complex64 の倍数に丸める。
+  chunk_size を `SIMD_BLOCK_MAX = 8` Complex64 の倍数に丸める。fused 経路は
+  group_block (= 2^(i_start+k)) の倍数で構築されるが,
+  `target = dim/(nth·4)` が非 power-of-2 のとき n_groups が奇数になる
+  ケースがあり, defensive な alignment check (`chunk.len() % {4,8} == 0`) を
+  `apply_fused_axes_to_chunk` の SIMD dispatch に入れている。
 - **実 SIMD 性能向上は build 時の `target-cpu` 設定に依存する**: default の
   `x86_64` target では `wide` が scalar fallback ([f64; 4] 相当) を選び
   正確性のみ提供する。**本番 measure は `RUSTFLAGS="-C target-cpu=native"`
   を必ず設定する** (AVX2 / AVX-512 / NEON を `wide` の `target_feature` cfg
   が拾えるようになる)。
-- `apply_single_mode_axis_i` の SIMD 特化 (2×2 complex matmul) は
-  follow-up issue として deferred (本 issue #63 のスコープ外)。
 - **`__has_simd__` / `__has_rayon__` フラグ**: `_rust.__has_simd__: bool` /
   `_rust.__has_rayon__: bool` が build profile を露出する (`__has_blas__`
   と同様)。bench スクリプト (`bench_simd_scaling.py`) はこれで build を
-  識別する。
+  識別する。bench は C2 と C2.5 で kernel 軸を分け
+  (`kernel = apply_h_kryanneal / apply_single_mode_axis_i`),
+  C2.5 の per-axis (`i0/i1/i2`) は `mode` 軸で別カラムに展開する。
 - **`--no-default-features` ビルド**: SIMD 依存も外れ scalar 経路に戻る。
   `wide` クレートはリンクされない。
 
