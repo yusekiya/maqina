@@ -6,7 +6,7 @@ per-step time を計測する.
 | kernel | 計測理由 |
 |---|---|
 | ``trotter_step`` | Phase 6 C3 の主スコープ. ``apply_single_mode_axis_i`` を 1 軸ずつ ``n`` 回呼ぶ旧実装から, 連続 ``FUSE_K = 4`` qubit を 1 つの rayon chunk closure 内で per-axis 逐次に適用する ``apply_multi_qubit_gate_fused`` 経路に書き換えた効果を測る. 期待: per-step rayon barrier 数 ``2n+2 → n/FUSE_K + 2``, N=20 で 40 → 7. compute は per-axis × k と同じ (`2k·dim` ops, 増えない) で chunk-resident cache 効果と barrier 削減のみで稼ぐ (dense 2^k×2^k matmul 経路は本 PR 初版で 0.81× regression したため放棄). |
-| ``apply_h_kryanneal`` | Phase 6 C3 の副次スコープ. ``RAYON_CHUNK_MAX`` を ``1<<14`` (= 256 KB chunk) から ``1<<13`` (= 128 KB chunk) に縮めて per-core L2 fit を保証した効果. 高 i pass で chunk-partner block の DRAM round trip が減ることを期待. |
+| ``apply_h_kryanneal`` | Phase 6 D (issue #79) の主スコープ. ``apply_h_kryanneal_rayon`` を **group-fused 3-phase 形** (per-chunk diag + low-i / group-fused 高 i / per-chunk 残り高 i) に書き換えた効果. 連続 ``fused_k`` 個の高 i axes (mask ≥ chunk_size) の partner 参照を ``2^fused_k`` 個の連続 chunk から成る group (L2 resident) で完結させて DRAM v traffic を ``dim · (1 + h_baseline) → dim · (1 + h_naive)`` (``h_naive = h_baseline - fused_k``) に削減することを期待. C3 期の Phase 6 C3 副次スコープ (``RAYON_CHUNK_MAX`` 縮小) は本 issue で superseded. 詳細は ``docs/design.md`` §5.1.4. |
 
 両 kernel とも本 script は **計測本体のみ** 提供する. baseline (Phase 6 C2
 完了時点 = main branch tip) と after (C3 適用 = 本 PR branch tip) の per-step
@@ -31,13 +31,14 @@ per-step time を計測する.
     # 3. 手動 diff (md 表) は per-cell speedup = baseline_median / after_median を
     #    表計算で組む. 自動化が必要になったら mode_compare をフォローアップで足す.
 
-## Acceptance (issue #64)
+## Acceptance (issue #64 / #79)
 
-- N=20, cpu_count=64 Linux サーバー, ``RAYON_NUM_THREADS=64``,
+- (issue #64, 達成済み) N=20, cpu_count=64 Linux サーバー, ``RAYON_NUM_THREADS=64``,
   ``BLAS_THREADS=1`` で ``trotter_step`` の per-step time が baseline の
-  **>= 1.3×** 改善.
-- 副次目標: ``apply_h_kryanneal`` も同条件で改善 (chunk_size 効果). 数値
-  目標は設定しないが median speedup を md に出す.
+  **>= 1.3×** 改善 (実測 4.01×).
+- (issue #79, 本 PR で検証) 同条件で ``apply_h_kryanneal`` の per-step time が
+  Phase 6 C2.5 完了時点 (main tip) の baseline に対し **>= 1.3×** 改善.
+  副次目標: N ∈ {18, 22} で regression なし.
 - 数値一致: 別途 ``cargo test`` + ``uv run pytest`` で ``rel < 1e-13`` 確認済み
   (本 bench では検証しない).
 

@@ -237,6 +237,33 @@ i ∈ {0, 1, 2} を SIMD 特化 (`feature = "simd"`, default ON)。
 - **`--no-default-features` ビルド**: SIMD 依存も外れ scalar 経路に戻る。
   `wide` クレートはリンクされない。
 
+## apply_h_kryanneal の DRAM bandwidth 経路 (Phase 6 D, issue #79)
+
+Phase 6 D (issue #79) で `apply_h_kryanneal_rayon` の高 i pass を
+**group-fused 3-phase 形** に書き換え (詳細は `docs/design.md` §5.1.4)。
+chunk closure に diag + 全 i を fuse する旧 C1 形では高 i (`mask >=
+chunk_size`) の partner が別 chunk から DRAM 再 load されていたのを,
+2^fused_k 個の連続 chunk を 1 つの super-chunk (= group) にまとめて 1 thread
+に渡し group 内高 i partner を L2 resident で完結させる.
+
+- 3 phase: (1) per-chunk diag + low-i (`i < chunk_log`), (2) group-fused 高 i
+  (`i ∈ [chunk_log, i_split)`), (3) per-chunk 残り高 i (`i >= i_split`).
+  各 `y[k]` への accumulation 順序は `diag → i=0 → ... → i=n-1` で旧 C1 /
+  serial と一致 → **bit-identical 維持**, 既存テスト書き換え不要。
+- `MAX_FUSED_HIGH_K = 6` で group_size を ~1 MB (典型 L2/core) 以下に抑える.
+  `fused_k` は `min(n - chunk_log, MAX_FUSED_HIGH_K, log2(n_chunks_total) -
+  log2_ceil(nth))` で並列度確保. `fused_k = 0` 時は旧 C1 経路にフォールバック
+  (`apply_h_kryanneal_rayon_c1`)。
+- 改善対象は **`apply_h_kryanneal` のみ** (Lanczos / CFM4:2 / M2 から呼ばれる).
+  `apply_single_mode_axis_i` (Trotter 経路) は C3 (#64) で既に group fusion
+  済みなので Phase D の対象外。
+- bench: `benchmarks/bench_block_fusion.py --kernels apply_h_kryanneal` で
+  N ∈ {18, 20, 22} を計測 (script は C3 で整備済み, 新規 bench 不要)。
+  acceptance は N=20 で >=1.3× 改善 (bench 運用は pre-merge cycle,
+  `.claude/solve-overrides.md` 参照)。
+- **`--no-default-features` ビルド**: rayon 自体が外れて scalar 単スレッド
+  `apply_h_kryanneal_serial` 経路に戻り Phase D も無効。
+
 ## 設計判断の出典 (cv_ising 流用箇所)
 
 - CFM4:2 係数: `cv_ising/rust/src/cfm4.rs` の `a_high = 1/4 + √3/6` 等

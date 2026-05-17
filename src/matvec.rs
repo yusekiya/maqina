@@ -76,6 +76,27 @@ const RAYON_CHUNK_MAX: usize = 1 << 14;
 #[cfg(feature = "rayon")]
 const RAYON_CHUNK_MIN: usize = 1 << 6;
 
+/// Phase 6 D (issue #79): `apply_h_kryanneal_rayon` の高 i pass fusion で
+/// 1 つの **group** (super-chunk) に詰める axes 数の上限.
+///
+/// `group_size = chunk_size << fused_k` で `2^fused_k` 個の連続 chunk が 1
+/// group を成し, group 全体が L2 cache に収まることを狙う. group 内の chunk
+/// 間で高 i ペア (`v[k ^ (1<<i)]`, `mask >= chunk_size`) は完全に L2 resident
+/// となり, 当該 axes pass の DRAM 再 load が消える. fused 外の高 i axes は
+/// Phase 3 で従来通り naive な per-chunk pass にフォールバック.
+///
+/// 上限 `6` = 2^6 = 64 chunks/group. 典型的な Skylake server で L2 = 1 MB
+/// per core, chunk_size = 1024 (16 KB Complex64) なら group_size = 64K =
+/// 1 MB. それ以上の fusion は L2 spill して効果を失う.
+///
+/// 並列度確保のため実際の `fused_k` は **`floor(log2(n_chunks_total / nth))`**
+/// で thread 数に応じて自動的に縮む (`apply_h_kryanneal_rayon` 内で計算).
+/// thread 数が dim に対して大きい (`n_chunks_total < nth`) ケースでは
+/// `fused_k = 0` になり Phase D は無効, 従来の C1 chunk closure 経路に
+/// フォールバックする.
+#[cfg(feature = "rayon")]
+const MAX_FUSED_HIGH_K: u32 = 6;
+
 /// SIMD bit-flip kernel が処理する最大 block サイズ (Complex64 要素数).
 /// i=2 (mask=4) の block = `2 * mask = 8` Complex64 = 16 f64 = 4 × f64x4 を
 /// 1 SIMD ループ内で処理する. rayon path で chunk_size をこの倍数に揃える
@@ -735,30 +756,76 @@ fn apply_h_kryanneal_serial(
     }
 }
 
-/// `apply_h_kryanneal` の rayon 並列実装. `y` を `par_chunks_mut(chunk_size)`
-/// で分割し, 各 chunk closure 内で diag pass → 全 i bit-flip pass を完走する.
+/// `apply_h_kryanneal` の rayon 並列実装. Phase 6 D (issue #79) 以降は
+/// **group-fused 3-phase 形** で実装し, 各 group (super-chunk = `2^fused_k`
+/// 個の連続 chunk) を 1 thread に渡して group 内の高 i ペアを L2 cache resident
+/// で完結させる.
 ///
-/// # 並列化スキーム (cache-blocked 形)
+/// # 背景: Phase 6 C1 / C2 の bandwidth 飽和
 ///
-/// chunk 単位の closure に diag + 全 i を **fuse** することで:
+/// Phase 6 C1 (issue #62) で導入した「`y_chunk` を 1 thread に渡し chunk closure
+/// 内で diag + 全 i bit-flip pass を fuse」する cache-blocked 形は, 低 i
+/// (`mask < chunk_size`) では partner が chunk-internal で L1 resident になり
+/// 有効に機能する一方, 高 i (`mask >= chunk_size`) では partner が別 chunk に
+/// あるため **各高 i pass で `chunk_size` バイト分の v を DRAM から再 load**
+/// する. issue #68 follow-up bench で N=20 / 64 threads で **6.13× で飽和**
+/// (理論 64× の 9.6%) し DRAM bandwidth bound と判明.
 ///
-/// 1. `y_chunk` (~`chunk_size`要素) が closure 実行中 L1 cache resident に
-///    保たれ, `(n+1)` 回の touch を re-load なしで処理できる.
-/// 2. rayon barrier が **per-call 1 個** で済む (i ごとに par section を
-///    張る形だと `(n+1)` 個入る). dim が小さい matvec を Lanczos の各
-///    step で繰り返す呼出パターンに有利.
-/// 3. 後段の SIMD (Phase 6 C2) は内側 `li` loop に, cache block-fusion
-///    (Phase 6 C3) は同 closure 内 i loop に直接重ねられる.
+/// # Phase 6 D (issue #79) の解
 ///
-/// `v[k ^ mask]` の読み込みは chunk 境界を跨ぐことがある (mask > chunk_size)
-/// が `v` は read-only で race-free. 各 `y[k]` への書き込みは disjoint な
-/// chunk 内に閉じる.
+/// 連続 `fused_k` 個の高 i axes (`i ∈ [chunk_log, i_split)`,
+/// `chunk_log = log2(chunk_size)`, `i_split = chunk_log + fused_k`) について,
+/// 2^fused_k 個の連続 chunk を **1 つの group** にまとめて 1 thread に渡す
+/// (`par_chunks_mut(group_size)`). group 内の chunk index `c` の partner は
+/// `c ^ (1 << (i - chunk_log))` で全て同じ group 内に閉じるため, group 全体が
+/// L2 resident なら高 i pass の partner 参照は **DRAM 再 load ゼロ** で済む.
+///
+/// アルゴリズムは 3 phase:
+///
+/// 1. **Phase 1 (per-chunk diag + low-i)**: 各 chunk について `y_chunk =
+///    b_t * H_p[k] * v[k]` 上書きの diag pass + 低 i (`i ∈ [0, chunk_log)`,
+///    mask < chunk_size) の bit-flip pass を `y_chunk` L1 resident で完走.
+///    既存 C1 の inner loop と同型. SIMD i ∈ {0,1,2} 流用.
+/// 2. **Phase 2 (group-fused 高 i)**: group 内全 chunk について
+///    `i ∈ [chunk_log, i_split)` の `fused_k` 個の axes を accumulate.
+///    各 `(c, j)` ペアで `y_chunk[c] += coeff_j * v_partner` を 1 sweep で
+///    実行 (partner = group 内の別 chunk, L2 resident).
+/// 3. **Phase 3 (per-chunk 残り高 i, naive)**: `fused_k < n - chunk_log` の
+///    残り高 i axes (`i ∈ [i_split, n)`) は従来通り chunk ごとに naive な
+///    `v[k ^ mask]` 参照. partner は別 group の chunk なので DRAM 経由.
+///
+/// 各 `y[k]` への accumulation 順序は **diag → i=0 → ... → i=n-1** で
+/// serial と完全一致 (3 phase は i の昇順を分割するだけ). `--no-default-features`
+/// / serial 経路と **bit-identical** な結果を保つ.
+///
+/// # `fused_k` の選択
+///
+/// 並列度 (`n_groups >= nth` で全 thread に仕事) と L2 fit
+/// (`group_size <= ~1 MB`) のトレードオフ. 具体的には
+/// `fused_k = min(n - chunk_log, MAX_FUSED_HIGH_K, log2(n_chunks_total / nth))`.
+///
+/// - 小 dim (`n_chunks_total < nth`) では `fused_k = 0` で Phase 2 を完全に
+///   スキップし, 既存 C1 (chunk closure で diag + 全 i fuse) と同じ動作.
+/// - 大 dim (`N >= 20`) では `fused_k = 4-6` で高 i のうち最初の数本を
+///   group-fused 化, 残りは Phase 3 で naive にフォールバック.
 ///
 /// # チャンクサイズ
 ///
 /// `current_num_threads() * 4` 個のチャンクを目標に `dim / (nth*4)` を取り,
 /// [`RAYON_CHUNK_MIN`] (closure overhead 償却) と [`RAYON_CHUNK_MAX`]
-/// (L2 cache 上限) で clamp する.
+/// (L1 cache 上限) で clamp し, Phase D の XOR partner indexing のため
+/// **power-of-2 に丸め下げ** する. SIMD ON では SIMD_BLOCK_MAX (=8) の
+/// 倍数も保証されるが, pow2 ≥ 64 なので自動.
+///
+/// # DRAM v traffic (per matvec call)
+///
+/// - Baseline (C1 のみ): `dim * (1 + h_baseline)` 要素読み出し
+///   (h_baseline = n - log2(chunk_size_baseline))
+/// - Phase D 適用: `dim * (1 + h_naive)` 要素読み出し
+///   (h_naive = n - log2(group_size) = h_baseline - fused_k)
+///
+/// 改善率 ≈ `(1 + h_baseline) / (1 + h_naive)`. N=20, fused_k=4 で 9/5 = 1.8×
+/// (理論値; 実測は cache 利用効率と Phase 3 が支配項に変わる点を考慮).
 #[cfg(feature = "rayon")]
 fn apply_h_kryanneal_rayon(
     v: &[Complex64],
@@ -771,41 +838,208 @@ fn apply_h_kryanneal_rayon(
 ) {
     let dim = 1usize << n;
     let nth = rayon::current_num_threads().max(1);
+
+    // 1) Base chunk_size: 既存 C1 の動的計算と clamp.
     let chunk_size = (dim / (nth * 4)).clamp(RAYON_CHUNK_MIN, RAYON_CHUNK_MAX);
 
-    // `feature = "simd"` ON では SIMD kernel が block-aligned 入力を前提とする
-    // ため, chunk_size を SIMD_BLOCK_MAX (=8 Complex64) の倍数に丸める. これに
-    // より各 chunk start `idx * chunk_size` が SIMD block 境界に揃い, i ∈ {0,1,2}
-    // で chunk-internal な v[k ^ mask] アクセスが SIMD カーネルの前提を満たす.
-    // RAYON_CHUNK_MIN = 64 も SIMD_BLOCK_MAX の倍数なので, 丸めた後でも
-    // chunk_size ≥ MIN が保たれる. SIMD OFF では従来の C1 chunking のまま.
+    // SIMD path: chunk_size を SIMD_BLOCK_MAX (=8 Complex64) の倍数に丸める.
+    // これにより chunk start が SIMD block 境界に揃い, i ∈ {0,1,2} の
+    // chunk-internal v[k ^ mask] 参照が SIMD kernel の前提を満たす.
     #[cfg(feature = "simd")]
     let chunk_size = chunk_size - (chunk_size % SIMD_BLOCK_MAX);
 
+    // Phase D の XOR partner indexing は chunk_size = power of 2 を仮定する
+    // (mask = 1 << i が chunk_size の整数倍になるため). 一般 nth (例: 12, 48)
+    // では `dim / (nth*4)` が非 pow2 になりうるので **大きい方の pow2 に
+    // 丸め下げ** る. RAYON_CHUNK_MIN = 64 = pow2 が下限のため切下げ後の値
+    // は常に >= 64 = pow2 となる (pow2 / 2 >= 32 < 64 のケースは clamp で
+    // 64 まで持ち上がる).
+    let chunk_size = if chunk_size.is_power_of_two() {
+        chunk_size
+    } else {
+        chunk_size.next_power_of_two() >> 1
+    }
+    .max(RAYON_CHUNK_MIN);
+
+    // 2) fused_k 計算. Phase D は連続 fused_k 個の高 i axes を group fusion.
+    //   - 上限 MAX_FUSED_HIGH_K (L2 budget)
+    //   - 上限 n - chunk_log (高 i axes の本数; chunk_log >= n なら 0)
+    //   - 上限 log2(n_chunks_total / nth) (n_groups >= nth で並列度確保)
+    let chunk_log = chunk_size.trailing_zeros() as usize;
+    let dim_log = n; // dim = 1 << n
+    let n_chunks_total_log = dim_log.saturating_sub(chunk_log);
+    let high_i_count = n.saturating_sub(chunk_log) as u32;
+    let nth_log_ceil = (nth as u32).next_power_of_two().trailing_zeros();
+    let max_fused_by_par = (n_chunks_total_log as u32).saturating_sub(nth_log_ceil);
+    let fused_k = high_i_count.min(MAX_FUSED_HIGH_K).min(max_fused_by_par);
+
+    if fused_k == 0 {
+        // Phase D 無効: 従来の C1 経路 (chunk closure で diag + 全 i fuse).
+        // 小 dim や thread 数過多のケースで Phase 2 の group fusion が
+        // 並列度を奪う場合のフォールバック.
+        apply_h_kryanneal_rayon_c1(v, y, h_x, h_p_diag, a_t, b_t, chunk_size);
+        return;
+    }
+
+    // 3) Phase D 本体. group_size = chunk_size * 2^fused_k.
+    let group_size = chunk_size << (fused_k as usize);
+    let i_split = chunk_log + fused_k as usize;
+
+    // Phase 2 で使う group 内 axes の係数を事前計算 (per group の closure
+    // で再計算しない).
+    let mut fused_coeffs = [0.0f64; MAX_FUSED_HIGH_K as usize];
+    for j in 0..(fused_k as usize) {
+        fused_coeffs[j] = -a_t * h_x[chunk_log + j];
+    }
+
+    y.par_chunks_mut(group_size)
+        .enumerate()
+        .for_each(|(g_idx, y_group)| {
+            let group_base = g_idx * group_size;
+            let group_len = y_group.len();
+
+            // Phase 1: per-chunk diag + low-i (i ∈ [0, chunk_log)).
+            // 各 chunk について y_chunk L1 resident で diag → low-i 全 i を完走.
+            // SIMD i ∈ {0,1,2} は既存 simd_kernels::bitflip_iN を流用.
+            for (c, y_chunk) in y_group.chunks_mut(chunk_size).enumerate() {
+                let base = group_base + c * chunk_size;
+                let chunk_len = y_chunk.len();
+                // diag pass.
+                for (li, y_k) in y_chunk.iter_mut().enumerate() {
+                    let k = base + li;
+                    *y_k = Complex64::new(b_t * h_p_diag[k], 0.0) * v[k];
+                }
+                // low-i bit-flip pass (i < chunk_log).
+                for (i, &h_x_i) in h_x[..chunk_log].iter().enumerate() {
+                    let coeff = -a_t * h_x_i;
+                    if coeff == 0.0 {
+                        continue;
+                    }
+                    let mask = 1usize << i;
+
+                    #[cfg(feature = "simd")]
+                    match i {
+                        0 => {
+                            simd_kernels::bitflip_i0(&v[base..base + chunk_len], y_chunk, coeff);
+                            continue;
+                        }
+                        1 => {
+                            simd_kernels::bitflip_i1(&v[base..base + chunk_len], y_chunk, coeff);
+                            continue;
+                        }
+                        2 => {
+                            simd_kernels::bitflip_i2(&v[base..base + chunk_len], y_chunk, coeff);
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    for (li, y_k) in y_chunk.iter_mut().enumerate() {
+                        let k = base + li;
+                        *y_k += Complex64::new(coeff, 0.0) * v[k ^ mask];
+                    }
+                }
+            }
+
+            // Phase 2: group-fused 高 i (i ∈ [chunk_log, i_split)).
+            // 各 chunk c について fused_k 個の axes を順次 accumulate. j 内側
+            // ループの partner は同じ group 内の別 chunk なので, group 全体が
+            // L2 resident なら DRAM 再 load なし.
+            //
+            // 退化ケース: 最後の group が group_size 未満 (dim < group_size *
+            // (g_idx+1) は dim が group_size の整数倍なので起きないが,
+            // group_len = y_group.len() で防御). n_chunks_per_group 未満の
+            // chunk しか含まない場合 (group_len < group_size), partner index
+            // が group 外を指す可能性があるため Phase 2 をスキップして
+            // Phase 3 にフォールスルー.
+            //
+            // dim は 2^n, group_size は 2^(chunk_log + fused_k), n_groups =
+            // dim / group_size = 2^(n - chunk_log - fused_k) は整数なので
+            // 全 group が等サイズ. group_len < group_size は実用上発生しない
+            // が assert で防御.
+            debug_assert_eq!(
+                group_len, group_size,
+                "Phase D は全 group が等サイズ前提 (dim/group_size 整数性)",
+            );
+            for (c, y_chunk) in y_group.chunks_mut(chunk_size).enumerate() {
+                let chunk_len = y_chunk.len();
+                for (j, &coeff) in fused_coeffs[..fused_k as usize].iter().enumerate() {
+                    if coeff == 0.0 {
+                        continue;
+                    }
+                    let c_partner = c ^ (1usize << j);
+                    let partner_start = group_base + c_partner * chunk_size;
+                    let v_partner = &v[partner_start..partner_start + chunk_len];
+                    for (y_k, &v_k) in y_chunk.iter_mut().zip(v_partner.iter()) {
+                        *y_k += Complex64::new(coeff, 0.0) * v_k;
+                    }
+                }
+            }
+
+            // Phase 3: per-chunk 残り高 i (i ∈ [i_split, n)). partner は別
+            // group の chunk → DRAM 経由 (従来の C1 と同じ traffic).
+            if i_split < n {
+                for (c, y_chunk) in y_group.chunks_mut(chunk_size).enumerate() {
+                    let base = group_base + c * chunk_size;
+                    for (offset, &h_x_i) in h_x[i_split..n].iter().enumerate() {
+                        let i = i_split + offset;
+                        let coeff = -a_t * h_x_i;
+                        if coeff == 0.0 {
+                            continue;
+                        }
+                        let mask = 1usize << i;
+                        for (li, y_k) in y_chunk.iter_mut().enumerate() {
+                            let k = base + li;
+                            *y_k += Complex64::new(coeff, 0.0) * v[k ^ mask];
+                        }
+                    }
+                }
+            }
+        });
+}
+
+/// Phase 6 C1 (issue #62) 形の `apply_h_kryanneal_rayon` 元実装.
+///
+/// `fused_k == 0` (= Phase D の group fusion が並列度確保のため無効) のとき
+/// `apply_h_kryanneal_rayon` から呼ばれる. 小 dim や `nth` が `n_chunks_total`
+/// と近いケースで Phase 2 が逆効果になる経路として残す.
+///
+/// アルゴリズムは Phase D 以前と同型: `y` を `par_chunks_mut(chunk_size)` で
+/// 分割し各 chunk closure 内で diag pass → 全 i bit-flip pass を完走する.
+/// `y_chunk` を closure 中 L1 resident に保ち, SIMD i ∈ {0,1,2} は既存
+/// `simd_kernels::bitflip_iN` に dispatch. i ≥ 3 は scalar inner loop で
+/// chunk 外 v[k^mask] を partner として読む (DRAM 経由, この経路では fusion なし).
+#[cfg(feature = "rayon")]
+fn apply_h_kryanneal_rayon_c1(
+    v: &[Complex64],
+    y: &mut [Complex64],
+    h_x: &[f64],
+    h_p_diag: &[f64],
+    a_t: f64,
+    b_t: f64,
+    chunk_size: usize,
+) {
+    // `n` は受け取らない (dim は y.len() / h_p_diag.len() で確定). 既存
+    // `apply_h_kryanneal_rayon` シグネチャから `n` を落とすことで
+    // `too_many_arguments` clippy lint を回避.
     y.par_chunks_mut(chunk_size)
         .enumerate()
         .for_each(|(idx, y_chunk)| {
             let base = idx * chunk_size;
             let chunk_len = y_chunk.len();
-            // 対角 pass: y_chunk[li] = b_t · H_p[k] · v[k].
+            // 対角 pass.
             for (li, y_k) in y_chunk.iter_mut().enumerate() {
                 let k = base + li;
                 *y_k = Complex64::new(b_t * h_p_diag[k], 0.0) * v[k];
             }
-            // bit-flip pass: 全 i を同一 chunk 内で完走 (y_chunk が L1 resident).
+            // bit-flip pass: 全 i.
             for (i, &h_x_i) in h_x.iter().enumerate() {
                 let coeff = -a_t * h_x_i;
-                // coeff == 0 のときは数値的に no-op なのでスキップ. sparse h_x で
-                // 支配的に効く最適化 (serial path と同じ; 詳細はそちらコメント).
                 if coeff == 0.0 {
                     continue;
                 }
                 let mask = 1usize << i;
 
-                // SIMD dispatch for i ∈ {0, 1, 2}: mask ≤ 4 < SIMD_BLOCK_MAX なので
-                // chunk-internal な v[k ^ mask] (k ∈ [base, base+chunk_len)) が
-                // chunk subslice 内に閉じる. base は SIMD_BLOCK_MAX 倍数で揃って
-                // いるため SIMD kernel の block-aligned 前提も満たす.
                 #[cfg(feature = "simd")]
                 match i {
                     0 => {
@@ -820,12 +1054,9 @@ fn apply_h_kryanneal_rayon(
                         simd_kernels::bitflip_i2(&v[base..base + chunk_len], y_chunk, coeff);
                         continue;
                     }
-                    _ => {} // i ≥ 3: scalar inner loop 経路にフォールスルー.
+                    _ => {}
                 }
 
-                // Scalar inner loop: i ≥ 3 (mask ≥ 8) は v[k ^ mask] が chunk 外に
-                // 出ることがあるため full v 参照. `feature = "simd"` OFF では
-                // 全 i がここに来る.
                 for (li, y_k) in y_chunk.iter_mut().enumerate() {
                     let k = base + li;
                     *y_k += Complex64::new(coeff, 0.0) * v[k ^ mask];
