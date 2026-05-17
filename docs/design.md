@@ -764,8 +764,11 @@ fn apply_h(
   倍数に丸めて block-aligned 前提を満たす。i ≥ 3 は scalar inner loop の
   まま (stride ≥ 8 で SIMD 利得が小さく cache line を跨ぐ; §12 Phase 6 C2)。
   `feature = "simd"` (default ON) で有効化, `--no-default-features` で
-  scalar fallback。**cache block-fusion (Phase 6 C3)** は同 closure 内
-  inner ループに後段で重ねる予定 (§12 Phase 6)。
+  scalar fallback。**cache block-fusion (Phase 6 C3, #64)** は trotter_step
+  側に集中して実装済み (§5.1.3) で `apply_h_kryanneal` 本体は touch せず.
+  `apply_h_kryanneal` の DRAM bandwidth 改善は **follow-up #79 (Phase 6 D,
+  open)** として切り出し (高 i sparse fused matvec / SIMD i≥3 拡張 /
+  prefetch / streaming store の候補を sweep).
 - **dim 閾値による rayon dispatch (issue #68, follow-up)**: `apply_h_kryanneal`
   と `apply_single_mode_axis_i` の **public 関数側で `dim < MIN_RAYON_DIM`
   (= 1 << 17 = 128K 要素 = 2 MB Complex64) を判定し scalar 単スレッド経路
@@ -885,7 +888,20 @@ Trotter primitive は `src/trotter.rs` に置く想定だが、`apply_single_mod
 自体は matvec primitive の隣 (`src/matvec.rs`) でも構わない (Phase 2 で
 実装する際に判断する)。
 
-#### 5.1.3 Phase 6 C3 — DRAM 律速の解消 (multi-qubit gate fusion + L2-aware chunking)
+**Phase 6 関連の現状** (`apply_single_mode_axis_i`):
+
+- **C1 (#62, 実装済み)**: rayon `par_chunks_mut` 並列化. `2·mask` block 単位
+  で分割し chunk 内で pair update.
+- **C3 (#64, 実装済み)**: `trotter_step` 経路では本関数を直接呼ばず
+  [`apply_multi_qubit_gate_fused`] (§5.1.3) 経由で連続 FUSE_K=4 qubit を
+  1 chunk closure 内で per-axis 逐次 apply する形に書き換えた (端数のみ本関数で
+  個別 apply). barrier 多重化解消で N=20 trotter_step が 4.01× 改善.
+- **C2.5 (#71, open)**: SIMD 特化 (i ∈ {0,1,2}) は follow-up. C2 で
+  `apply_h_kryanneal` 側の `simd_kernels::bitflip_iN` を実装したのと同型の
+  pattern を本関数 (および C3 の `apply_fused_axes_to_chunk` inner kernel)
+  に流用する.
+
+#### 5.1.3 Phase 6 C3 — DRAM 律速の解消 (multi-qubit gate fusion + phase_p 並列化)
 
 Phase 6 C1 (rayon) + C2 (SIMD) を入れた後の本番 bench (issue #68 follow-up)
 で観測された制約:
@@ -938,11 +954,16 @@ pub(crate) fn apply_multi_qubit_gate_fused(
 ) {
     let k = u_list.len();
     let group_block = 1usize << (i_start + k);     // 最大 axis の block 2 倍
-    // chunk_size を group_block の整数倍で RAYON_CHUNK_MAX 程度に揃える.
-    let chunk_size = if group_block >= RAYON_CHUNK_MAX {
+    // chunk_size を thread 数に応じた動的計算 (apply_h_kryanneal_rayon と同型)
+    // + group_block (最大 axis の block 2 倍) の整数倍に揃える. PR #78 v2 で
+    // 固定 RAYON_CHUNK_MAX を使ったところ N=18 で chunk 数 < 64 thread になり
+    // 0.84× regression したため動的化 (PR #78 v3).
+    let nth = rayon::current_num_threads().max(1);
+    let target = (psi.len() / (nth * 4)).clamp(RAYON_CHUNK_MIN, RAYON_CHUNK_MAX);
+    let chunk_size = if group_block >= target {
         group_block
     } else {
-        (RAYON_CHUNK_MAX / group_block).max(1) * group_block
+        (target / group_block).max(1) * group_block
     };
     psi.par_chunks_mut(chunk_size).for_each(|chunk| {
         // chunk 内で k 個の axis を順次 apply (per-axis 2-pair update).
@@ -1052,16 +1073,26 @@ A (multi-qubit gate fusion) の rayon 実装でも同じ動的 chunk_size 計算
 chunk_size を固定 `RAYON_CHUNK_MAX` にしていたのを動的化, N=18 並列度
 不足の regression を修正).
 
-##### Acceptance と bench
+##### Acceptance と bench (実測結果)
 
-- bench: `benchmarks/bench_block_fusion.py` で N ∈ {16, 18, 20, 22} の
-  per-step time を `trotter_step` / `apply_h_kryanneal` 両方計測, FUSE_K ∈
-  {1, 2, 4, 6} を sweep.
-- baseline: Phase 6 C2 完了時点 (`main` branch tip).
+- bench: `benchmarks/bench_block_fusion.py` で N ∈ {18, 20, 22} の per-step
+  time を `trotter_step` / `apply_h_kryanneal` 両方計測.
+- baseline: Phase 6 C2 完了時点 (`main` branch tip, PR #78 merge 前).
 - acceptance: N=20 で `trotter_step` の per-step time が **>= 1.3×** 改善
-  (issue #64 当初目標). `apply_h_kryanneal` 側の改善は副次目標
-  (chunk_size 調整の bench 確認のみ).
-- 数値一致: `cargo test` + `uv run pytest` で `rel < 1e-13`.
+  (issue #64 当初目標). 達成.
+- **実測 (Linux x86_64, cpu_count=64, RAYON_NUM_THREADS=64, BLAS=1, PR #78 v3)**:
+
+  | N | `trotter_step` speedup | `apply_h_kryanneal` speedup |
+  |---|---|---|
+  | 18 | **1.55×** | 0.94× (誤差範囲) |
+  | 20 | **4.01×** ✅ | 0.94× (誤差範囲) |
+  | 22 | **2.93×** | 1.01× |
+
+  `trotter_step` は当初目標 1.3× を **3 倍以上クリア** (N=20 で 4.01×).
+  `apply_h_kryanneal` は本 issue で touch せず ≈ 1.0× (regression なし).
+  apply_h_kryanneal の DRAM bandwidth 改善は follow-up issue #79 (Phase 6 D)
+  として切り出し.
+- 数値一致: `cargo test` + `uv run pytest` で `rel < 1e-13` 確認済み.
 
 ##### 設計判断の論拠と参考実装
 
@@ -2046,20 +2077,26 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   per-pass の頭打ち, (2) SIMD 化していない diag pass による希釈 (4 pass 中
   1 つが scalar), (3) 大 dim multi-thread の per-call ms オーダ計測が背景負荷
   に強く依存し inter-run 変動 が ~5× に達することがある, の 3 つ。 acceptance
-  ギャップは Phase 6 C3 (cache block-fusion, #64) で memory traffic を削減
-  することで本来取りに行く性格のもの。
+  ギャップ (apply_h_kryanneal の memory traffic 削減) は Phase 6 C3 (#64) では
+  trotter_step 専用の最適化を取り `apply_h_kryanneal` 自体は touch しなかった
+  ため未解消で残る (#64 で trotter_step は N=20 で 4.01× 改善達成)。
+  apply_h_kryanneal 側の DRAM bandwidth 改善は **follow-up issue #79
+  (Phase 6 D, open)** として切り出し (高 i sparse fused matvec / SIMD i≥3 拡張 /
+  prefetch / streaming store の候補を sweep する形)。
   bench は PR 本体に含めず, 個別 issue (#63) コメントとして添付済み
   (issue #47 で確定した運用)。
-- **cache block-fusion (C3, issue #64, 計画)**: DRAM 律速の解消を目的とする
-  最適化レイヤ。issue #68 follow-up bench で `apply_h_kryanneal` が 6.13×
-  (理論 64× の ~9.6%), `trotter_step` が 1.55× (rayon barrier × 2n の
-  overhead) で頭打ちと判明。C3 は以下 2 つの独立サブ最適化で構成
+- **cache block-fusion (C3, issue #64, 実装済み, PR #78 merged)**: DRAM 律速
+  と barrier 多重化の解消を目的とする最適化レイヤ。issue #68 follow-up bench で
+  `apply_h_kryanneal` が 6.13× (理論 64× の ~9.6%), `trotter_step` が 1.55×
+  (rayon barrier × 2n の overhead) で頭打ちと判明していたうち, **本 issue では
+  trotter_step 側を集中改善** (`apply_h_kryanneal` の DRAM bandwidth 改善は
+  follow-up #79 として切り出し). C3 は以下 2 つの独立サブ最適化で構成
   (§5.1.3 を一次資料):
   - **A. multi-qubit gate fusion (per-axis 逐次経路)**: 連続 k qubit (default
     k=4) の R_i を **1 つの rayon chunk closure 内で per-axis 2-pair update を
     逐次** 実行. trotter_step の barrier 数を `2n+2` → `n/k + 2` に縮める.
     kryanneal の `H_drv = -Σ h_x_i X_i` が **per-site commuting** で逐次適用が
-    exact (Trotter 誤差なし) という TFIM 固有の性質を活用. 初版 (PR #78) は
+    exact (Trotter 誤差なし) という TFIM 固有の性質を活用. 初版 (PR #78 v1) は
     qsim 流 dense 2^k × 2^k matmul を採用したが Linux 本番 bench で
     `trotter_step` が **0.81× regression** したため per-axis 逐次経路に
     切替 (dense matmul の compute は per-axis × k の 2× 重く, TFIM 規模では
@@ -2073,11 +2110,27 @@ Phase 1 の baseline と比較できることが本 phase の前提。
     旧値に復活. A の fused 経路でも `apply_h_kryanneal_rayon` と同じ
     動的 chunk_size `(dim/(nth*4)).clamp(MIN, MAX)` を採用 (group_block の
     整数倍に揃える形で).
+
+  **実測 (Linux x86_64, cpu_count=64, BLAS=1)**: `trotter_step` の per-step
+  time が N=18 で 1.55×, **N=20 で 4.01× (acceptance 1.3× の 3 倍以上)**,
+  N=22 で 2.93× の改善. `apply_h_kryanneal` は本 issue で touch せず
+  ≈ 1.0× (regression なし).
+- **C2.5 (issue #71, open)**: `apply_single_mode_axis_i` の SIMD 特化
+  (i ∈ {0,1,2}). C2 では `apply_h_kryanneal` 側のみ SIMD 化したため,
+  trotter_step 経路の axis_i も同様に SIMD 化する follow-up. C3 (#64) で
+  `apply_multi_qubit_gate_fused` の inner kernel が `apply_single_mode_axis_i`
+  と同型の 2-pair update を使う構造になったため, C2.5 完了で C3 の効果
+  (N=20 trotter_step 4.01×) をさらに増幅できる見込み.
+- **D (issue #79, open)**: `apply_h_kryanneal` の DRAM bandwidth 改善
+  (高 i sparse fused matvec / SIMD i ≥ 3 拡張 / prefetch / streaming store).
+  C3 で trotter_step は 4× 改善したが apply_h_kryanneal は scope 外として
+  未改善で残ったため新規 issue として切り出し. issue #68 で観測された
+  6.13× / 64-thread 飽和の解消を狙う.
 - 物理コア数 vs スループットの sweep をベンチに含め、メモリ帯域律速点を
   明示する (`benchmarks/bench_parallel_scaling.py`, Phase 6 C1 で導入)
-- BLAS feature ON/OFF の数値一致 CI (両ビルドで rel < 1e-13)
-- 大規模 QuTiP 比較 (n=12-16 程度まで)
-- ドキュメント整備、Quick start サンプル
+- BLAS feature ON/OFF の数値一致 CI (両ビルドで rel < 1e-13) — C4 (#65, open)
+- 大規模 QuTiP 比較 (n=12-16 程度まで) — C4 (#65, open)
+- ドキュメント整備、Quick start サンプル — C5 (#66, open)
 
 ---
 
