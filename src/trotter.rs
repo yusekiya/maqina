@@ -67,7 +67,86 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::matvec::apply_single_mode_axis_i;
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
+
+use crate::matvec::{apply_multi_qubit_gate_fused, apply_single_mode_axis_i, MAX_FUSED_K};
+
+/// `phase_p(dt')`: `psi[k] *= exp(-i · b_t · h_p_diag[k] · dt')` を全 k に適用.
+///
+/// 大 dim (≥ 2^17 = 128K Complex64 = 2 MB) では rayon par_iter_mut で並列化
+/// (`apply_h_kryanneal_rayon` の `MIN_RAYON_DIM` と同じ閾値). small dim では
+/// scalar fallback. trotter_step の per-step time のうち, multi-qubit gate
+/// fusion で削減できない diag 部分 (N=20 dim=1M で数 ms 級) を rayon barrier
+/// 2 個 (前後) に詰める (Phase 6 C3, issue #64 v3 修正).
+#[inline]
+fn apply_phase_p(psi: &mut [Complex64], h_p_diag: &[f64], b_t: f64, dt_half: f64) {
+    debug_assert_eq!(psi.len(), h_p_diag.len());
+
+    #[cfg(feature = "rayon")]
+    {
+        // `MIN_RAYON_DIM = 1 << 17` (matvec.rs) と同じ閾値で dispatch.
+        const PHASE_RAYON_MIN_DIM: usize = 1 << 17;
+        if psi.len() >= PHASE_RAYON_MIN_DIM {
+            psi.par_iter_mut()
+                .zip(h_p_diag.par_iter())
+                .for_each(|(psi_k, &h_p_k)| {
+                    let phi = -b_t * h_p_k * dt_half;
+                    let (s, c) = phi.sin_cos();
+                    *psi_k *= Complex64::new(c, s);
+                });
+            return;
+        }
+    }
+    // Scalar fallback.
+    for (psi_k, &h_p_k) in psi.iter_mut().zip(h_p_diag.iter()) {
+        let phi = -b_t * h_p_k * dt_half;
+        let (s, c) = phi.sin_cos();
+        *psi_k *= Complex64::new(c, s);
+    }
+}
+
+/// Multi-qubit gate fusion (Phase 6 C3, issue #64) で `trotter_step` 内の
+/// `Π_i R_i(dt)` を何 qubit ずつまとめて適用するかの単位.
+///
+/// `FUSE_K = 4`: qsim の経験 (`max_fused_size = 4-5` 推奨, `lib/fuser_mqubit.h`)
+/// と本 PR 初版 (dense matmul) 失敗からの学び (per-axis × k の `2k·dim` ops に
+/// 対して dense matmul は `2^k·dim` ops で k=4 で 2× 重く Linux 本番で
+/// 0.81× regression した) を踏まえた default 値. **現実装は per-axis 逐次**
+/// なので compute は per-axis × k と同じで, 主効果は barrier 多重化解消と
+/// chunk-resident cache 効果. `bench_block_fusion.py` で per-step time を
+/// sweep して必要なら見直す.
+///
+/// `n < FUSE_K` の極小 N (= テスト用) では fused 経路に乗らず端数経路で
+/// per-axis apply される (`apply_single_mode_axis_i` フォールバック).
+///
+/// 制約: `FUSE_K <= MAX_FUSED_K`.
+const FUSE_K: usize = 4;
+const _: () = assert!(FUSE_K <= MAX_FUSED_K);
+
+/// 連続 k axis (i_start, ..., i_start+k-1) の R_i(dt) を構築し,
+/// `[[Complex64; 4]; k]` (row-major 2×2 列) として `out_slice[..k]` に書く.
+///
+/// R_i(dt) = cos(θ_i)·I + i·sin(θ_i)·X_i, θ_i = a_t · h_x[i] · dt の Trotter
+/// convention. row-major 2×2 表現は `[c, i·s, i·s, c]`. `apply_multi_qubit_gate_fused`
+/// が per-axis 逐次に消費するので tensor product は構築しない.
+fn build_axis_unitaries(h_x_slice: &[f64], a_t: f64, dt: f64, out_slice: &mut [[Complex64; 4]]) {
+    debug_assert_eq!(
+        out_slice.len(),
+        h_x_slice.len(),
+        "out_slice and h_x_slice must have equal length",
+    );
+    for (out_u, &h_x_j) in out_slice.iter_mut().zip(h_x_slice.iter()) {
+        let theta = a_t * h_x_j * dt;
+        let (s, c) = theta.sin_cos();
+        *out_u = [
+            Complex64::new(c, 0.0),
+            Complex64::new(0.0, s),
+            Complex64::new(0.0, s),
+            Complex64::new(c, 0.0),
+        ];
+    }
+}
 
 /// Strang 2 次 Trotter 1 step. `psi` を in-place で `U(dt) · psi` に上書きする.
 ///
@@ -111,18 +190,31 @@ pub(crate) fn trotter_step(
     let half = 0.5 * dt;
 
     // ---- 前半 phase_p(dt/2): exp(-i · b_t · h_p_diag[k] · dt/2) を要素ごとに乗算 ----
-    // Complex64::new(cos φ, sin φ) = exp(+i·φ); φ = -b_t·h_p_diag[k]·dt/2 を
-    // 採れば exp(-i·b_t·h_p_diag[k]·dt/2) となる.
-    for k in 0..dim {
-        let phi = -b_t * h_p_diag[k] * half;
-        let (s, c) = phi.sin_cos();
-        psi[k] *= Complex64::new(c, s);
-    }
+    // `apply_phase_p` は大 dim では rayon 並列化される (Phase 6 C3 v3).
+    apply_phase_p(psi, h_p_diag, b_t, half);
 
-    // ---- 中間 Π_i R_i(dt): 各サイト i に 2×2 ユニタリを in-place 適用 ----
+    // ---- 中間 Π_i R_i(dt): 連続 FUSE_K qubit ずつ tensor product にまとめて
+    //      1 sweep で適用する (Phase 6 C3, multi-qubit gate fusion, issue #64). ----
+    //
+    // `H_drv = -Σ h_x_i X_i` は per-site で commuting なので
+    //   `exp(+i·a·dt·Σ_{j∈G} h_x_j X_j) = ⊗_{j∈G} exp(+i·θ_j X_j)`
+    // が exact. 連続 k qubit に限定すれば psi の sub-block は stride 2^i_start の
+    // 連続 2^k 要素となり, `apply_multi_qubit_gate_fused` で 1 rayon barrier
+    // (= 1 par_chunks_mut 呼出) に詰められる. 端数 (n が FUSE_K の倍数でない
+    // 場合) は従来通り `apply_single_mode_axis_i` で 1 軸ずつ適用する.
+    //
     // θ_i = +a_t · h_x_i · dt (モジュール冒頭 docstring の符号 convention 参照).
-    for (i, &h_x_i) in h_x.iter().enumerate() {
-        let theta = a_t * h_x_i * dt;
+    let mut i_cursor = 0usize;
+    // 固定長 stack 配列で k 個の 2×2 unitary 列を持つ. apply_multi_qubit_gate_fused
+    // に &u_list[..FUSE_K] として渡す (per-axis 逐次経路).
+    let mut u_list = [[Complex64::new(0.0, 0.0); 4]; FUSE_K];
+    while i_cursor + FUSE_K <= n {
+        build_axis_unitaries(&h_x[i_cursor..i_cursor + FUSE_K], a_t, dt, &mut u_list);
+        apply_multi_qubit_gate_fused(psi, &u_list, i_cursor, n);
+        i_cursor += FUSE_K;
+    }
+    while i_cursor < n {
+        let theta = a_t * h_x[i_cursor] * dt;
         let (s, c) = theta.sin_cos();
         let u = [
             Complex64::new(c, 0.0),
@@ -130,15 +222,12 @@ pub(crate) fn trotter_step(
             Complex64::new(0.0, s),
             Complex64::new(c, 0.0),
         ];
-        apply_single_mode_axis_i(psi, &u, i, n);
+        apply_single_mode_axis_i(psi, &u, i_cursor, n);
+        i_cursor += 1;
     }
 
     // ---- 後半 phase_p(dt/2): 前半と同じ phase を再度乗算 ----
-    for k in 0..dim {
-        let phi = -b_t * h_p_diag[k] * half;
-        let (s, c) = phi.sin_cos();
-        psi[k] *= Complex64::new(c, s);
-    }
+    apply_phase_p(psi, h_p_diag, b_t, half);
 }
 
 /// `trotter_step` の Python wrap. 結果を新規 array で返す (in-place ではなく
