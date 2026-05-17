@@ -122,9 +122,13 @@ SIMD_TARGET_I_VALUES = (0, 1, 2)
 
 
 def _measure_apply_h(n: int, h_x: np.ndarray, repeat: int, warmup: int) -> list[float]:
-    """`_rust.apply_h_kryanneal_py` の wall time を repeat 回計測して返す.
+    """`_rust.apply_h_kryanneal_into_py` の wall time を repeat 回計測して返す.
 
     warmup 回数だけ捨てた後, repeat 回の wall time を秒単位で返す.
+
+    in-place 版を使い ``y_out`` を warmup 前に 1 回 alloc して再利用する.
+    旧 ``apply_h_kryanneal_py`` だと毎 call で ``dim · 16 B`` の新規 alloc/copy
+    が計測域に混入する (issue #79 / #85).
     """
     from kryanneal import _rust  # pyright: ignore[reportMissingImports]
 
@@ -137,13 +141,15 @@ def _measure_apply_h(n: int, h_x: np.ndarray, repeat: int, warmup: int) -> list[
     a_t = float(rng.uniform(-1.0, 1.0))
     b_t = float(rng.uniform(-1.0, 1.0))
 
+    y_out = np.empty(dim, dtype=np.complex128)
+
     for _ in range(warmup):
-        _ = _rust.apply_h_kryanneal_py(v, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_kryanneal_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
 
     timings: list[float] = []
     for _ in range(repeat):
         t0 = time.perf_counter()
-        _ = _rust.apply_h_kryanneal_py(v, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_kryanneal_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
         t1 = time.perf_counter()
         timings.append(t1 - t0)
     return timings

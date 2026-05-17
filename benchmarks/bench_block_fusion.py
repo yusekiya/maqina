@@ -133,10 +133,15 @@ def _measure_trotter_step(n: int, repeat: int, warmup: int, dt: float) -> list[f
 
 
 def _measure_apply_h_kryanneal(n: int, repeat: int, warmup: int) -> list[float]:
-    """``_rust.apply_h_kryanneal_py`` の wall time を repeat 回計測して返す.
+    """``_rust.apply_h_kryanneal_into_py`` の wall time を repeat 回計測して返す.
 
     matvec primitive (Lanczos / CFM4:2 内部). C3 の副次スコープ (chunk_size 縮小).
     h_x は all-ones で全 i bit-flip pass を踏ませる.
+
+    in-place 版 (``apply_h_kryanneal_into_py``) を使い ``y_out`` を warmup 前に
+    1 回 alloc して再利用する. 旧 ``apply_h_kryanneal_py`` 経路だと毎 call で
+    ``dim · 16 B`` の新規 alloc/copy が計測域に混入し Rust kernel の micro
+    効果が埋もれる (issue #79 / #85).
     """
     from kryanneal import _rust  # pyright: ignore[reportMissingImports]
 
@@ -150,13 +155,15 @@ def _measure_apply_h_kryanneal(n: int, repeat: int, warmup: int) -> list[float]:
     a_t = 0.5
     b_t = 0.5
 
+    y_out = np.empty(dim, dtype=np.complex128)
+
     for _ in range(warmup):
-        _ = _rust.apply_h_kryanneal_py(v, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_kryanneal_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
 
     timings: list[float] = []
     for _ in range(repeat):
         t0 = time.perf_counter()
-        _ = _rust.apply_h_kryanneal_py(v, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_kryanneal_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
         t1 = time.perf_counter()
         timings.append(t1 - t0)
     return timings

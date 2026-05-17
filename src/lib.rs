@@ -91,6 +91,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__has_rayon__", HAS_RAYON)?;
     m.add("__has_simd__", HAS_SIMD)?;
     m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_py, m)?)?;
+    m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_into_py, m)?)?;
     m.add_function(wrap_pyfunction!(matvec::apply_single_mode_axis_i_py, m)?)?;
     m.add_function(wrap_pyfunction!(tridiag::tridiag_eigh_py, m)?)?;
     m.add_function(wrap_pyfunction!(krylov::lanczos_propagate_py, m)?)?;

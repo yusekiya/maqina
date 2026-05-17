@@ -154,12 +154,16 @@ def child_run(
     results: list[TrialResult] = []
 
     # ---- apply_h_kryanneal ----
+    # in-place 版を使い ``y_out`` を warmup 前に 1 回 alloc して再利用する
+    # (issue #85). 旧 ``apply_h_kryanneal_py`` だと毎 call で alloc/copy が
+    # 計測域に混入し rayon scaling 評価を歪める.
+    y_out = np.empty(dim, dtype=np.complex128)
     # warm up
     for _ in range(warmup):
-        _ = _rust.apply_h_kryanneal_py(v, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_kryanneal_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
     for trial in range(repeat):
         t0 = time.perf_counter()
-        _ = _rust.apply_h_kryanneal_py(v, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_kryanneal_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
         t1 = time.perf_counter()
         results.append(
             TrialResult(

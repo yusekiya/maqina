@@ -46,7 +46,7 @@
 #![allow(dead_code)]
 
 use num_complex::Complex64;
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -1327,7 +1327,36 @@ pub(crate) fn apply_single_mode_axis_i_py<'py>(
     Ok(out.into_pyarray(py))
 }
 
-/// `apply_h_kryanneal` の Python wrap. `y` を allocate して返す.
+/// `apply_h_kryanneal` の Python 入口で共通する shape 検査.
+///
+/// `h_x` から `n` を取り `dim = 2^n` を計算し, `v.len() == dim` /
+/// `h_p_diag.len() == dim` を確認する. `y` の長さ検査は in-place 経路
+/// (`apply_h_kryanneal_into_py`) でのみ意味があるので, ここでは扱わず
+/// caller 側に任せる.
+fn validate_apply_h_kryanneal_shapes(
+    v_len: usize,
+    h_x_len: usize,
+    h_p_diag_len: usize,
+) -> PyResult<(usize, usize)> {
+    let n = h_x_len;
+    let dim = 1usize << n;
+    if h_p_diag_len != dim {
+        return Err(PyValueError::new_err(format!(
+            "h_p_diag length {} does not match 2^len(h_x) = 2^{} = {}",
+            h_p_diag_len, n, dim,
+        )));
+    }
+    if v_len != dim {
+        return Err(PyValueError::new_err(format!(
+            "v length {} does not match 2^len(h_x) = {}",
+            v_len, dim,
+        )));
+    }
+    Ok((n, dim))
+}
+
+/// `apply_h_kryanneal` の Python wrap (allocate-and-return). `y` を内部で
+/// allocate して返す.
 ///
 /// Python 側 (`_rust.apply_h_kryanneal_py`) からは
 ///
@@ -1339,6 +1368,12 @@ pub(crate) fn apply_single_mode_axis_i_py<'py>(
 /// `len(h_p_diag)` から取り出す. Lanczos / CFM4 内部呼出は Rust 側で
 /// 完結するため, 本関数は **参照実装比較とテスト用** の公開 API である
 /// (`docs/design/07-rust-extension.md` §7.3).
+///
+/// **性能を出したい Python 側ループからは [`apply_h_kryanneal_into_py`]
+/// (in-place 版) を使うこと**: 本関数は呼び出しごとに `dim · 16 B` の
+/// `complex128` array を新規 allocate するため, m=64 の Krylov loop や
+/// repeat 1000 回の bench measure 内に置くと alloc/copy overhead が Rust
+/// 側 micro-optimization の効果を覆い隠す (issue #79 / #85 で確認済み).
 #[pyfunction]
 #[pyo3(signature = (v, h_x, h_p_diag, a_t, b_t))]
 pub(crate) fn apply_h_kryanneal_py<'py>(
@@ -1353,27 +1388,63 @@ pub(crate) fn apply_h_kryanneal_py<'py>(
     let h_x_slice = h_x.as_slice()?;
     let h_p_diag_slice = h_p_diag.as_slice()?;
 
-    let n = h_x_slice.len();
-    let dim = 1usize << n;
-    if h_p_diag_slice.len() != dim {
-        return Err(PyValueError::new_err(format!(
-            "h_p_diag length {} does not match 2^len(h_x) = 2^{} = {}",
-            h_p_diag_slice.len(),
-            n,
-            dim,
-        )));
-    }
-    if v_slice.len() != dim {
-        return Err(PyValueError::new_err(format!(
-            "v length {} does not match 2^len(h_x) = {}",
-            v_slice.len(),
-            dim,
-        )));
-    }
+    let (n, dim) =
+        validate_apply_h_kryanneal_shapes(v_slice.len(), h_x_slice.len(), h_p_diag_slice.len())?;
 
     let mut y = vec![Complex64::new(0.0, 0.0); dim];
     apply_h_kryanneal(v_slice, &mut y, h_x_slice, h_p_diag_slice, a_t, b_t, n);
     Ok(y.into_pyarray(py))
+}
+
+/// `apply_h_kryanneal` の Python wrap (in-place 版). 結果を caller 側
+/// pre-allocated `y_out` array に **上書き** する (戻り値 `None`).
+///
+/// Python 側 (`_rust.apply_h_kryanneal_into_py`) からは
+///
+/// ```python
+/// y_out = np.empty(dim, dtype=np.complex128)  # ループ外で 1 回確保
+/// for ...:
+///     _rust.apply_h_kryanneal_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
+///     # y_out が H(t)·v で上書きされる
+/// ```
+///
+/// として呼ぶ. `apply_h_kryanneal` 本体は `y` を **上書き** (additive で
+/// はなく) するため, caller は `np.zeros` ではなく `np.empty` で確保して良い.
+/// `apply_h_kryanneal_py` と同様, サイト数 `n` は `len(h_x)`, 状態次元
+/// `dim = 2^n` は `len(h_p_diag)` から取り出す. `y_out.len() == dim`
+/// を境界で検査し, 不整合は `PyValueError`.
+///
+/// 主な call site: `python/kryanneal/eigenstates.py` (m=64 Krylov loop /
+/// dim 列ループ), `benchmarks/bench_*.py` (計測内 alloc/copy 排除).
+/// 詳細は `docs/design/07-rust-extension.md` §7.3 / `docs/design/05-1-matvec.md`
+/// §5.1.4 末尾.
+#[pyfunction]
+#[pyo3(signature = (v, y_out, h_x, h_p_diag, a_t, b_t))]
+pub(crate) fn apply_h_kryanneal_into_py<'py>(
+    v: PyReadonlyArray1<'py, Complex64>,
+    mut y_out: PyReadwriteArray1<'py, Complex64>,
+    h_x: PyReadonlyArray1<'py, f64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    a_t: f64,
+    b_t: f64,
+) -> PyResult<()> {
+    let v_slice = v.as_slice()?;
+    let h_x_slice = h_x.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let y_slice = y_out.as_slice_mut()?;
+
+    let (n, dim) =
+        validate_apply_h_kryanneal_shapes(v_slice.len(), h_x_slice.len(), h_p_diag_slice.len())?;
+    if y_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "y_out length {} does not match 2^len(h_x) = {}",
+            y_slice.len(),
+            dim,
+        )));
+    }
+
+    apply_h_kryanneal(v_slice, y_slice, h_x_slice, h_p_diag_slice, a_t, b_t, n);
+    Ok(())
 }
 
 #[cfg(test)]
