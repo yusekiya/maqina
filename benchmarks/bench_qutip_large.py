@@ -41,6 +41,8 @@ CLI 例::
     uv run python benchmarks/bench_qutip_large.py
     uv run python benchmarks/bench_qutip_large.py --n-values 10,12 --dt-values 0.1,0.05,0.025,0.01
     uv run python benchmarks/bench_qutip_large.py --solvers qutip,m2,cfm4 --blas-threads 1
+    # QuTiP の atol/rtol を 1e-4 まで緩めて全 dt で max_step binding にする
+    uv run python benchmarks/bench_qutip_large.py --qutip-atol 1e-4 --qutip-rtol 1e-4
 """
 
 from __future__ import annotations
@@ -123,24 +125,46 @@ def _build_qutip_hamiltonian(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) ->
 
 
 def _run_qutip_cell(
-    h_t: list, psi0: np.ndarray, T: float, dt: float, n: int
+    h_t: list,
+    psi0: np.ndarray,
+    T: float,
+    dt: float,
+    n: int,
+    *,
+    atol: float,
+    rtol: float,
 ) -> tuple[float, np.ndarray]:
-    """QuTiP sesolve を ``max_step=dt`` で走らせて ``(wall_sec, psi_final)``.
+    """QuTiP sesolve を ``max_step=dt`` + 緩めた atol/rtol で走らせて
+    ``(wall_sec, psi_final)`` を返す.
 
-    ``atol = 1e-12``, ``rtol = 1e-10`` で内部 ODE solver の局所誤差を絞り,
-    ``max_step = dt`` で「最大 1 step 幅 = dt」を強制する. 実効的に dt が
-    QuTiP の step 上限となり, dt → 0 で参照解に収束する想定.
+    重要: atol/rtol を **意図的に緩めて** 内部 ODE solver の atol 駆動 step
+    が ``max_step=dt`` よりも大きくなるようにする. こうしないと adaptive
+    solver は atol で決まった小さい step を取り続け, max_step が無視されて
+    「dt sweep」が QuTiP cell で形骸化する (atol=1e-12 だと内部 step ~ 5e-3
+    で plateau し, dt=0.1 や 0.05 でも wall time がほぼ同じになる現象を
+    実測 issue #65 で確認).
+
+    adams (default) order ~5 のとき atol 駆動 step ≈ ``atol^(1/5)``.
+    default ``atol=rtol=1e-6`` で内部 step ~ 0.063 ≥ 一般的な sweep の dt 値
+    (≥ 0.001) なので max_step が binding になる. 結果として「dt を小さく
+    すると QuTiP の wall time が dt^(-1) スケーリングで増え, 同時に精度
+    (vs 最小 dt cell) も向上する」というユーザー直感通りの挙動になる.
+
+    全 step を ``dt`` で踏みたいなら atol をさらに緩める (``--qutip-atol 1e-4``
+    等). 一方で reference (最小 dt cell) の global error を 1e-12 級に
+    保ちたいなら 1e-6 が良い妥協点 (T=1, p=5 で global error ~ T·dt^p
+    = 1·0.001^5 = 1e-15 if max_step-binding, あるいは ~ atol = 1e-6 が
+    floor).
 
     ``n`` (スピン数) を必須引数で受けるのは, psi0 を tensor product dims
-    (``[[2]*n, [1]*n]``) で構築するため. dense / sparse 経路ともに
-    Hamiltonian 側の dims は ``[[2]*n, [2]*n]`` に統一されており, psi0 もこの
-    tensor product dims と整合させないと QuTiP solver が
+    (``[[2]*n, [1]*n]``) で構築するため. Hamiltonian 側の dims
+    (``[[2]*n, [2]*n]``) と整合させないと QuTiP solver が
     ``TypeError: incompatible dimensions`` を投げる.
     """
     psi0_q = qutip.Qobj(psi0.reshape(-1, 1), dims=[[2] * n, [1] * n])
     options = {
-        "atol": 1e-12,
-        "rtol": 1e-10,
+        "atol": float(atol),
+        "rtol": float(rtol),
         "max_step": float(dt),
         "nsteps": 1_000_000,  # max_step 拘束下でも全 [0,T] を 1 segment で抜けられる量
     }
@@ -242,12 +266,19 @@ def _sweep_one_n(
     dt_list: list[float],
     solvers: list[str],
     seed: int,
+    *,
+    qutip_atol: float,
+    qutip_rtol: float,
 ) -> list[_CellRecord]:
     """1 つの n について全 (solver, dt) cell を実行し ``_CellRecord`` 列を返す.
 
     QuTiP Hamiltonian は dt sweep をまたいで再利用するため (sparse 構築は
     n=16 で数秒オーダ), n ループの先頭で 1 回だけ構築する. kryanneal 側も
     同じ ``IsingProblem`` / ``Schedule`` を全 dt cell で使い回す.
+
+    ``qutip_atol`` / ``qutip_rtol`` は QuTiP cell の adaptive solver tolerance.
+    緩めると max_step が binding になり「dt sweep が QuTiP でも意味を持つ」
+    挙動になる (``_run_qutip_cell`` の docstring 参照).
     """
     prob, sched, psi0, h_x, h_p_diag = _make_random_problem(n, T, seed)
 
@@ -261,7 +292,9 @@ def _sweep_one_n(
         n_steps = max(1, int(round(T / dt)))
         # QuTiP cell.
         if "qutip" in solvers and h_t is not None:
-            wall, psi = _run_qutip_cell(h_t, psi0, T, dt, n)
+            wall, psi = _run_qutip_cell(
+                h_t, psi0, T, dt, n, atol=qutip_atol, rtol=qutip_rtol
+            )
             records.append(_CellRecord(n, "qutip", dt, n_steps, wall, psi))
         # kryanneal cells.
         for method in ("m2", "trotter", "cfm4"):
@@ -311,6 +344,8 @@ def _build_machine_info(args: argparse.Namespace) -> dict[str, str]:
         "blas_threads_requested": (
             str(args.blas_threads) if args.blas_threads is not None else "<unset>"
         ),
+        "qutip_atol": f"{args.qutip_atol:.2e}",
+        "qutip_rtol": f"{args.qutip_rtol:.2e}",
     }
     # _rust build flag (BLAS/rayon/simd) を露出.
     try:
@@ -542,6 +577,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--qutip-atol",
+        type=float,
+        default=1e-6,
+        help=(
+            "QuTiP sesolve の atol (default: 1e-6). 緩めると adaptive solver の "
+            "内部 step が大きくなり, max_step=dt が binding になる "
+            "(``--qutip-atol 1e-4`` でさらに緩く). 厳しくすると QuTiP は速い "
+            "が dt sweep が形骸化する (atol=1e-12 で内部 step ~ 5e-3 で plateau). "
+            "詳細は ``_run_qutip_cell`` の docstring."
+        ),
+    )
+    parser.add_argument(
+        "--qutip-rtol",
+        type=float,
+        default=1e-6,
+        help=(
+            "QuTiP sesolve の rtol (default: 1e-6). atol と同じ意図で緩めて "
+            "max_step を binding にする."
+        ),
+    )
+    parser.add_argument(
         "--results-dir",
         type=Path,
         default=None,
@@ -585,6 +641,8 @@ def main(argv: list[str] | None = None) -> int:
             dt_list=args.dt_values,
             solvers=args.solvers,
             seed=args.seed + n,
+            qutip_atol=args.qutip_atol,
+            qutip_rtol=args.qutip_rtol,
         )
         all_records.extend(records)
         ref_per_n[n] = _pick_reference(records)
