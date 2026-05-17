@@ -237,6 +237,45 @@ i ∈ {0, 1, 2} を SIMD 特化 (`feature = "simd"`, default ON)。
 - **`--no-default-features` ビルド**: SIMD 依存も外れ scalar 経路に戻る。
   `wide` クレートはリンクされない。
 
+## perf 計測用 binary (Phase 6 D follow-up, issue #79)
+
+`apply_h_kryanneal` の真の bottleneck (DRAM bound / L3 contention / barrier
+等のどれか) を Linux `perf stat` で hardware counter から特定するための
+pure-Rust 計測 binary が `src/bin/perf_apply_h.rs` にある. Python の
+`bench_block_fusion.py` は wall-time だけしか出さないため切り分けに不十分.
+
+ビルド:
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_apply_h
+```
+
+`apply_h_kryanneal` は本 binary から呼べるよう `pub fn` に上げ,
+`crate::bench_api` (`src/lib.rs`) で再 export している. Python 側 API
+(`_rust.apply_h_kryanneal_py`) には影響なし.
+
+計測例 (Linux):
+
+```bash
+# 基本: cache / IPC
+RAYON_NUM_THREADS=64 perf stat \
+    -e cycles,instructions,cache-references,cache-misses,LLC-loads,LLC-load-misses,dTLB-load-misses,branch-misses \
+    -- ./target/release/perf_apply_h 20 1000
+
+# Intel 専用: stall reason
+RAYON_NUM_THREADS=64 perf stat \
+    -e cycle_activity.stalls_l1d_miss,cycle_activity.stalls_l2_miss,cycle_activity.stalls_l3_miss,cycle_activity.stalls_mem_any \
+    -- ./target/release/perf_apply_h 20 1000
+
+# Intel uncore: DRAM controller throughput (要 root)
+sudo RAYON_NUM_THREADS=64 perf stat -a \
+    -e uncore_imc_0/cas_count_read/,uncore_imc_0/cas_count_write/ \
+    -- ./target/release/perf_apply_h 20 1000
+```
+
+binary は stderr に wall time / per-iter time / sink (DCE 防止) を出し,
+stdout は空に保つ (perf の出力を汚さない).
+
 ## apply_h_kryanneal の DRAM bandwidth 経路 (Phase 6 D, issue #79)
 
 Phase 6 D (issue #79) で `apply_h_kryanneal_rayon` の高 i pass を

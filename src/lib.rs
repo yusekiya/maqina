@@ -54,6 +54,19 @@ mod matvec;
 mod tridiag;
 mod trotter;
 
+/// **In-tree benchmarking / profiling 用の `pub` re-export**.
+///
+/// `src/bin/perf_apply_h.rs` (Linux `perf stat` 等で hardware counter を取る
+/// ための pure-Rust binary) から `apply_h_kryanneal` を呼べるよう公開する.
+/// このモジュールは Python 側には露出されない (pyo3 `#[pymodule]` には登録
+/// しない).
+///
+/// Python 経由で `apply_h_kryanneal` を呼びたい場合は引き続き
+/// `_rust.apply_h_kryanneal_py` を使うこと.
+pub mod bench_api {
+    pub use crate::matvec::apply_h_kryanneal;
+}
+
 /// 本拡張が `blas` feature 有効でビルドされたかを示す compile-time フラグ.
 /// Python 側からは `_rust.__has_blas__` として参照する.
 const HAS_BLAS: bool = cfg!(feature = "blas");

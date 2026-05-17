@@ -667,7 +667,14 @@ mod simd_kernels {
 /// - `y.len() != 1 << n`
 /// - `h_x.len() != n`
 /// - `h_p_diag.len() != 1 << n`
-pub(crate) fn apply_h_kryanneal(
+///
+/// # 可視性
+///
+/// `pub(crate)` から `pub` に上げているのは, `src/lib.rs` の `pub mod
+/// bench_api` 経由で in-tree binary (`src/bin/perf_apply_h.rs`) から呼べる
+/// ようにするため (Phase 6 D follow-up の perf 計測用). Python 側 API は
+/// 引き続き `apply_h_kryanneal_py` 経由なので外部影響なし.
+pub fn apply_h_kryanneal(
     v: &[Complex64],
     y: &mut [Complex64],
     h_x: &[f64],
