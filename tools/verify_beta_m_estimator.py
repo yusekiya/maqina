@@ -146,7 +146,9 @@ def lanczos_with_diagnostics(
     return psi_new, m_eff, alpha[:m_eff], beta[:m_eff]
 
 
-def saad_estimate(alpha: np.ndarray, beta: np.ndarray, dt: float, psi_norm: float) -> tuple[float, float]:
+def saad_estimate(
+    alpha: np.ndarray, beta: np.ndarray, dt: float, psi_norm: float
+) -> tuple[float, float]:
     """Saad/Hochbruck-Lubich の β_m × |c_m| × ‖ψ‖ a posteriori 推定.
 
     Returns
@@ -235,7 +237,9 @@ def main() -> int:
     parser.add_argument("--dt-values", type=str, default="0.01,0.1,1.0")
     parser.add_argument("--m-values", type=str, default="4,6,8,12,16,20")
     parser.add_argument("--m-ref", type=int, default=48)
-    parser.add_argument("--T-prep", type=float, default=10.0, help="prep evolution の総時間")
+    parser.add_argument(
+        "--T-prep", type=float, default=10.0, help="prep evolution の総時間"
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--output-dir",
@@ -267,7 +271,7 @@ def main() -> int:
     ]
 
     rows = []
-    print(f"# β_m estimator validation (#93 Approach C pre-check)")
+    print("# β_m estimator validation (#93 Approach C pre-check)")
     print(f"output: {out_dir}")
     for n in n_values:
         print(f"[n={n}] building TFIM...")
@@ -281,7 +285,9 @@ def main() -> int:
                 a_eval, b_eval = 0.5, 0.5
             else:  # late
                 a_eval, b_eval = 0.1, 0.9
-            print(f"  [state={state_label}] prepared (s={s_prep}, eval at a={a_eval}, b={b_eval})")
+            print(
+                f"  [state={state_label}] prepared (s={s_prep}, eval at a={a_eval}, b={b_eval})"
+            )
             for dt in dt_values:
                 for m_test in m_values:
                     res = run_cell(
@@ -324,7 +330,9 @@ def main() -> int:
         lines.append(f"## n = {n}\n")
         for state_label, _, _ in state_specs:
             lines.append(f"### state = {state_label}\n")
-            lines.append("| dt | m_test | m_eff | β_m | \\|c_m\\| | saad_est | actual_err | ratio |")
+            lines.append(
+                "| dt | m_test | m_eff | β_m | \\|c_m\\| | saad_est | actual_err | ratio |"
+            )
             lines.append("|---|---|---|---|---|---|---|---|")
             for r in rows:
                 if r["n"] != n or r["state"] != state_label:
@@ -338,7 +346,11 @@ def main() -> int:
             lines.append("")
 
     # 合格判定 summary
-    ratios = [r["ratio"] for r in rows if math.isfinite(r["ratio"]) and r["actual_err"] > 1e-15]
+    ratios = [
+        r["ratio"]
+        for r in rows
+        if math.isfinite(r["ratio"]) and r["actual_err"] > 1e-15
+    ]
     if ratios:
         log_ratios = [math.log10(r) for r in ratios if r > 0]
         if log_ratios:
@@ -346,11 +358,17 @@ def main() -> int:
             lines.append(f"- 有効 cell 数: {len(ratios)} / {len(rows)}")
             lines.append(f"- log10(ratio) min: {min(log_ratios):.2f}")
             lines.append(f"- log10(ratio) max: {max(log_ratios):.2f}")
-            lines.append(f"- log10(ratio) median: {sorted(log_ratios)[len(log_ratios)//2]:.2f}")
+            lines.append(
+                f"- log10(ratio) median: {sorted(log_ratios)[len(log_ratios) // 2]:.2f}"
+            )
             within_2 = sum(1 for x in log_ratios if abs(x) <= 2.0)
             within_1 = sum(1 for x in log_ratios if abs(x) <= 1.0)
-            lines.append(f"- |log10(ratio)| ≤ 2 (2 桁以内): {within_2}/{len(log_ratios)}")
-            lines.append(f"- |log10(ratio)| ≤ 1 (1 桁以内): {within_1}/{len(log_ratios)}")
+            lines.append(
+                f"- |log10(ratio)| ≤ 2 (2 桁以内): {within_2}/{len(log_ratios)}"
+            )
+            lines.append(
+                f"- |log10(ratio)| ≤ 1 (1 桁以内): {within_1}/{len(log_ratios)}"
+            )
             lines.append("")
 
     md_path.write_text("\n".join(lines))

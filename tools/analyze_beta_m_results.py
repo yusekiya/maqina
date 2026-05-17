@@ -24,8 +24,12 @@ from pathlib import Path
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv_path", type=str)
-    parser.add_argument("--floor", type=float, default=1e-13,
-                        help="actual_err の機械精度床. これ未満は除外 (default 1e-13).")
+    parser.add_argument(
+        "--floor",
+        type=float,
+        default=1e-13,
+        help="actual_err の機械精度床. これ未満は除外 (default 1e-13).",
+    )
     args = parser.parse_args()
 
     rows = []
@@ -42,14 +46,18 @@ def main() -> int:
             row["ratio"] = float(row["ratio"])
             rows.append(row)
 
-    print(f"# β_m estimator: refined analysis")
-    print(f"")
+    print("# β_m estimator: refined analysis")
+    print("")
     print(f"Total cells: {len(rows)}")
 
     # Filter: only cells where the estimator is in measurable range
-    valid = [r for r in rows if r["actual_err"] >= args.floor and r["saad_est"] >= args.floor]
-    print(f"Valid cells (actual_err >= {args.floor:.0e} and saad_est >= {args.floor:.0e}): {len(valid)}")
-    print(f"")
+    valid = [
+        r for r in rows if r["actual_err"] >= args.floor and r["saad_est"] >= args.floor
+    ]
+    print(
+        f"Valid cells (actual_err >= {args.floor:.0e} and saad_est >= {args.floor:.0e}): {len(valid)}"
+    )
+    print("")
 
     if not valid:
         print("No valid cells. Increase verification range.")
@@ -58,10 +66,13 @@ def main() -> int:
     # Raw ratio
     log_ratios_raw = [math.log10(r["ratio"]) for r in valid]
     # With dt correction
-    log_ratios_dt = [math.log10(r["saad_est"] * r["dt"] / r["actual_err"]) for r in valid]
+    log_ratios_dt = [
+        math.log10(r["saad_est"] * r["dt"] / r["actual_err"]) for r in valid
+    ]
     # With dt / m correction
     log_ratios_dt_m = [
-        math.log10(r["saad_est"] * r["dt"] / r["m_test"] / r["actual_err"]) for r in valid
+        math.log10(r["saad_est"] * r["dt"] / r["m_test"] / r["actual_err"])
+        for r in valid
     ]
 
     def stats(label: str, log_r: list[float]) -> None:
@@ -77,9 +88,15 @@ def main() -> int:
         print(f"- mean log10(ratio):   {mean:+.3f}")
         print(f"- std  log10(ratio):   {sd:.3f}")
         print(f"- range:               [{min(log_r):+.3f}, {max(log_r):+.3f}]")
-        print(f"- |log10| <= 0.5 (3x): {within_05}/{len(log_r)} ({100*within_05/len(log_r):.0f}%)")
-        print(f"- |log10| <= 1.0 (10x): {within_1}/{len(log_r)} ({100*within_1/len(log_r):.0f}%)")
-        print(f"- |log10| <= 2.0 (100x): {within_2}/{len(log_r)} ({100*within_2/len(log_r):.0f}%)")
+        print(
+            f"- |log10| <= 0.5 (3x): {within_05}/{len(log_r)} ({100 * within_05 / len(log_r):.0f}%)"
+        )
+        print(
+            f"- |log10| <= 1.0 (10x): {within_1}/{len(log_r)} ({100 * within_1 / len(log_r):.0f}%)"
+        )
+        print(
+            f"- |log10| <= 2.0 (100x): {within_2}/{len(log_r)} ({100 * within_2 / len(log_r):.0f}%)"
+        )
         print()
 
     print("## raw `saad_est / actual_err`")
@@ -97,16 +114,13 @@ def main() -> int:
         true_insufficient = sum(1 for r in valid if r["actual_err"] > tol)
         flagged = sum(1 for r in valid if r["saad_est"] * r["dt"] > tol)
         true_positive = sum(
-            1 for r in valid
-            if r["actual_err"] > tol and r["saad_est"] * r["dt"] > tol
+            1 for r in valid if r["actual_err"] > tol and r["saad_est"] * r["dt"] > tol
         )
         false_negative = sum(
-            1 for r in valid
-            if r["actual_err"] > tol and r["saad_est"] * r["dt"] <= tol
+            1 for r in valid if r["actual_err"] > tol and r["saad_est"] * r["dt"] <= tol
         )
         false_positive = sum(
-            1 for r in valid
-            if r["actual_err"] <= tol and r["saad_est"] * r["dt"] > tol
+            1 for r in valid if r["actual_err"] <= tol and r["saad_est"] * r["dt"] > tol
         )
         print(f"### tol_lanczos = {tol:.0e} (τ-corrected estimator)")
         print(f"- 真の Krylov 不足 cell 数:     {true_insufficient}")

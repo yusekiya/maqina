@@ -65,22 +65,28 @@ pub(crate) fn lanczos_propagate<F>(
     dt: f64,
     m: usize,
     tol: f64,
-) -> PyResult<(Vec<Complex64>, usize)>
+) -> PyResult<(Vec<Complex64>, usize, f64, f64)>
 where
     F: FnMut(&[Complex64], &mut [Complex64]),
 {
+    // issue #93 (Phase 7): return tuple は (psi_new, m_eff, beta_m, c_m_abs).
+    // 末尾 2 要素は a posteriori 誤差推定 (Saad 1992 / Hochbruck-Lubich 1997):
+    //   err_lanczos ≈ β_m · |c_m| · ‖ψ‖ · dt / m_eff
+    // adaptive Richardson driver が Lanczos 誤差を Magnus 誤差から分離するため
+    // に使う. β_m は build 完了時の最終 off-diagonal, c_m は exp(-i dt T_m) e_0
+    // の m 番目成分. m_eff = 0 (空状態 / ‖ψ‖=0) のときは 0.0 を返す.
     assert!(m >= 1, "m must be >= 1");
     let dim = psi.len();
     if dim == 0 {
         // 空状態は m_eff=0 として扱う (Lanczos vector が 1 本も構築されない).
-        return Ok((Vec::new(), 0));
+        return Ok((Vec::new(), 0, 0.0, 0.0));
     }
 
     // ‖ψ‖ が 0 のときは 0 ベクトルを返す. m_eff は 0 を返す (実 Krylov 部分空間
     // 次元 0; tridiag 固有分解にも入らない). issue #52 A.
     let psi_norm = nrm2(psi);
     if psi_norm == 0.0 {
-        return Ok((vec![Complex64::new(0.0, 0.0); dim], 0));
+        return Ok((vec![Complex64::new(0.0, 0.0); dim], 0, 0.0, 0.0));
     }
 
     // V: column-major (dim × m). 各列が Lanczos vector v_0, v_1, ....
@@ -201,7 +207,20 @@ where
     let mut psi_new = vec![Complex64::new(0.0, 0.0); dim];
     gemv_col_major(&v_mat[..dim * m_eff], dim, m_eff, &c, &mut psi_new);
 
-    Ok((psi_new, m_eff))
+    // a posteriori 誤差推定子の出力 (issue #93 Phase 7):
+    // - β_m: build 完了時の最終 off-diagonal (= 次の Krylov 方向への漏れ強度).
+    //   早期打切時は β_{m_eff-1} < tol を満たした最終 β.
+    //   非打切時は loop 末尾 (k = m-1) で計算された β_{m-1}.
+    // - |c_m|: c = exp(-i dt T_m) e_0 の m 番目 (= 末尾) 成分の絶対値.
+    //   **‖ψ‖ は含めない** (literature 標準, Hochbruck-Lubich 1997 eq. 5.4-5.5).
+    //   現状 c[k] には psi_norm を乗じた値が入っているので, ‖ψ‖ で割って
+    //   pure な行列要素 |⟨e_m, exp(-i dt T_m) e_0⟩| を返す.
+    //   a posteriori 推定式は呼出側で
+    //   `err_lanczos ≈ β_m · |c_m| · ‖ψ‖ · dt / m_eff` の形で組み立てる.
+    let beta_m = beta[m_eff - 1];
+    let c_m_abs = c[m_eff - 1].norm() / psi_norm;
+
+    Ok((psi_new, m_eff, beta_m, c_m_abs))
 }
 
 /// `lanczos_propagate` の **テスト用 Python wrap**.
@@ -223,10 +242,13 @@ where
 ///
 /// # Python 側シグネチャ
 /// ```python
-/// psi_new = _rust.lanczos_propagate_py(
+/// psi_new, m_eff, beta_m, c_m_abs = _rust.lanczos_propagate_py(
 ///     psi, h_x, h_p_diag, a_t, b_t, dt, m, krylov_tol,
 /// )
 /// ```
+///
+/// issue #93 (Phase 7) で 4-tuple 化. 末尾 2 要素は
+/// `err_lanczos ≈ β_m · |c_m| · ‖ψ‖ · dt / m_eff` の a posteriori 推定に使う.
 #[pyfunction]
 #[pyo3(signature = (psi, h_x, h_p_diag, a_t, b_t, dt, m, krylov_tol))]
 #[allow(clippy::too_many_arguments)]
@@ -240,7 +262,7 @@ pub(crate) fn lanczos_propagate_py<'py>(
     dt: f64,
     m: usize,
     krylov_tol: f64,
-) -> PyResult<(Bound<'py, PyArray1<Complex64>>, usize)> {
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, usize, f64, f64)> {
     let psi_slice = psi.as_slice()?;
     let h_x_slice = h_x.as_slice()?;
     let h_p_diag_slice = h_p_diag.as_slice()?;
@@ -269,10 +291,11 @@ pub(crate) fn lanczos_propagate_py<'py>(
     let matvec = |v: &[Complex64], y: &mut [Complex64]| {
         apply_h_kryanneal(v, y, h_x_slice, h_p_diag_slice, a_t, b_t, n);
     };
-    // C1 (issue #52): lanczos_propagate は (psi, m_eff) を返す.
-    // Python テスト (`tests/test_krylov.py`) も対応する destructure に追従.
-    let (psi_new, m_eff) = lanczos_propagate(matvec, psi_slice, dt, m, krylov_tol)?;
-    Ok((psi_new.into_pyarray(py), m_eff))
+    // issue #93 (Phase 7): lanczos_propagate は (psi, m_eff, β_m, |c_m|) を返す.
+    // Python テスト (`tests/test_krylov.py`) も対応する 4-tuple destructure に追従.
+    let (psi_new, m_eff, beta_m, c_m_abs) =
+        lanczos_propagate(matvec, psi_slice, dt, m, krylov_tol)?;
+    Ok((psi_new.into_pyarray(py), m_eff, beta_m, c_m_abs))
 }
 
 #[cfg(test)]
@@ -396,14 +419,17 @@ mod tests {
         let matvec = |_v: &[Complex64], _y: &mut [Complex64]| {
             call_count += 1;
         };
-        let (result, m_eff) = lanczos_propagate(matvec, &psi, 0.1, 8, 1e-12).expect("ok");
+        let (result, m_eff, beta_m, c_m_abs) =
+            lanczos_propagate(matvec, &psi, 0.1, 8, 1e-12).expect("ok");
         assert_eq!(result.len(), dim);
         for &c in &result {
             assert_eq!(c, Complex64::new(0.0, 0.0));
         }
         assert_eq!(call_count, 0, "matvec must not be called on zero psi");
-        // ‖ψ‖=0 fast-path では m_eff=0 (Krylov 構築なし).
+        // ‖ψ‖=0 fast-path では m_eff=0 (Krylov 構築なし). β_m / |c_m| も 0.0.
         assert_eq!(m_eff, 0);
+        assert_eq!(beta_m, 0.0);
+        assert_eq!(c_m_abs, 0.0);
     }
 
     #[test]
@@ -417,9 +443,18 @@ mod tests {
                 *slot = Complex64::new(0.0, 0.0);
             }
         };
-        let (result, _m_eff) = lanczos_propagate(matvec, &psi, 0.37, 24, 1e-12).expect("ok");
+        let (result, m_eff, beta_m, c_m_abs) =
+            lanczos_propagate(matvec, &psi, 0.37, 24, 1e-12).expect("ok");
         let rel = relative_error(&result, &psi);
         assert!(rel < 1e-13, "H=0 case rel = {}", rel);
+        // H=0 → β_0 = 0 で即打切. m_eff = 1, β_m = 0, |c_m| = 1 (e_0 のまま).
+        assert_eq!(m_eff, 1);
+        assert!(beta_m < 1e-13, "β_m = {} should be ~0", beta_m);
+        assert!(
+            (c_m_abs - 1.0).abs() < 1e-13,
+            "|c_m| = {} should be ~1",
+            c_m_abs
+        );
     }
 
     #[test]
@@ -439,7 +474,8 @@ mod tests {
         let matvec = |v: &[Complex64], y: &mut [Complex64]| {
             apply_h_kryanneal(v, y, &h_x, &h_p_diag, a_t, b_t, n);
         };
-        let (result, _m_eff) = lanczos_propagate(matvec, &psi, dt, 16, 1e-12).expect("ok");
+        let (result, _m_eff, beta_m, c_m_abs) =
+            lanczos_propagate(matvec, &psi, dt, 16, 1e-12).expect("ok");
 
         let mut expected = vec![Complex64::new(0.0, 0.0); dim];
         for k in 0..dim {
@@ -449,6 +485,9 @@ mod tests {
         }
         let rel = relative_error(&result, &expected);
         assert!(rel < 1e-13, "diag H rel = {}", rel);
+        // β_m / |c_m| は非負実数.
+        assert!(beta_m >= 0.0, "β_m = {} must be >= 0", beta_m);
+        assert!(c_m_abs >= 0.0, "|c_m| = {} must be >= 0", c_m_abs);
     }
 
     #[test]
@@ -468,7 +507,8 @@ mod tests {
         let matvec = |v: &[Complex64], y: &mut [Complex64]| {
             apply_h_kryanneal(v, y, &h_x, &h_p_diag, a_t, b_t, n);
         };
-        let (result, _m_eff) = lanczos_propagate(matvec, &psi, dt, 24, 1e-12).expect("ok");
+        let (result, _m_eff, _beta_m, _c_m_abs) =
+            lanczos_propagate(matvec, &psi, dt, 24, 1e-12).expect("ok");
         let new_norm = nrm2(&result);
         let rel = (new_norm - psi_norm).abs() / psi_norm.max(1.0);
         assert!(
@@ -496,7 +536,8 @@ mod tests {
         };
         // dim 以上の m は意味が無いので min(24, dim).
         let m = std::cmp::min(24, dim);
-        let (result, _m_eff) = lanczos_propagate(matvec, &psi, dt, m, 1e-14).expect("ok");
+        let (result, _m_eff, _beta_m, _c_m_abs) =
+            lanczos_propagate(matvec, &psi, dt, m, 1e-14).expect("ok");
 
         let h_real = build_dense_h_real(n, &h_x, &h_p_diag, a_t, b_t);
         let expected = reference_propagate_real_h(&h_real, &psi, dt);

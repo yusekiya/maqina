@@ -258,7 +258,7 @@ def _python_lanczos_propagate(
     dt: float,
     m: int,
     tol: float,
-) -> tuple[np.ndarray, int]:
+) -> tuple[np.ndarray, int, float, float]:
     """``exp(-i dt H) ψ`` の Lanczos + 三重対角固有分解による近似 (Python リファレンス).
 
     Rust 側 ``lanczos_propagate`` と同一アルゴリズム (Park-Light 1986,
@@ -289,6 +289,16 @@ def _python_lanczos_propagate(
         ``QuantumResult.m_eff_stats`` 集計に使う. ``dim == 0`` または
         ``‖ψ‖ == 0`` の縮退ケースでは ``m_eff = 0`` を返す
         (Krylov 構築なし).
+    beta_m : float
+        Lanczos build 完了時の最終 off-diagonal ``β_{m_eff-1}``.
+        次の Krylov 方向への漏れ強度に対応し, a posteriori 誤差推定
+        ``err_lanczos ≈ β_m · |c_m| · ‖ψ‖ · dt / m_eff`` (Saad 1992 /
+        Hochbruck-Lubich 1997 + 高次補正) の主因子. issue #93 (Phase 7).
+        ``m_eff == 0`` の縮退ケースでは ``0.0``.
+    c_m_abs : float
+        ``c = exp(-i dt T_m) e_0`` の最終 (m-1 番目) 成分の絶対値.
+        β_m と並んで a posteriori 推定子に使う. issue #93 (Phase 7).
+        ``m_eff == 0`` の縮退ケースでは ``0.0``.
 
     Raises
     ------
@@ -299,11 +309,11 @@ def _python_lanczos_propagate(
         raise ValueError(f"m must be >= 1, got {m!r}")
     dim = psi.shape[0]
     if dim == 0:
-        return psi.copy(), 0
+        return psi.copy(), 0, 0.0, 0.0
 
     psi_norm = float(np.linalg.norm(psi))
     if psi_norm == 0.0:
-        return np.zeros_like(psi), 0
+        return np.zeros_like(psi), 0, 0.0, 0.0
 
     # V: shape (dim, m), 各列が Lanczos vector v_0..v_{m-1}.
     v_mat = np.zeros((dim, m), dtype=np.complex128)
@@ -366,7 +376,16 @@ def _python_lanczos_propagate(
     phases = np.exp(-1j * dt * lam)
     coeff = psi_norm * (q @ (phases * q[0, :]))
     psi_new = v_mat[:, :m_eff] @ coeff
-    return psi_new, m_eff
+    # a posteriori 誤差推定子の出力 (issue #93 Phase 7):
+    # - β_m: build 完了時の最終 off-diagonal (= 次の Krylov 方向への漏れ強度).
+    # - |c_m|: c = exp(-i dt T_m) e_0 の m 番目 (= 末尾) 成分の絶対値.
+    # ‖ψ‖ は coeff にすでに含めてあるので, ここでは抜き出して factor として戻す
+    # (a posteriori 式は β_m × |c_m| × ‖ψ‖ × dt / m_eff の形で使うため,
+    # coeff[m_eff-1] そのままだと ‖ψ‖ が二重計上される). c_m は psi_norm を
+    # 含まない方の正規化を返す.
+    beta_m = float(beta[m_eff - 1])
+    c_m_abs = float(abs(coeff[m_eff - 1])) / psi_norm
+    return psi_new, m_eff, beta_m, c_m_abs
 
 
 def _python_m2_step(
@@ -408,9 +427,11 @@ def _python_m2_step(
         shape ``(2**n,)`` complex128 の新状態.
     """
     matvec = _make_python_matvec(h_x, h_p_diag, a_mid, b_mid)
-    # C1 (issue #52): _python_lanczos_propagate は (psi, m_eff) を返す.
-    # M2 経路は固定 dt で m_eff 露出不要のため discard.
-    psi_new, _m_eff = _python_lanczos_propagate(matvec, psi, dt, m, krylov_tol)
+    # issue #93 (Phase 7): _python_lanczos_propagate は (psi, m_eff, β_m, |c_m|).
+    # M2 経路は固定 dt で m_eff / β_m / |c_m| 露出不要のため discard.
+    psi_new, _m_eff, _beta_m, _c_m_abs = _python_lanczos_propagate(
+        matvec, psi, dt, m, krylov_tol
+    )
     return psi_new
 
 
@@ -1069,17 +1090,22 @@ def _python_cfm4_step(
     """
     # stage 1: B_1 = a_high · H_1 + a_low · H_2 を (c_drv_1, c_diag_1) に
     # 畳み込んで Lanczos 1 回.
+    # issue #93 (Phase 7): _python_lanczos_propagate は (psi, m_eff, β_m, |c_m|).
+    # 本 commit (Step 1a) では β_m / |c_m| を discard する. Commit 3 (Step 1b) で
+    # err_lanczos を伝播するよう拡張する.
     c_drv_1 = _CFM4_A_HIGH * a_s1 + _CFM4_A_LOW * a_s2
     c_diag_1 = _CFM4_A_HIGH * b_s1 + _CFM4_A_LOW * b_s2
     matvec_1 = _make_python_matvec(h_x, h_p_diag, c_drv_1, c_diag_1)
-    psi_mid, m_eff_stage1 = _python_lanczos_propagate(matvec_1, psi, dt, m, krylov_tol)
+    psi_mid, m_eff_stage1, _beta_m_1, _c_m_abs_1 = _python_lanczos_propagate(
+        matvec_1, psi, dt, m, krylov_tol
+    )
 
     # stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に
     # 畳み込んで Lanczos もう 1 回.
     c_drv_2 = _CFM4_A_LOW * a_s1 + _CFM4_A_HIGH * a_s2
     c_diag_2 = _CFM4_A_LOW * b_s1 + _CFM4_A_HIGH * b_s2
     matvec_2 = _make_python_matvec(h_x, h_p_diag, c_drv_2, c_diag_2)
-    psi_new, m_eff_stage2 = _python_lanczos_propagate(
+    psi_new, m_eff_stage2, _beta_m_2, _c_m_abs_2 = _python_lanczos_propagate(
         matvec_2, psi_mid, dt, m, krylov_tol
     )
     return psi_new, m_eff_stage1 + m_eff_stage2

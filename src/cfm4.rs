@@ -83,10 +83,10 @@ pub(crate) fn m2_midpoint_step(
     let matvec = |v: &[Complex64], y: &mut [Complex64]| {
         apply_h_kryanneal(v, y, h_x, h_p_diag, a_mid, b_mid, n);
     };
-    // C1 (issue #52): lanczos_propagate は (psi, m_eff) を返すが,
-    // m2_midpoint_step は固定 dt 経路 (adaptive ではない) なので m_eff を
+    // issue #93 (Phase 7): lanczos_propagate は (psi, m_eff, β_m, |c_m|) を返すが,
+    // m2_midpoint_step は固定 dt 経路 (adaptive ではない) なので末尾 3 要素を
     // 露出する必要はない. ここでは destructure して psi のみ返す.
-    let (psi_new, _m_eff) = lanczos_propagate(matvec, psi, dt, m, krylov_tol)?;
+    let (psi_new, _m_eff, _beta_m, _c_m_abs) = lanczos_propagate(matvec, psi, dt, m, krylov_tol)?;
     Ok(psi_new)
 }
 
@@ -325,9 +325,12 @@ pub(crate) fn cfm4_step(
 
     // stage 1: B_1 = a_high · H_1 + a_low · H_2 を (c_drv_1, c_diag_1) に
     // 畳み込んで Lanczos 1 回.
+    // issue #93 (Phase 7): lanczos の β_m / |c_m| は本 commit (Step 1a) では
+    // 受け取って discard する. Commit 3 (Step 1b) で err_lanczos を伝播するよう
+    // 拡張する. ここではシグネチャ互換性のみ確保.
     let c_drv_1 = a_high * a_s1 + a_low * a_s2;
     let c_diag_1 = a_high * b_s1 + a_low * b_s2;
-    let (psi_mid, m_eff_stage1) = {
+    let (psi_mid, m_eff_stage1, _beta_m_1, _c_m_abs_1) = {
         let matvec = |v: &[Complex64], y: &mut [Complex64]| {
             apply_h_kryanneal(v, y, h_x, h_p_diag, c_drv_1, c_diag_1, n);
         };
@@ -341,7 +344,8 @@ pub(crate) fn cfm4_step(
     let matvec = |v: &[Complex64], y: &mut [Complex64]| {
         apply_h_kryanneal(v, y, h_x, h_p_diag, c_drv_2, c_diag_2, n);
     };
-    let (psi_new, m_eff_stage2) = lanczos_propagate(matvec, &psi_mid, dt, m, krylov_tol)?;
+    let (psi_new, m_eff_stage2, _beta_m_2, _c_m_abs_2) =
+        lanczos_propagate(matvec, &psi_mid, dt, m, krylov_tol)?;
     // C2 (issue #52): 2 stage の m_eff 合計を返す. adaptive Richardson driver
     // が per-step m_eff_total に集計する.
     Ok((psi_new, m_eff_stage1 + m_eff_stage2))
