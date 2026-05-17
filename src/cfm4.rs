@@ -33,7 +33,7 @@
 #![allow(dead_code)]
 
 use num_complex::Complex64;
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -90,7 +90,35 @@ pub(crate) fn m2_midpoint_step(
     Ok(psi_new)
 }
 
-/// `m2_midpoint_step` の Python wrap.
+/// `m2_midpoint_step_py` / `m2_midpoint_step_inplace_py` で共有する shape
+/// 検査. `(n, dim)` を返す. `n = h_x.len()`, `dim = 2^n`.
+fn validate_m2_midpoint_shapes(
+    psi_len: usize,
+    h_x_len: usize,
+    h_p_diag_len: usize,
+    m: usize,
+) -> PyResult<(usize, usize)> {
+    let n = h_x_len;
+    let dim = 1usize << n;
+    if h_p_diag_len != dim {
+        return Err(PyValueError::new_err(format!(
+            "h_p_diag length {} does not match 2^len(h_x) = 2^{} = {}",
+            h_p_diag_len, n, dim,
+        )));
+    }
+    if psi_len != dim {
+        return Err(PyValueError::new_err(format!(
+            "psi length {} does not match 2^len(h_x) = {}",
+            psi_len, dim,
+        )));
+    }
+    if m == 0 {
+        return Err(PyValueError::new_err("m must be >= 1"));
+    }
+    Ok((n, dim))
+}
+
+/// `m2_midpoint_step` の Python wrap (allocate-and-return).
 ///
 /// Python 側 (`_rust.m2_midpoint_step_py`) からは
 ///
@@ -102,6 +130,12 @@ pub(crate) fn m2_midpoint_step(
 ///
 /// として呼ぶ. サイト数 `n = len(h_x)` / 状態次元 `dim = 2^n` は
 /// `len(h_p_diag)` から取り出し, 整合性を検証する.
+///
+/// **性能を出したい Python 側 step loop からは [`m2_midpoint_step_inplace_py`]
+/// (in-place 版) を使うこと**: 本関数は呼び出しごとに `dim · 16 B` の
+/// `complex128` array を新規 allocate するため, step 数が大きい driver
+/// (`evolve_schedule_m2`) では alloc/copy overhead が無視できない
+/// (issue #79 / #86).
 #[pyfunction]
 #[pyo3(signature = (psi, h_x, h_p_diag, a_mid, b_mid, dt, m, krylov_tol))]
 #[allow(clippy::too_many_arguments)]
@@ -120,26 +154,8 @@ pub(crate) fn m2_midpoint_step_py<'py>(
     let h_x_slice = h_x.as_slice()?;
     let h_p_diag_slice = h_p_diag.as_slice()?;
 
-    let n = h_x_slice.len();
-    let dim = 1usize << n;
-    if h_p_diag_slice.len() != dim {
-        return Err(PyValueError::new_err(format!(
-            "h_p_diag length {} does not match 2^len(h_x) = 2^{} = {}",
-            h_p_diag_slice.len(),
-            n,
-            dim,
-        )));
-    }
-    if psi_slice.len() != dim {
-        return Err(PyValueError::new_err(format!(
-            "psi length {} does not match 2^len(h_x) = {}",
-            psi_slice.len(),
-            dim,
-        )));
-    }
-    if m == 0 {
-        return Err(PyValueError::new_err("m must be >= 1"));
-    }
+    let (n, _dim) =
+        validate_m2_midpoint_shapes(psi_slice.len(), h_x_slice.len(), h_p_diag_slice.len(), m)?;
 
     let psi_new = m2_midpoint_step(
         psi_slice,
@@ -153,6 +169,68 @@ pub(crate) fn m2_midpoint_step_py<'py>(
         n,
     )?;
     Ok(psi_new.into_pyarray(py))
+}
+
+/// `m2_midpoint_step` の Python wrap (in-place 版). `psi` を caller 側 array
+/// に **直接 in-place で** `exp(-i dt · H(t + dt/2)) · psi` で上書きする
+/// (戻り値 `None`).
+///
+/// Python 側 (`_rust.m2_midpoint_step_inplace_py`) は
+///
+/// ```python
+/// psi = np.ascontiguousarray(psi0, dtype=np.complex128)  # ループ外で 1 回確保
+/// for k in range(n_steps):
+///     _rust.m2_midpoint_step_inplace_py(
+///         psi, h_x, h_p_diag, a_mid, b_mid, dt, m, krylov_tol,
+///     )
+///     # psi が in-place 更新される
+/// ```
+///
+/// として呼ぶ. `m2_midpoint_step_py` と同じ shape 検査を行い, 不整合は
+/// `PyValueError` (`m == 0` を含む). Lanczos が `Err` を返した場合は
+/// `psi` は変更されない (例外を caller に伝播する前に書き戻さない).
+///
+/// **実装メモ**: `lanczos_propagate` (`src/krylov.rs`) は内部で
+/// `Vec<Complex64>` の作業バッファを確保するため, **Rust 内部での `dim · 16 B`
+/// alloc は残る**. 本 in-place 版が排するのは Python 境界の `into_pyarray`
+/// (numpy buffer alloc + GIL 越え) と caller 側 `psi = ...` 再代入による参照
+/// 切り替えコストに限定される. 主な call site:
+/// `python/kryanneal/krylov.py::evolve_schedule_m2` (Python リファレンス
+/// 経路と `__has_blas__ = False` fallback). 詳細は
+/// `docs/design/07-rust-extension.md` §7.3.
+#[pyfunction]
+#[pyo3(signature = (psi, h_x, h_p_diag, a_mid, b_mid, dt, m, krylov_tol))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn m2_midpoint_step_inplace_py<'py>(
+    mut psi: PyReadwriteArray1<'py, Complex64>,
+    h_x: PyReadonlyArray1<'py, f64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    a_mid: f64,
+    b_mid: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+) -> PyResult<()> {
+    let h_x_slice = h_x.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let psi_slice = psi.as_slice_mut()?;
+
+    let (n, _dim) =
+        validate_m2_midpoint_shapes(psi_slice.len(), h_x_slice.len(), h_p_diag_slice.len(), m)?;
+
+    let psi_new = m2_midpoint_step(
+        psi_slice,
+        h_x_slice,
+        h_p_diag_slice,
+        a_mid,
+        b_mid,
+        dt,
+        m,
+        krylov_tol,
+        n,
+    )?;
+    psi_slice.copy_from_slice(&psi_new);
+    Ok(())
 }
 
 /// CFM4:2 のガウス-ルジャンドル 2 点求積ノード `c_1 = 1/2 - √3/6`.

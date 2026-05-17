@@ -93,9 +93,14 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_py, m)?)?;
     m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_into_py, m)?)?;
     m.add_function(wrap_pyfunction!(matvec::apply_single_mode_axis_i_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        matvec::apply_single_mode_axis_i_inplace_py,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(tridiag::tridiag_eigh_py, m)?)?;
     m.add_function(wrap_pyfunction!(krylov::lanczos_propagate_py, m)?)?;
     m.add_function(wrap_pyfunction!(cfm4::m2_midpoint_step_py, m)?)?;
+    m.add_function(wrap_pyfunction!(cfm4::m2_midpoint_step_inplace_py, m)?)?;
     m.add_function(wrap_pyfunction!(cfm4::cfm4_step_py, m)?)?;
     m.add_function(wrap_pyfunction!(cfm4::cfm4_step_with_m2_estimate_py, m)?)?;
     m.add_function(wrap_pyfunction!(
@@ -103,6 +108,11 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m
     )?)?;
     m.add_function(wrap_pyfunction!(trotter::trotter_step_py, m)?)?;
+    m.add_function(wrap_pyfunction!(trotter::trotter_step_inplace_py, m)?)?;
     m.add_function(wrap_pyfunction!(trotter::trotter_suzuki4_step_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        trotter::trotter_suzuki4_step_inplace_py,
+        m
+    )?)?;
     Ok(())
 }

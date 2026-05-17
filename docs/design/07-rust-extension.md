@@ -138,10 +138,114 @@ caller は `np.zeros` ではなく `np.empty` で確保して構わない。
 | `benchmarks/bench_parallel_scaling.py` | 同上 |
 
 allocate-and-return 版は **参照実装比較とテスト用** の補助 API として
-維持する (既存 docstring 例・テストとの後方互換性のため)。step 系
-`_py` wrap (`trotter_step_py` / `m2_midpoint_step_py` /
-`trotter_suzuki4_step_py` / `apply_single_mode_axis_i_py`) の in-place 化は
-本 issue では扱わず、需要が出たら別 issue で対応する。
+維持する (既存 docstring 例・テストとの後方互換性のため)。
+
+#### 7.3.2 step 系 `_py` wrap の in-place 入口 (issue #86)
+
+#85 と同じ問題系列の step 系版。Rust 内本番経路 (Lanczos / CFM4 / Trotter
+ドライバ) は Python 境界を 1 step ごとに踏まないため影響を受けないが、
+**`_py` wrap 経由で per-step Python 越境する Python リファレンス /
+fallback (`__has_blas__ = False` 等) / bench script** には alloc/copy が
+残っていた。これらに in-place 入口を並立する形で対応 (`*_py` は thin
+wrapper として残存):
+
+```rust
+// 7.3.2.a Strang 2 次 Trotter 1 step.
+#[pyfunction]
+fn trotter_step_inplace_py(
+    psi: PyReadwriteArray1<Complex64>,
+    h_x: PyReadonlyArray1<f64>,
+    h_p_diag: PyReadonlyArray1<f64>,
+    a_t: f64,
+    b_t: f64,
+    dt: f64,
+    n: usize,
+) -> PyResult<()>;
+
+// 7.3.2.b Suzuki S_4 1 step.
+#[pyfunction]
+fn trotter_suzuki4_step_inplace_py(
+    psi: PyReadwriteArray1<Complex64>,
+    h_x: PyReadonlyArray1<f64>,
+    h_p_diag: PyReadonlyArray1<f64>,
+    a_t_list: PyReadonlyArray1<f64>,
+    b_t_list: PyReadonlyArray1<f64>,
+    dt: f64,
+    n: usize,
+) -> PyResult<()>;
+
+// 7.3.2.c M2 中点則 1 step (内部で lanczos_propagate を 1 回呼ぶ).
+#[pyfunction]
+fn m2_midpoint_step_inplace_py(
+    psi: PyReadwriteArray1<Complex64>,
+    h_x: PyReadonlyArray1<f64>,
+    h_p_diag: PyReadonlyArray1<f64>,
+    a_mid: f64,
+    b_mid: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+) -> PyResult<()>;
+
+// 7.3.2.d 2×2 ユニタリを axis i に in-place 適用.
+#[pyfunction]
+fn apply_single_mode_axis_i_inplace_py(
+    psi: PyReadwriteArray1<Complex64>,
+    u: PyReadonlyArray1<Complex64>,
+    i: usize,
+    n: usize,
+) -> PyResult<()>;
+```
+
+引数順は対応する `*_py` (allocate-and-return) と完全一致 (`psi` を
+mutable に変えただけ; 呼び出しコードの移行コストを最小化)。
+
+**性能を出したい Python 側 step loop からは in-place 版を使う**:
+
+```python
+# defensive copy で psi0 の破壊を避けつつ owned & C-contiguous buffer に統一.
+psi = np.array(psi0, dtype=np.complex128, order="C")
+for k in range(n_steps):
+    _rust.trotter_step_inplace_py(psi, h_x, h_p_diag, a_mid, b_mid, dt, n)
+    # psi が in-place 更新される. 戻り値 None.
+```
+
+注意: `np.ascontiguousarray(psi0, dtype=np.complex128)` は psi0 が既に
+C-contiguous complex128 なら同じ array を返すため、その後 in-place 更新
+を回すと **caller 側の psi0 が破壊される**。defensive copy のために
+`np.array(psi0, dtype=np.complex128, order="C")` を使う。
+
+`m2_midpoint_step_inplace_py` 固有の注意: `lanczos_propagate`
+(`src/krylov.rs`) は内部で `Vec<Complex64>` の作業バッファを確保するため、
+**Rust 内部での `dim · 16 B` alloc は残る**。本 in-place 版が排するのは
+Python 境界の `into_pyarray` (numpy buffer alloc + GIL 越え) と
+caller 側 `psi = ...` 再代入による参照切り替えコストに限定される。
+Trotter 系 (`trotter_step_inplace_py` / `trotter_suzuki4_step_inplace_py`
+/ `apply_single_mode_axis_i_inplace_py`) は Rust 内部 alloc も無いため
+per-step heap traffic がほぼゼロになる。
+
+主な call site (issue #86 で移行済み):
+
+| call site | 移行前 alloc / call 上位 |
+|---|---|
+| `python/kryanneal/krylov.py::evolve_schedule_m2` | `dim·16 B` × step 数 |
+| `python/kryanneal/krylov.py::evolve_schedule_trotter` | `dim·16 B` × step 数 |
+| `python/kryanneal/krylov.py::evolve_schedule_trotter_suzuki4` | `dim·16 B` × step 数 |
+| `benchmarks/bench_block_fusion.py` (`_measure_trotter_step`) | `dim·16 B` × repeat |
+| `benchmarks/bench_parallel_scaling.py` (`trotter_step` / `apply_single_mode_axis_i_py_sum_diagnostic`) | `dim·16 B` × (1 + n) × repeat |
+| `benchmarks/bench_simd_scaling.py` (`_measure_single_mode`) | `dim·16 B` × repeat |
+
+bit-for-bit 一致は
+`test_trotter_step_inplace_py_matches_alloc_variant_bitwise` /
+`test_trotter_suzuki4_step_inplace_py_matches_alloc_variant_bitwise` /
+`test_m2_midpoint_step_inplace_py_matches_alloc_variant_bitwise` /
+`test_apply_single_mode_axis_i_inplace_py_matches_alloc_variant_bitwise`
+で固定する。
+
+非ゴール (`*_py` の破壊的置換, Lanczos の `lanczos_propagate_py` /
+adaptive ドライバの `_py` wrap の in-place 化) は本 issue の scope 外。
+後者は内部で多数 step を回し戻り値が状態 1 本のみのため step 系とは
+alloc プロファイルが大きく違う (需要が出たら別 issue)。
 
 ### 7.4 Cargo features
 

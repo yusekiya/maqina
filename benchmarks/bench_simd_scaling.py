@@ -156,12 +156,17 @@ def _measure_apply_h(n: int, h_x: np.ndarray, repeat: int, warmup: int) -> list[
 
 
 def _measure_single_mode(n: int, i: int, repeat: int, warmup: int) -> list[float]:
-    """`_rust.apply_single_mode_axis_i_py` の wall time を repeat 回計測.
+    """`_rust.apply_single_mode_axis_i_inplace_py` の wall time を repeat 回計測.
 
     issue #71 (Phase 6 C2.5) acceptance 用: axis i に 2×2 ユニタリ U を
     apply する per-call wall time を測る. U は U(2) を phase + rotation の
     形で乱数生成 (Trotter R_i 形だと自由度が 1 つだけで FMA 量が少なく
     なるので一般 U(2) を取る).
+
+    in-place 版 (``apply_single_mode_axis_i_inplace_py``) を使い計測内
+    alloc/copy を排する (issue #86; 旧 ``apply_single_mode_axis_i_py`` は
+    per-call で ``dim · 16 B`` の新規 array を allocate するため SIMD kernel の
+    micro 効果が埋もれる).
     """
     from kryanneal import _rust  # pyright: ignore[reportMissingImports]
 
@@ -186,12 +191,12 @@ def _measure_single_mode(n: int, i: int, repeat: int, warmup: int) -> list[float
     )
 
     for _ in range(warmup):
-        _ = _rust.apply_single_mode_axis_i_py(psi, u, i, n)
+        _rust.apply_single_mode_axis_i_inplace_py(psi, u, i, n)
 
     timings: list[float] = []
     for _ in range(repeat):
         t0 = time.perf_counter()
-        _ = _rust.apply_single_mode_axis_i_py(psi, u, i, n)
+        _rust.apply_single_mode_axis_i_inplace_py(psi, u, i, n)
         t1 = time.perf_counter()
         timings.append(t1 - t0)
     return timings

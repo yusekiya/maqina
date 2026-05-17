@@ -102,9 +102,13 @@ DEFAULT_DT = 0.01
 
 
 def _measure_trotter_step(n: int, repeat: int, warmup: int, dt: float) -> list[float]:
-    """``_rust.trotter_step_py`` の wall time を repeat 回計測して返す.
+    """``_rust.trotter_step_inplace_py`` の wall time を repeat 回計測して返す.
 
     Strang 2 次 Trotter 1 step. C3 (multi-qubit gate fusion) の主スコープ.
+
+    in-place 版 (``trotter_step_inplace_py``) を使い計測内 alloc/copy を排する
+    (issue #86; 旧 ``trotter_step_py`` は per-call で ``dim · 16 B`` の新規
+    array を allocate するため Rust kernel の micro 効果が埋もれる).
     """
     from kryanneal import _rust  # pyright: ignore[reportMissingImports]
 
@@ -121,12 +125,12 @@ def _measure_trotter_step(n: int, repeat: int, warmup: int, dt: float) -> list[f
     b_t = 0.5
 
     for _ in range(warmup):
-        _ = _rust.trotter_step_py(psi, h_x, h_p_diag, a_t, b_t, dt, n)
+        _rust.trotter_step_inplace_py(psi, h_x, h_p_diag, a_t, b_t, dt, n)
 
     timings: list[float] = []
     for _ in range(repeat):
         t0 = time.perf_counter()
-        _ = _rust.trotter_step_py(psi, h_x, h_p_diag, a_t, b_t, dt, n)
+        _rust.trotter_step_inplace_py(psi, h_x, h_p_diag, a_t, b_t, dt, n)
         t1 = time.perf_counter()
         timings.append(t1 - t0)
     return timings

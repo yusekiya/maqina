@@ -170,3 +170,35 @@ def test_python_lanczos_dt_zero_is_identity() -> None:
     psi_new, _m_eff = _python_lanczos_propagate(matvec, psi, 0.0, m=24, tol=1e-12)
     rel = np.linalg.norm(psi_new - psi) / max(np.linalg.norm(psi), 1.0)
     assert rel < 1e-13, f"dt=0 identity violated: rel = {rel}"
+
+
+@pytest.mark.skipif(not _HAS_RUST, reason="kryanneal._rust extension not built")
+@pytest.mark.parametrize("n", [3, 4])
+def test_m2_midpoint_step_inplace_py_matches_alloc_variant_bitwise(n: int) -> None:
+    """``m2_midpoint_step_inplace_py`` の結果が ``m2_midpoint_step_py`` と
+    **bit-for-bit** 一致する (issue #86).
+
+    両者は内部で同じ ``m2_midpoint_step`` (= ``lanczos_propagate`` 1 回) を
+    呼ぶので, ``psi_new`` を ``into_pyarray`` で新規 alloc して返すか
+    caller 提供の ``psi`` に ``copy_from_slice`` で書き戻すかが唯一の違い.
+    演算順序は同一なので bit-identical を期待する.
+    """
+    assert _rust_mod is not None
+    h_x, h_p_diag, psi, a_mid, b_mid = _random_hermitian_setup(n, seed=4242)
+    dt = 0.17
+    m = 24
+    tol = 1e-12
+
+    psi_alloc = _rust_mod.m2_midpoint_step_py(
+        psi, h_x, h_p_diag, a_mid, b_mid, dt, m, tol
+    )
+
+    psi_inplace = psi.copy()
+    ret = _rust_mod.m2_midpoint_step_inplace_py(
+        psi_inplace, h_x, h_p_diag, a_mid, b_mid, dt, m, tol
+    )
+    assert ret is None
+    assert np.array_equal(psi_inplace, psi_alloc), (
+        f"n={n}: in-place / alloc が bitwise 一致しない: "
+        f"max abs diff = {np.max(np.abs(psi_inplace - psi_alloc))}"
+    )

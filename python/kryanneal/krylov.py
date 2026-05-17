@@ -533,7 +533,11 @@ def evolve_schedule_m2(
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
 
-    psi = np.ascontiguousarray(psi0, dtype=np.complex128)
+    # 入力 ``psi0`` を破壊しないように常に defensive copy を取り, 以降は
+    # この owned & C-contiguous buffer を Rust 側 in-place API に渡し続ける
+    # (issue #86; 旧 ``np.ascontiguousarray`` は psi0 が既に C-contiguous
+    # complex128 なら同一参照を返すため in-place 化で psi0 が破壊される).
+    psi = np.array(psi0, dtype=np.complex128, order="C")
     h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     dim = int(psi.shape[0])
@@ -564,7 +568,9 @@ def evolve_schedule_m2(
         t_mid = 0.5 * (t_left + t_right)
         a_mid, b_mid = schedule.coeffs_at(t_mid)
         if rust_mod is not None:
-            psi = rust_mod.m2_midpoint_step_py(
+            # in-place 入口: ``psi`` を直接更新, 戻り値 None. Python 境界での
+            # ``dim · 16 B`` alloc / copy が step 数だけ消える (issue #86).
+            rust_mod.m2_midpoint_step_inplace_py(
                 psi,
                 h_x_arr,
                 h_p_diag_arr,
@@ -745,7 +751,9 @@ def evolve_schedule_trotter(
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
 
-    psi = np.ascontiguousarray(psi0, dtype=np.complex128)
+    # 入力 ``psi0`` を破壊しないように defensive copy (issue #86; in-place
+    # API 採用後は ``np.ascontiguousarray`` の no-copy 経路が危険).
+    psi = np.array(psi0, dtype=np.complex128, order="C")
     h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     n = int(h_x_arr.shape[0])
@@ -774,7 +782,8 @@ def evolve_schedule_trotter(
         t_mid = 0.5 * (t_left + t_right)
         a_mid, b_mid = schedule.coeffs_at(t_mid)
         if rust_mod is not None:
-            psi = rust_mod.trotter_step_py(
+            # in-place 入口: ``psi`` を直接更新, 戻り値 None (issue #86).
+            rust_mod.trotter_step_inplace_py(
                 psi,
                 h_x_arr,
                 h_p_diag_arr,
@@ -933,7 +942,8 @@ def evolve_schedule_trotter_suzuki4(
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
 
-    psi = np.ascontiguousarray(psi0, dtype=np.complex128)
+    # 入力 ``psi0`` を破壊しないように defensive copy (issue #86).
+    psi = np.array(psi0, dtype=np.complex128, order="C")
     h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     n = int(h_x_arr.shape[0])
@@ -968,7 +978,8 @@ def evolve_schedule_trotter_suzuki4(
             a_list[j] = a_mid
             b_list[j] = b_mid
         if rust_mod is not None:
-            psi = rust_mod.trotter_suzuki4_step_py(
+            # in-place 入口: ``psi`` を直接更新, 戻り値 None (issue #86).
+            rust_mod.trotter_suzuki4_step_inplace_py(
                 psi,
                 h_x_arr,
                 h_p_diag_arr,
