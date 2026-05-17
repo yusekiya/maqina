@@ -383,6 +383,35 @@ sub-issue 化していない. 再挑戦時は `src/bin/perf_apply_h.rs` + perf s
 ハードウェア counter を最初に取り「何 bound か」を確認してから設計に入る運用.
 
 
+## Phase 7 (issue #93): Lanczos β_m exposure + Richardson 誤差源分離
+
+Phase 6 完了後の follow-up. CFM4 adaptive Richardson driver が #65 long-T
+シナリオで QuTiP に Pareto 劣位だった原因 (Richardson 推定子が Magnus 誤差と
+Krylov 誤差を区別できない) を解消する.
+
+主要 API 変更:
+
+- **`lanczos_propagate` (Rust + Python ref)**: return tuple が 4 要素
+  `(psi, m_eff, β_m, |c_m|)` に拡張. 末尾 2 要素は Saad/Hochbruck-Lubich の
+  a posteriori 誤差推定子 (`err_lanczos ≈ β_m · |c_m| · ‖ψ‖ · dt / m_eff`,
+  5% 精度; `tools/verify_beta_m_estimator.py` で 108 cell sweep 実証).
+- **`cfm4_step` / `cfm4_step_with_richardson_estimate`**: triangle
+  inequality で `err_lanczos_sum` / `err_lanczos_total` を集約して上位伝播.
+- **`evolve_schedule_adaptive_richardson`**: return tuple が 10 要素に拡張
+  (`+ beta_m_history`, `err_lanczos_history`, `err_magnus_history`,
+  `n_krylov_insufficient`). PI controller の駆動量を `err_magnus = max(0,
+  err - err_lanczos_total)` に切替え.
+- **`QuantumResult`**: `beta_m_stats` / `n_krylov_insufficient` フィールド追加.
+
+後方互換性: default `krylov_tol = 1e-12` では `err_lanczos << tol_step` で
+`err_magnus ≈ err`. 既存 PI controller 挙動とほぼ等価
+(`tests/test_adaptive.py::test_adaptive_richardson_error_decomposition_consistency`).
+
+bench acceptance (#93 Step 3 perf): Linux サーバーで `bench_qutip_large.py
+--scenarios long-T` を取り Pareto 劣位の解消 + step reject 増加なしを確認.
+詳細は `docs/design/12-release-plan.md` Phase 7 / `docs/design/05-3-propagator.md`
+"Richardson 誤差源分離" 節.
+
 ## 設計判断の出典 (cv_ising 流用箇所)
 
 - CFM4:2 係数: `cv_ising/rust/src/cfm4.rs` の `a_high = 1/4 + √3/6` 等
