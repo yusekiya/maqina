@@ -1,37 +1,40 @@
-"""QuTiP ``sesolve`` vs kryanneal の dt sweep ベンチ (issue #65 Phase 6 C4).
+"""QuTiP ``sesolve`` vs kryanneal の work-precision diagram ベンチ (issue #65 Phase 6 C4).
 
-比較方針:
+比較指標を **「精度 (1 - fidelity) vs 計算時間 (wall sec)」** の 2 軸 Pareto
+にした (issue #65 user review). 旧版は dt sweep で QuTiP/kryanneal を同じ dt
+で比較していたが, QuTiP の adaptive solver では dt が必ずしも step を律しない
+ため指標として不公平だった. 本版では:
 
-* **精度 (fidelity)**: ``dt → 0`` の極限を「収束した参照状態」と見做す.
-  QuTiP は内部 ODE solver の最大 step 幅 ``max_step`` を ``dt`` にキャップ
-  すれば実効的に dt sweep になる. 本ベンチでは sweep する dt のうち
-  **最小 dt の QuTiP cell** を reference state とし, 全 cell (QuTiP / kryanneal
-  m2 / trotter / cfm4) の fidelity を ``|⟨ψ_ref | ψ_cell⟩|^2`` で測る.
+* 各 solver は固有の **「精度つまみ」** を持ち, 独自 sweep する.
+  - kryanneal m2 / trotter / cfm4 (固定 dt): ``n_steps``
+  - kryanneal cfm4_adaptive_richardson: ``atol``
+  - QuTiP: ``tol`` (内部で ``atol = rtol = tol`` として渡す.
+    TFIM の量子状態は |ψ_k| ≤ 1/√dim 級なので atol/rtol の影響は同オーダ,
+    1 軸 sweep で十分捕らえられる)
 
-* **計算時間 (wall time)**: 各 (solver, dt) cell を 1 回だけ実行し
-  ``time.perf_counter`` で測定する. fidelity 計算は state を保持しておけば
-  事後計算で済むため, **状態取得と wall time 測定を同じ run で同時に行う**
-  (issue #65 user 指示: 不要な計算反復を避ける).
+* **reference state** は QuTiP ``sesolve`` at ``tol=1e-13`` で 1 回だけ計算
+  (n ごとに 1 回; ``--ref-tol`` で上書き可). adams ODE solver を極限まで
+  絞った独立 ground truth として全 cell の fidelity 基準に使う. kryanneal
+  自身を reference にしないことで「kryanneal vs QuTiP」の公平性を保つ.
 
-* **QuTiP Hamiltonian は常に sparse 構築**: ``qutip.tensor`` of ``sigmax`` の
-  和で CSR backing にする (``_build_qutip_hamiltonian``). 旧版は n=13 で
-  dense / sparse 切替していたが, dense backing は dim^2 メモリ + dim^2 matvec
-  という TFIM 構造に対して明らかに無駄 (non-zero は ``n · 2^n`` しかない).
-  比較対象 QuTiP を不必要に遅くしないよう全 n で sparse 固定 (issue #65 review
-  コメント). 旧 dense backing で n=12 が 18.6s だったセルは sparse で <1s
-  レベル.
+* 各 sweep cell は **1 回だけ実行** し state と wall_sec を同時記録. fidelity
+  は事後計算 (issue #65 user 指示: 不要な計算反復を避ける).
+
+* QuTiP Hamiltonian は **常に sparse 構築** (``qutip.tensor`` of ``sigmax``).
+  dense backing は TFIM 構造 (non-zero ~ n·2^n) に対して dim^2 メモリ +
+  matvec の無駄, かつ比較対象を遅くする偏ったベンチになるため廃止.
 
 レポート: ``benchmarks/results/<YYYYMMDD-HHMMSS>/`` に以下を吐く.
 
-* ``bench_qutip_large.csv``: per-cell raw data (n, solver, dt, n_steps,
-  wall_sec, infidelity, log10_infidelity). reference cell は infidelity=0.
-* ``bench_qutip_large.md``: machine info + per-n summary 表 (各 solver の
-  fidelity-vs-dt と wall_time-vs-dt) + 経験的収束 order (連続 dt の
-  infidelity 比から ``log2`` で見積もる).
+* ``bench_qutip_large.csv``: per-cell raw data (n, solver, knob_name,
+  knob_value, n_steps_effective, wall_sec, infidelity, log10_infidelity,
+  is_pareto).
+* ``bench_qutip_large.md``: machine info + per-n work-precision 表 (infidelity
+  昇順, Pareto-optimal cell に ``✓`` マーク). 「目標精度 X を最速で出す
+  solver はどれか」が 1 表で読める形.
 
 machine baseline 規約 (``CLAUDE.md`` ベンチマーク節) に従い, BLAS thread / NumPy /
-プラットフォームを machine info に記録する. 「○○× 速くなった」型の主張で
-本ベンチを使う際は同一マシンで before/after を取ること.
+プラットフォームを machine info に記録する.
 
 依存: kryanneal (default features) + qutip (dev dep). QuTiP 未 install で
 ``ImportError``.
@@ -39,10 +42,13 @@ machine baseline 規約 (``CLAUDE.md`` ベンチマーク節) に従い, BLAS th
 CLI 例::
 
     uv run python benchmarks/bench_qutip_large.py
-    uv run python benchmarks/bench_qutip_large.py --n-values 10,12 --dt-values 0.1,0.05,0.025,0.01
-    uv run python benchmarks/bench_qutip_large.py --solvers qutip,m2,cfm4 --blas-threads 1
-    # QuTiP の atol/rtol を 1e-4 まで緩めて全 dt で max_step binding にする
-    uv run python benchmarks/bench_qutip_large.py --qutip-atol 1e-4 --qutip-rtol 1e-4
+    uv run python benchmarks/bench_qutip_large.py --n-values 10,12 --blas-threads 1
+    # 各 solver のつまみ sweep を個別に絞る
+    uv run python benchmarks/bench_qutip_large.py \\
+        --cfm4-n-steps 5,10,20,50 \\
+        --qutip-tols 1e-3,1e-6,1e-9
+    # reference をさらに厳しく取る
+    uv run python benchmarks/bench_qutip_large.py --ref-tol 1e-14
 """
 
 from __future__ import annotations
@@ -77,10 +83,42 @@ except ImportError as exc:  # pragma: no cover - dev dep 必須
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "benchmarks" / "results"
 
-# 比較対象 solver. ``qutip`` は QuTiP sesolve, それ以外は kryanneal の固定 dt
-# 経路. adaptive Richardson は dt 指定が無いため本 dt-sweep 構造に乗らない
-# (PI 制御の dt は動的決定). 固定 dt 経路の m2 / trotter / cfm4 で十分.
-_VALID_SOLVERS: tuple[str, ...] = ("qutip", "m2", "trotter", "cfm4")
+# 比較対象 solver. 各 solver は固有の "精度つまみ" を持つ
+# (``_SOLVER_KNOBS`` でマッピング). adaptive Richardson も sweep 対象に
+# 含めることで「atol で精度を調整する経路」も Pareto 比較できる.
+_VALID_SOLVERS: tuple[str, ...] = (
+    "qutip",
+    "m2",
+    "trotter",
+    "cfm4",
+    "cfm4_adaptive_richardson",
+)
+
+# 各 solver の「精度つまみ名」. CSV / MD の knob_name 列および sweep CLI
+# 引数の自動生成に使う.
+_SOLVER_KNOBS: dict[str, str] = {
+    "qutip": "tol",
+    "m2": "n_steps",
+    "trotter": "n_steps",
+    "cfm4": "n_steps",
+    "cfm4_adaptive_richardson": "atol",
+}
+
+# 各 solver の sweep 既定値. user は CLI で `--<solver>-<knob>s` を渡して
+# 上書きできる (e.g. `--cfm4-n-steps 5,10,20`). kryanneal 固定 dt 経路の
+# n_steps は global error order に応じて散布: m2/trotter (p=2) は大きい
+# n_steps が必要, cfm4 (p=4) は少なくて済む. adaptive / qutip の tol も
+# 1-fid ~ atol^2 の Taylor 展開で 1e-3 ~ 1e-12 の 5 桁 sweep にすれば
+# 精度 1e-6 ~ 1e-24 オーダの Pareto 範囲を覆える.
+_DEFAULT_M2_N_STEPS: list[int] = [10, 30, 100, 300, 1000, 3000]
+_DEFAULT_TROTTER_N_STEPS: list[int] = [10, 30, 100, 300, 1000, 3000]
+_DEFAULT_CFM4_N_STEPS: list[int] = [5, 10, 20, 50, 100, 200]
+_DEFAULT_ADAPTIVE_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-11]
+_DEFAULT_QUTIP_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-12]
+
+# Reference 計算の QuTiP tol. これより下では floating-point eps が支配的に
+# なるので default 1e-13 が現実的な極限. user は ``--ref-tol`` で上書き可.
+_DEFAULT_REF_TOL: float = 1e-13
 
 
 # ---------------------------------------------------------------------------
@@ -96,12 +134,8 @@ def _build_qutip_hamiltonian(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) ->
     吸収するため X は tensor list の位置 ``n-1-i`` に挿入する
     (``tests/test_reference_qutip.py`` と同じ規約変換).
 
-    全 n で sparse 経路に固定する: dense backing にする理由が無い
-    (TFIM の H_drv は non-zero が ``n · 2^n`` しかないので dim^2 dense は無駄,
-    かつ比較対象 QuTiP の matvec を不必要に遅くすると bench がフェアでなくなる).
-    旧版の ``_DENSE_THRESHOLD_N`` ベース dense/sparse 切替は issue #65 レビューで
-    廃止 (dense backing の n=12 で 18.6s だったセルが sparse で <1s レベルに
-    落ちることを確認済み).
+    全 n で sparse 経路に固定する (dense backing は TFIM 構造に対して dim^2
+    メモリ + matvec の無駄, かつ比較対象を遅くするので不公平).
     """
     n = h_x.shape[0]
     sx = qutip.sigmax()
@@ -120,53 +154,29 @@ def _build_qutip_hamiltonian(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) ->
 
 
 # ---------------------------------------------------------------------------
-# Cell runners (state + wall time を同時に取得; 1 cell = 1 run)
+# Cell runners (1 cell = 1 run; state と wall_sec を同時取得)
 # ---------------------------------------------------------------------------
 
 
-def _run_qutip_cell(
-    h_t: list,
-    psi0: np.ndarray,
-    T: float,
-    dt: float,
-    n: int,
-    *,
-    atol: float,
-    rtol: float,
+def _run_qutip(
+    h_t: list, psi0: np.ndarray, T: float, n: int, tol: float
 ) -> tuple[float, np.ndarray]:
-    """QuTiP sesolve を ``max_step=dt`` + 緩めた atol/rtol で走らせて
-    ``(wall_sec, psi_final)`` を返す.
+    """QuTiP ``sesolve`` を ``atol = rtol = tol`` で走らせて ``(wall_sec, psi)``.
 
-    重要: atol/rtol を **意図的に緩めて** 内部 ODE solver の atol 駆動 step
-    が ``max_step=dt`` よりも大きくなるようにする. こうしないと adaptive
-    solver は atol で決まった小さい step を取り続け, max_step が無視されて
-    「dt sweep」が QuTiP cell で形骸化する (atol=1e-12 だと内部 step ~ 5e-3
-    で plateau し, dt=0.1 や 0.05 でも wall time がほぼ同じになる現象を
-    実測 issue #65 で確認).
+    精度つまみは ``tol`` 1 軸. max_step 制約は **付けない** (内部 step は
+    atol/rtol で完全に決まる; これが本 bench の「QuTiP の精度つまみは atol
+    である」というスタンス). dt sweep でなく tol sweep が QuTiP の adaptive
+    solver には自然.
 
-    adams (default) order ~5 のとき atol 駆動 step ≈ ``atol^(1/5)``.
-    default ``atol=rtol=1e-6`` で内部 step ~ 0.063 ≥ 一般的な sweep の dt 値
-    (≥ 0.001) なので max_step が binding になる. 結果として「dt を小さく
-    すると QuTiP の wall time が dt^(-1) スケーリングで増え, 同時に精度
-    (vs 最小 dt cell) も向上する」というユーザー直感通りの挙動になる.
-
-    全 step を ``dt`` で踏みたいなら atol をさらに緩める (``--qutip-atol 1e-4``
-    等). 一方で reference (最小 dt cell) の global error を 1e-12 級に
-    保ちたいなら 1e-6 が良い妥協点 (T=1, p=5 で global error ~ T·dt^p
-    = 1·0.001^5 = 1e-15 if max_step-binding, あるいは ~ atol = 1e-6 が
-    floor).
-
-    ``n`` (スピン数) を必須引数で受けるのは, psi0 を tensor product dims
-    (``[[2]*n, [1]*n]``) で構築するため. Hamiltonian 側の dims
-    (``[[2]*n, [2]*n]``) と整合させないと QuTiP solver が
-    ``TypeError: incompatible dimensions`` を投げる.
+    ``n`` (スピン数) を必須引数で受けるのは psi0 を tensor product dims
+    (``[[2]*n, [1]*n]``) で構築するため. Hamiltonian 側 dims (``[[2]*n, [2]*n]``)
+    と整合させないと QuTiP solver が ``TypeError: incompatible dimensions``.
     """
     psi0_q = qutip.Qobj(psi0.reshape(-1, 1), dims=[[2] * n, [1] * n])
     options = {
-        "atol": float(atol),
-        "rtol": float(rtol),
-        "max_step": float(dt),
-        "nsteps": 1_000_000,  # max_step 拘束下でも全 [0,T] を 1 segment で抜けられる量
+        "atol": float(tol),
+        "rtol": float(tol),
+        "nsteps": 1_000_000,
     }
     t_start = time.perf_counter()
     sol = qutip.sesolve(h_t, psi0_q, np.array([0.0, T]), options=options)
@@ -175,7 +185,7 @@ def _run_qutip_cell(
     return elapsed, psi_final
 
 
-def _run_kryanneal_cell(
+def _run_kryanneal_fixed_dt(
     prob: IsingProblem,
     sched: Schedule,
     psi0: np.ndarray,
@@ -183,10 +193,7 @@ def _run_kryanneal_cell(
     method: str,
     n_steps: int,
 ) -> tuple[float, np.ndarray]:
-    """kryanneal 固定 dt 経路を ``n_steps`` step で走らせて ``(wall_sec, psi_final)``.
-
-    ``dt = T / n_steps``. method ∈ {m2, trotter, cfm4}.
-    """
+    """kryanneal 固定 dt 経路 (m2 / trotter / cfm4) を ``n_steps`` 回走らせる."""
     ann = QuantumAnnealer(prob, sched)
     t_start = time.perf_counter()
     res = ann.run(
@@ -197,8 +204,33 @@ def _run_kryanneal_cell(
         n_steps=n_steps,
     )
     elapsed = time.perf_counter() - t_start
-    psi_final = np.ascontiguousarray(res.psi_final)
-    return elapsed, psi_final
+    return elapsed, np.ascontiguousarray(res.psi_final)
+
+
+def _run_kryanneal_adaptive(
+    prob: IsingProblem,
+    sched: Schedule,
+    psi0: np.ndarray,
+    T: float,
+    atol: float,
+) -> tuple[float, np.ndarray, int]:
+    """kryanneal ``cfm4_adaptive_richardson`` 経路を ``atol`` 指定で走らせる.
+
+    PI controller が実際に踏んだ step 数を ``n_steps_actual`` として返す
+    (kryanneal の ``QuantumResult.n_steps_actual``). 出力テーブルの
+    ``n_steps_effective`` 列に表示する.
+    """
+    ann = QuantumAnnealer(prob, sched)
+    t_start = time.perf_counter()
+    res = ann.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson",
+        atol=atol,
+    )
+    elapsed = time.perf_counter() - t_start
+    return elapsed, np.ascontiguousarray(res.psi_final), int(res.n_steps_actual)
 
 
 # ---------------------------------------------------------------------------
@@ -230,27 +262,37 @@ def _make_random_problem(
 
 
 class _CellRecord:
-    """1 (n, solver, dt) cell の生データ.
+    """1 (n, solver, knob_value) cell の生データ.
 
-    fidelity は後段 (全 cell が出揃ってから reference を確定して) 計算する
-    ので, この段階では ``psi_final`` と ``wall_sec`` だけ保持する.
+    fidelity は後段 (reference 確定後) に計算するため, この段階では
+    ``psi_final`` と ``wall_sec`` と ``n_steps_effective`` を保持する.
     """
 
-    __slots__ = ("n", "solver", "dt", "n_steps", "wall_sec", "psi_final")
+    __slots__ = (
+        "n",
+        "solver",
+        "knob_name",
+        "knob_value",
+        "n_steps_effective",
+        "wall_sec",
+        "psi_final",
+    )
 
     def __init__(
         self,
         n: int,
         solver: str,
-        dt: float,
-        n_steps: int,
+        knob_name: str,
+        knob_value: float,
+        n_steps_effective: int | None,
         wall_sec: float,
         psi_final: np.ndarray,
     ) -> None:
         self.n = n
         self.solver = solver
-        self.dt = dt
-        self.n_steps = n_steps
+        self.knob_name = knob_name
+        self.knob_value = knob_value
+        self.n_steps_effective = n_steps_effective
         self.wall_sec = wall_sec
         self.psi_final = psi_final
 
@@ -260,70 +302,150 @@ def _fidelity(psi_a: np.ndarray, psi_b: np.ndarray) -> float:
     return float(np.abs(np.vdot(psi_a, psi_b)) ** 2)
 
 
+def _format_knob_value(knob_name: str, value: float) -> str:
+    """sweep つまみ値の human-readable 文字列化.
+
+    ``n_steps`` は整数のまま, それ以外 (``tol`` / ``atol``) は科学表記.
+    """
+    if knob_name == "n_steps":
+        return str(int(value))
+    return f"{value:.1e}"
+
+
 def _sweep_one_n(
     n: int,
     T: float,
-    dt_list: list[float],
-    solvers: list[str],
     seed: int,
-    *,
-    qutip_atol: float,
-    qutip_rtol: float,
-) -> list[_CellRecord]:
-    """1 つの n について全 (solver, dt) cell を実行し ``_CellRecord`` 列を返す.
+    solvers: list[str],
+    m2_n_steps: list[int],
+    trotter_n_steps: list[int],
+    cfm4_n_steps: list[int],
+    adaptive_atols: list[float],
+    qutip_tols: list[float],
+    ref_tol: float,
+) -> tuple[list[_CellRecord], _CellRecord]:
+    """1 つの n について全 sweep cell と reference cell を計算する.
 
-    QuTiP Hamiltonian は dt sweep をまたいで再利用するため (sparse 構築は
-    n=16 で数秒オーダ), n ループの先頭で 1 回だけ構築する. kryanneal 側も
-    同じ ``IsingProblem`` / ``Schedule`` を全 dt cell で使い回す.
-
-    ``qutip_atol`` / ``qutip_rtol`` は QuTiP cell の adaptive solver tolerance.
-    緩めると max_step が binding になり「dt sweep が QuTiP でも意味を持つ」
-    挙動になる (``_run_qutip_cell`` の docstring 参照).
+    Returns
+    -------
+    records
+        sweep cell の ``_CellRecord`` 列 (reference を含まない).
+    ref_record
+        reference 用に走らせた QuTiP ``tol=ref_tol`` の cell. テーブルの
+        基準点として MD 出力に明示する.
     """
     prob, sched, psi0, h_x, h_p_diag = _make_random_problem(n, T, seed)
+    h_t = _build_qutip_hamiltonian(h_x, h_p_diag, T)
 
-    # Hamiltonian 構築. qutip cell を 1 つでも回すなら必要.
-    h_t: list | None = None
-    if "qutip" in solvers:
-        h_t = _build_qutip_hamiltonian(h_x, h_p_diag, T)
+    # Reference を最初に計算 (sweep cell の fidelity 計算で参照する).
+    print(
+        f"[bench_qutip_large] n={n} reference: QuTiP tol={ref_tol:.1e} ...",
+        flush=True,
+    )
+    ref_wall, ref_psi = _run_qutip(h_t, psi0, T, n, ref_tol)
+    print(f"  reference wall = {ref_wall:.3f}s", flush=True)
+    ref_record = _CellRecord(
+        n=n,
+        solver="qutip",
+        knob_name="tol",
+        knob_value=ref_tol,
+        n_steps_effective=None,
+        wall_sec=ref_wall,
+        psi_final=ref_psi,
+    )
 
     records: list[_CellRecord] = []
-    for dt in dt_list:
-        n_steps = max(1, int(round(T / dt)))
-        # QuTiP cell.
-        if "qutip" in solvers and h_t is not None:
-            wall, psi = _run_qutip_cell(
-                h_t, psi0, T, dt, n, atol=qutip_atol, rtol=qutip_rtol
+
+    if "qutip" in solvers:
+        print(f"  qutip sweep tols={qutip_tols} ...", flush=True)
+        for tol in qutip_tols:
+            wall, psi = _run_qutip(h_t, psi0, T, n, tol)
+            records.append(
+                _CellRecord(
+                    n=n,
+                    solver="qutip",
+                    knob_name="tol",
+                    knob_value=tol,
+                    n_steps_effective=None,
+                    wall_sec=wall,
+                    psi_final=psi,
+                )
             )
-            records.append(_CellRecord(n, "qutip", dt, n_steps, wall, psi))
-        # kryanneal cells.
-        for method in ("m2", "trotter", "cfm4"):
-            if method not in solvers:
-                continue
-            wall, psi = _run_kryanneal_cell(prob, sched, psi0, T, method, n_steps)
-            records.append(_CellRecord(n, method, dt, n_steps, wall, psi))
-    return records
+
+    for method, sweep in (
+        ("m2", m2_n_steps),
+        ("trotter", trotter_n_steps),
+        ("cfm4", cfm4_n_steps),
+    ):
+        if method not in solvers:
+            continue
+        print(f"  {method} sweep n_steps={sweep} ...", flush=True)
+        for n_steps in sweep:
+            wall, psi = _run_kryanneal_fixed_dt(prob, sched, psi0, T, method, n_steps)
+            records.append(
+                _CellRecord(
+                    n=n,
+                    solver=method,
+                    knob_name="n_steps",
+                    knob_value=float(n_steps),
+                    n_steps_effective=int(n_steps),
+                    wall_sec=wall,
+                    psi_final=psi,
+                )
+            )
+
+    if "cfm4_adaptive_richardson" in solvers:
+        print(
+            f"  cfm4_adaptive_richardson sweep atols={adaptive_atols} ...", flush=True
+        )
+        for atol in adaptive_atols:
+            wall, psi, n_steps_actual = _run_kryanneal_adaptive(
+                prob, sched, psi0, T, atol
+            )
+            records.append(
+                _CellRecord(
+                    n=n,
+                    solver="cfm4_adaptive_richardson",
+                    knob_name="atol",
+                    knob_value=atol,
+                    n_steps_effective=n_steps_actual,
+                    wall_sec=wall,
+                    psi_final=psi,
+                )
+            )
+
+    return records, ref_record
 
 
-def _pick_reference(records: list[_CellRecord]) -> _CellRecord:
-    """全 cell から reference を選ぶ.
+# ---------------------------------------------------------------------------
+# Pareto 検出
+# ---------------------------------------------------------------------------
 
-    優先順位: ``solver=="qutip"`` のうち最小 dt cell. QuTiP が含まれていない
-    場合は **m2 の最小 dt cell** を fallback として返す (kryanneal 同士の
-    self-consistency check).
+
+def _pareto_mask(infids: list[float], walls: list[float]) -> list[bool]:
+    """点列 ``(infid_i, wall_i)`` から **Pareto 最適 mask** を返す.
+
+    Pareto 最適: 「infidelity も wall_sec も自分以下で, かつ少なくとも一方が
+    厳密に小さい」点が他に無いこと. 両方とも "lower is better".
+
+    O(N^2) で計算するが, cell 数は 30-50 程度なので問題ない.
     """
-    qutip_cells = [r for r in records if r.solver == "qutip"]
-    if qutip_cells:
-        return min(qutip_cells, key=lambda r: r.dt)
-    m2_cells = [r for r in records if r.solver == "m2"]
-    if m2_cells:
-        return min(m2_cells, key=lambda r: r.dt)
-    cfm4_cells = [r for r in records if r.solver == "cfm4"]
-    if cfm4_cells:
-        return min(cfm4_cells, key=lambda r: r.dt)
-    # どの solver も無いケースは caller 側でガードされている想定だが
-    # 念のため明示的にエラーにする.
-    raise RuntimeError("no records to derive reference from")
+    n = len(infids)
+    mask = [True] * n
+    for i in range(n):
+        if not mask[i]:
+            continue
+        for j in range(n):
+            if i == j:
+                continue
+            if (
+                infids[j] <= infids[i]
+                and walls[j] <= walls[i]
+                and (infids[j] < infids[i] or walls[j] < walls[i])
+            ):
+                mask[i] = False
+                break
+    return mask
 
 
 # ---------------------------------------------------------------------------
@@ -344,10 +466,8 @@ def _build_machine_info(args: argparse.Namespace) -> dict[str, str]:
         "blas_threads_requested": (
             str(args.blas_threads) if args.blas_threads is not None else "<unset>"
         ),
-        "qutip_atol": f"{args.qutip_atol:.2e}",
-        "qutip_rtol": f"{args.qutip_rtol:.2e}",
+        "ref_tol": f"{args.ref_tol:.1e}",
     }
-    # _rust build flag (BLAS/rayon/simd) を露出.
     try:
         rust_mod = importlib.import_module("kryanneal._rust")
         info["has_blas"] = str(bool(getattr(rust_mod, "__has_blas__", False)))
@@ -360,76 +480,116 @@ def _build_machine_info(args: argparse.Namespace) -> dict[str, str]:
     return info
 
 
+def _compute_infidelities(
+    records: list[_CellRecord], ref_psi: np.ndarray
+) -> list[float]:
+    """各 record の infidelity = 1 - |⟨ref|ψ⟩|^2 を計算."""
+    out: list[float] = []
+    for r in records:
+        fid = _fidelity(ref_psi, r.psi_final)
+        out.append(max(0.0, 1.0 - fid))
+    return out
+
+
 def _write_csv(
-    records: list[_CellRecord],
-    ref: dict[int, _CellRecord],
+    records_per_n: dict[int, list[_CellRecord]],
+    refs_per_n: dict[int, _CellRecord],
+    infids_per_n: dict[int, list[float]],
+    pareto_per_n: dict[int, list[bool]],
     out_path: Path,
 ) -> None:
     """``bench_qutip_large.csv`` を書く.
 
-    per-cell 1 行: (n, solver, dt, n_steps, wall_sec, fidelity, infidelity, log10_infidelity).
-    ``infidelity = 1 - fidelity``, ``log10_infidelity = log10(infidelity)``
-    (infidelity=0 で ``-inf`` 代わりに ``NaN`` 表記).
+    per-cell 1 行 + reference を別 row として記録. ``is_pareto`` 列で Pareto
+    最適 mask, ``is_reference`` 列で reference cell を識別.
     """
     fieldnames = [
         "n",
         "solver",
-        "dt",
-        "n_steps",
+        "knob_name",
+        "knob_value",
+        "n_steps_effective",
         "wall_sec",
-        "fidelity",
         "infidelity",
         "log10_infidelity",
+        "is_pareto",
+        "is_reference",
     ]
     with out_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for r in records:
-            ref_cell = ref[r.n]
-            if r is ref_cell:
-                fid = 1.0
-                infid = 0.0
-            else:
-                fid = _fidelity(ref_cell.psi_final, r.psi_final)
-                infid = max(0.0, 1.0 - fid)
-            log10_infid = f"{np.log10(infid):.6f}" if infid > 0.0 else "nan"
+        for n in sorted(records_per_n):
+            ref = refs_per_n[n]
+            # reference 行 (sweep には含まれないが文脈用に出力)
             writer.writerow(
                 {
-                    "n": r.n,
-                    "solver": r.solver,
-                    "dt": f"{r.dt:.6e}",
-                    "n_steps": r.n_steps,
-                    "wall_sec": f"{r.wall_sec:.6f}",
-                    "fidelity": f"{fid:.12e}",
-                    "infidelity": f"{infid:.6e}",
-                    "log10_infidelity": log10_infid,
+                    "n": n,
+                    "solver": ref.solver,
+                    "knob_name": ref.knob_name,
+                    "knob_value": f"{ref.knob_value:.6e}",
+                    "n_steps_effective": (
+                        "" if ref.n_steps_effective is None else ref.n_steps_effective
+                    ),
+                    "wall_sec": f"{ref.wall_sec:.6f}",
+                    "infidelity": "0.0",
+                    "log10_infidelity": "nan",
+                    "is_pareto": "",
+                    "is_reference": "1",
                 }
             )
+            for r, infid, pareto in zip(
+                records_per_n[n], infids_per_n[n], pareto_per_n[n], strict=True
+            ):
+                log10_infid = f"{np.log10(infid):.6f}" if infid > 0.0 else "nan"
+                writer.writerow(
+                    {
+                        "n": n,
+                        "solver": r.solver,
+                        "knob_name": r.knob_name,
+                        "knob_value": f"{r.knob_value:.6e}",
+                        "n_steps_effective": (
+                            "" if r.n_steps_effective is None else r.n_steps_effective
+                        ),
+                        "wall_sec": f"{r.wall_sec:.6f}",
+                        "infidelity": f"{infid:.6e}",
+                        "log10_infidelity": log10_infid,
+                        "is_pareto": "1" if pareto else "0",
+                        "is_reference": "0",
+                    }
+                )
 
 
 def _write_md(
-    records: list[_CellRecord],
-    ref: dict[int, _CellRecord],
+    records_per_n: dict[int, list[_CellRecord]],
+    refs_per_n: dict[int, _CellRecord],
+    infids_per_n: dict[int, list[float]],
+    pareto_per_n: dict[int, list[bool]],
     machine_info: dict[str, str],
-    out_path: Path,
     args: argparse.Namespace,
+    out_path: Path,
 ) -> None:
-    """``bench_qutip_large.md`` を書く (machine info + per-n table)."""
+    """``bench_qutip_large.md`` を書く: machine info + per-n work-precision 表.
+
+    各 n の表は infidelity 昇順で並べ, Pareto 最適 cell に ``✓`` マークを付ける.
+    "目標精度 X を最速で出すのはどの solver か" が表 1 つで読める.
+    """
     lines: list[str] = []
     lines.append("# bench_qutip_large.py")
     lines.append("")
     lines.append(
-        "QuTiP sesolve vs kryanneal の dt sweep ベンチ (issue #65 Phase 6 C4)."
+        "Work-precision diagram ベンチ: QuTiP ``sesolve`` vs kryanneal 各 method "
+        "(issue #65 Phase 6 C4)."
     )
     lines.append("")
     lines.append(
-        "fidelity の基準は **dt sweep 中の最小 dt の QuTiP cell** "
-        "(QuTiP が無効なら m2 / cfm4 最小 dt cell に fallback). 各 (solver, dt) "
-        "cell は 1 回だけ実行し state と wall time を同時に取る."
+        "各 solver は固有の精度つまみを sweep し, 共通 reference "
+        "(QuTiP ``tol=ref_tol``) に対する infidelity と wall time を計測. "
+        "下の表は **infidelity 昇順** に並べ, "
+        "**Pareto 最適 cell (他に infidelity も wall time も同等以下な点が無い)** に "
+        "✓ マークを付ける."
     )
     lines.append("")
 
-    # Machine info.
     lines.append("## Machine info")
     lines.append("")
     for k, v in machine_info.items():
@@ -437,56 +597,50 @@ def _write_md(
     lines.append("")
     lines.append(f"- **T**: `{args.T}`")
     lines.append(f"- **n_values**: `{args.n_values}`")
-    lines.append(f"- **dt_values**: `{args.dt_values}`")
     lines.append(f"- **solvers**: `{args.solvers}`")
+    lines.append(f"- **m2 n_steps sweep**: `{args.m2_n_steps}`")
+    lines.append(f"- **trotter n_steps sweep**: `{args.trotter_n_steps}`")
+    lines.append(f"- **cfm4 n_steps sweep**: `{args.cfm4_n_steps}`")
+    lines.append(f"- **cfm4_adaptive_richardson atol sweep**: `{args.adaptive_tols}`")
+    lines.append(f"- **qutip tol sweep**: `{args.qutip_tols}`")
+    lines.append(f"- **reference**: QuTiP `tol={args.ref_tol:.1e}`")
     lines.append("")
 
-    # n ごとの table.
-    n_values = sorted({r.n for r in records})
-    for n in n_values:
-        ref_cell = ref[n]
-        lines.append(f"## n = {n} (reference: {ref_cell.solver}, dt={ref_cell.dt:.4g})")
-        lines.append("")
-        # 列: dt, 各 solver の wall_sec, infidelity (1-fid).
-        solvers_in_n = sorted(
-            {r.solver for r in records if r.n == n}, key=_solver_sort_key
+    for n in sorted(records_per_n):
+        ref = refs_per_n[n]
+        records = records_per_n[n]
+        infids = infids_per_n[n]
+        pareto = pareto_per_n[n]
+
+        lines.append(
+            f"## n = {n} (reference: QuTiP tol={ref.knob_value:.1e}, "
+            f"wall={ref.wall_sec:.3f}s)"
         )
-        header = ["dt", "n_steps"]
-        for s in solvers_in_n:
-            header.append(f"{s} wall (s)")
-            header.append(f"{s} 1-fid")
-        lines.append("| " + " | ".join(header) + " |")
-        lines.append("|" + "|".join(["---"] * len(header)) + "|")
-
-        # dt 列を昇順 (small first = 高精度側).
-        dt_values_in_n = sorted({r.dt for r in records if r.n == n})
-        for dt in dt_values_in_n:
-            row_records = {r.solver: r for r in records if r.n == n and r.dt == dt}
-            any_record = next(iter(row_records.values()))
-            row = [f"{dt:.4g}", str(any_record.n_steps)]
-            for s in solvers_in_n:
-                if s not in row_records:
-                    row.extend(["-", "-"])
-                    continue
-                cell = row_records[s]
-                wall_str = f"{cell.wall_sec:.3f}"
-                if cell is ref_cell:
-                    infid_str = "0 (ref)"
-                else:
-                    fid = _fidelity(ref_cell.psi_final, cell.psi_final)
-                    infid = max(0.0, 1.0 - fid)
-                    infid_str = f"{infid:.3e}" if infid > 0.0 else "<1e-16"
-                row.append(wall_str)
-                row.append(infid_str)
-            lines.append("| " + " | ".join(row) + " |")
         lines.append("")
+        lines.append("| Pareto | solver | knob | n_steps_eff | infidelity | wall (s) |")
+        lines.append("|---|---|---|---|---|---|")
+
+        # infidelity 昇順にソート (ties は wall 昇順で次に解決).
+        order = sorted(
+            range(len(records)),
+            key=lambda i: (infids[i], records[i].wall_sec),
+        )
+        for i in order:
+            r = records[i]
+            infid = infids[i]
+            pareto_mark = "✓" if pareto[i] else ""
+            knob_str = f"{r.knob_name}={_format_knob_value(r.knob_name, r.knob_value)}"
+            n_steps_str = (
+                str(r.n_steps_effective) if r.n_steps_effective is not None else "-"
+            )
+            infid_str = f"{infid:.3e}" if infid > 0.0 else "<1e-16"
+            lines.append(
+                f"| {pareto_mark} | {r.solver} | {knob_str} | {n_steps_str} | "
+                f"{infid_str} | {r.wall_sec:.4f} |"
+            )
+        lines.append("")
+
     out_path.write_text("\n".join(lines))
-
-
-def _solver_sort_key(solver: str) -> int:
-    """MD 表内の列順を ``qutip → m2 → trotter → cfm4`` で固定する."""
-    order = {"qutip": 0, "m2": 1, "trotter": 2, "cfm4": 3}
-    return order.get(solver, 100)
 
 
 # ---------------------------------------------------------------------------
@@ -524,8 +678,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """CLI 引数を parse する."""
     parser = argparse.ArgumentParser(
         description=(
-            "QuTiP sesolve vs kryanneal の dt sweep ベンチ "
-            "(精度 + wall time を 1 pass で測定). issue #65 Phase 6 C4."
+            "Work-precision diagram ベンチ: QuTiP sesolve vs kryanneal "
+            "(各 solver の精度つまみを sweep して infidelity vs wall_sec を Pareto 比較). "
+            "issue #65 Phase 6 C4."
         )
     )
     parser.add_argument(
@@ -535,23 +690,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="comma-separated sweep over spin counts (default: 10,12,14)",
     )
     parser.add_argument(
-        "--dt-values",
-        type=_parse_float_list,
-        default=[0.1, 0.05, 0.025, 0.01, 0.005, 0.0025, 0.001],
-        help=(
-            "comma-separated sweep over time step sizes dt (default: "
-            "0.1,0.05,0.025,0.01,0.005,0.0025,0.001). 最小 dt の QuTiP cell が "
-            "fidelity の reference として使われる."
-        ),
-    )
-    parser.add_argument(
         "--solvers",
         type=_parse_solver_list,
         default=list(_VALID_SOLVERS),
         help=(
             f"comma-separated solver list (choices: {','.join(_VALID_SOLVERS)}; "
-            f"default: all). 'qutip' を外すと kryanneal 同士の self-consistency "
-            "ベンチになる (reference = m2 最小 dt)."
+            f"default: all)."
         ),
     )
     parser.add_argument(
@@ -577,46 +721,67 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--qutip-atol",
-        type=float,
-        default=1e-6,
-        help=(
-            "QuTiP sesolve の atol (default: 1e-6). 緩めると adaptive solver の "
-            "内部 step が大きくなり, max_step=dt が binding になる "
-            "(``--qutip-atol 1e-4`` でさらに緩く). 厳しくすると QuTiP は速い "
-            "が dt sweep が形骸化する (atol=1e-12 で内部 step ~ 5e-3 で plateau). "
-            "詳細は ``_run_qutip_cell`` の docstring."
-        ),
-    )
-    parser.add_argument(
-        "--qutip-rtol",
-        type=float,
-        default=1e-6,
-        help=(
-            "QuTiP sesolve の rtol (default: 1e-6). atol と同じ意図で緩めて "
-            "max_step を binding にする."
-        ),
-    )
-    parser.add_argument(
         "--results-dir",
         type=Path,
         default=None,
         help=(f"results 出力先 (default: {DEFAULT_RESULTS_ROOT}/<YYYYMMDD-HHMMSS>/)"),
+    )
+    # 各 solver の精度つまみ sweep.
+    parser.add_argument(
+        "--m2-n-steps",
+        type=_parse_int_list,
+        default=list(_DEFAULT_M2_N_STEPS),
+        help=f"m2 の n_steps sweep (default: {_DEFAULT_M2_N_STEPS})",
+    )
+    parser.add_argument(
+        "--trotter-n-steps",
+        type=_parse_int_list,
+        default=list(_DEFAULT_TROTTER_N_STEPS),
+        help=f"trotter の n_steps sweep (default: {_DEFAULT_TROTTER_N_STEPS})",
+    )
+    parser.add_argument(
+        "--cfm4-n-steps",
+        type=_parse_int_list,
+        default=list(_DEFAULT_CFM4_N_STEPS),
+        help=f"cfm4 の n_steps sweep (default: {_DEFAULT_CFM4_N_STEPS})",
+    )
+    parser.add_argument(
+        "--adaptive-tols",
+        type=_parse_float_list,
+        default=list(_DEFAULT_ADAPTIVE_TOLS),
+        help=(
+            f"cfm4_adaptive_richardson の atol sweep "
+            f"(default: {_DEFAULT_ADAPTIVE_TOLS})"
+        ),
+    )
+    parser.add_argument(
+        "--qutip-tols",
+        type=_parse_float_list,
+        default=list(_DEFAULT_QUTIP_TOLS),
+        help=(
+            f"QuTiP sesolve の tol sweep (内部で atol = rtol = tol として使う; "
+            f"default: {_DEFAULT_QUTIP_TOLS})"
+        ),
+    )
+    parser.add_argument(
+        "--ref-tol",
+        type=float,
+        default=_DEFAULT_REF_TOL,
+        help=(
+            f"reference state 計算用 QuTiP tol (default: {_DEFAULT_REF_TOL:.1e}). "
+            "これより下では floating-point eps が支配的になるため 1e-13 が現実的な極限."
+        ),
     )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-
-    # warmup 警告抑制: matplotlib 未 install 警告 (qutip が出す) は手元 dev でも
-    # 出るので noise になる. CI / プロダクションでも matplotlib は要らない.
     warnings.filterwarnings("ignore", category=UserWarning, module="qutip")
 
     if args.blas_threads is not None:
         set_blas_threads(args.blas_threads)
 
-    # 出力先の確定.
     if args.results_dir is None:
         ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         results_dir = DEFAULT_RESULTS_ROOT / ts
@@ -626,36 +791,47 @@ def main(argv: list[str] | None = None) -> int:
 
     machine_info = _build_machine_info(args)
 
-    # n ごとに sweep を回し, record を集める.
-    all_records: list[_CellRecord] = []
-    ref_per_n: dict[int, _CellRecord] = {}
+    records_per_n: dict[int, list[_CellRecord]] = {}
+    refs_per_n: dict[int, _CellRecord] = {}
+    infids_per_n: dict[int, list[float]] = {}
+    pareto_per_n: dict[int, list[bool]] = {}
+
     for n in args.n_values:
-        print(
-            f"[bench_qutip_large] n={n}, dt sweep over "
-            f"{args.dt_values} with solvers={args.solvers}",
-            flush=True,
-        )
-        records = _sweep_one_n(
+        records, ref = _sweep_one_n(
             n=n,
             T=args.T,
-            dt_list=args.dt_values,
-            solvers=args.solvers,
             seed=args.seed + n,
-            qutip_atol=args.qutip_atol,
-            qutip_rtol=args.qutip_rtol,
+            solvers=args.solvers,
+            m2_n_steps=args.m2_n_steps,
+            trotter_n_steps=args.trotter_n_steps,
+            cfm4_n_steps=args.cfm4_n_steps,
+            adaptive_atols=args.adaptive_tols,
+            qutip_tols=args.qutip_tols,
+            ref_tol=args.ref_tol,
         )
-        all_records.extend(records)
-        ref_per_n[n] = _pick_reference(records)
+        records_per_n[n] = records
+        refs_per_n[n] = ref
+        infids = _compute_infidelities(records, ref.psi_final)
+        infids_per_n[n] = infids
+        pareto_per_n[n] = _pareto_mask(infids, [r.wall_sec for r in records])
         print(
-            f"  done ({len(records)} cells); "
-            f"reference = (solver={ref_per_n[n].solver}, dt={ref_per_n[n].dt:.4g})",
+            f"  done ({len(records)} sweep cells, "
+            f"{sum(pareto_per_n[n])} Pareto-optimal)",
             flush=True,
         )
 
     csv_path = results_dir / "bench_qutip_large.csv"
     md_path = results_dir / "bench_qutip_large.md"
-    _write_csv(all_records, ref_per_n, csv_path)
-    _write_md(all_records, ref_per_n, machine_info, md_path, args)
+    _write_csv(records_per_n, refs_per_n, infids_per_n, pareto_per_n, csv_path)
+    _write_md(
+        records_per_n,
+        refs_per_n,
+        infids_per_n,
+        pareto_per_n,
+        machine_info,
+        args,
+        md_path,
+    )
     print(f"wrote {csv_path}")
     print(f"wrote {md_path}")
     return 0

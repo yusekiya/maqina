@@ -179,7 +179,7 @@ uv run python tools/gen_api_stubs.py
 uv run python benchmarks/bench_per_step.py
 uv run python benchmarks/bench_blas_compare.py   # BLAS feature on/off 同一マシン比較
 uv run python benchmarks/bench_vs_qutip.py
-uv run python benchmarks/bench_qutip_large.py    # dt sweep で QuTiP vs kryanneal の fidelity & wall time を同時測定 (issue #65)
+uv run python benchmarks/bench_qutip_large.py    # work-precision diagram で QuTiP vs kryanneal を Pareto 比較 (issue #65)
 ```
 
 性能改善の主張をするときの方法 (cv_ising 流):
