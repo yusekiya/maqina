@@ -74,8 +74,14 @@ def _build_qutip_hamiltonian(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) ->
             h_drv[k, k ^ mask] += -h_x[i]
     h_p = np.diag(h_p_diag).astype(np.complex128)
 
-    h_drv_q = qutip.Qobj(h_drv)
-    h_p_q = qutip.Qobj(h_p)
+    # dims=[[2]*n, [2]*n] を明示して付ける. sparse 経路 (qutip.tensor 経由) は
+    # 自動で tensor product dims が付くが, dense 経路で何も指定しないと
+    # flat dims ([[dim], [dim]]) になり psi0 (`dims=[[2]*n, [1]*n]`) と sesolve
+    # 側で型不整合になる. dense / sparse 両経路で同じ dims に統一して
+    # ``_qutip_sesolve_final`` の psi0 構築側と整合させる.
+    dims = [[2] * n, [2] * n]
+    h_drv_q = qutip.Qobj(h_drv, dims=dims)
+    h_p_q = qutip.Qobj(h_p, dims=dims)
     return [
         [h_drv_q, f"(1 - t/{T})"],
         [h_p_q, f"(t/{T})"],
@@ -123,7 +129,13 @@ def _fidelity(psi_a: np.ndarray, psi_b: np.ndarray) -> float:
 
 
 def _qutip_sesolve_final(
-    h_t: list, psi0: np.ndarray, T: float, *, atol: float = 1e-12, rtol: float = 1e-10
+    h_t: list,
+    psi0: np.ndarray,
+    T: float,
+    n: int,
+    *,
+    atol: float = 1e-12,
+    rtol: float = 1e-10,
 ) -> np.ndarray:
     """QuTiP ``sesolve`` を高精度設定で走らせて終端状態を取り出す.
 
@@ -131,8 +143,14 @@ def _qutip_sesolve_final(
     返す. atol / rtol は default で十分高精度 (sparse 経路でも数 GB 級の
     intermediate state はメモリに乗らないため high-quality CVODE/LSODA 設定で
     まず ψ の連続性を担保する).
+
+    ``n`` (スピン数) を必須引数で受けるのは, psi0 を tensor product dims
+    (``[[2]*n, [1]*n]``) で構築するため. dense / sparse 経路ともに
+    Hamiltonian 側の dims は ``[[2]*n, [2]*n]`` に統一されており, psi0 もこの
+    tensor product dims と整合させないと QuTiP solver が
+    ``TypeError: incompatible dimensions`` を投げる.
     """
-    psi0_q = qutip.Qobj(psi0.reshape(-1, 1))
+    psi0_q = qutip.Qobj(psi0.reshape(-1, 1), dims=[[2] * n, [1] * n])
     sol = qutip.sesolve(
         h_t,
         psi0_q,
@@ -169,7 +187,7 @@ def test_quantum_annealer_matches_qutip_sesolve() -> None:
     res = ann.run(psi0, 0.0, T, method="m2", n_steps=500)
 
     h_t = _build_qutip_hamiltonian(h_x, h_p_diag, T)
-    psi_qutip = _qutip_sesolve_final(h_t, psi0, T)
+    psi_qutip = _qutip_sesolve_final(h_t, psi0, T, n)
 
     fid = _fidelity(res.psi_final, psi_qutip)
     assert fid > 1 - 1e-6, f"fidelity too low: {fid} (1 - fid = {1 - fid})"
@@ -198,7 +216,7 @@ def test_quantum_annealer_trotter_matches_qutip_sesolve() -> None:
     res = ann.run(psi0, 0.0, T, method="trotter", n_steps=500)
 
     h_t = _build_qutip_hamiltonian(h_x, h_p_diag, T)
-    psi_qutip = _qutip_sesolve_final(h_t, psi0, T)
+    psi_qutip = _qutip_sesolve_final(h_t, psi0, T, n)
 
     fid = _fidelity(res.psi_final, psi_qutip)
     assert fid > 1 - 1e-4, f"fidelity too low (trotter): {fid} (1 - fid = {1 - fid})"
@@ -323,7 +341,7 @@ def test_quantum_annealer_large_n_matches_qutip_fixed_dt(n: int, method: str) ->
     )
 
     h_t = _qutip_hamiltonian_auto(prob.h_x, prob.H_p_diag, T)
-    psi_qutip = _qutip_sesolve_final(h_t, psi0, T)
+    psi_qutip = _qutip_sesolve_final(h_t, psi0, T, n)
 
     fid = _fidelity(res.psi_final, psi_qutip)
     assert fid > _LARGE_FIDELITY_FIXED, (
@@ -355,7 +373,7 @@ def test_quantum_annealer_large_n_matches_qutip_trotter(n: int) -> None:
     res = ann.run(psi0, 0.0, T, method="trotter", n_steps=_LARGE_FIXED_N_STEPS)
 
     h_t = _qutip_hamiltonian_auto(prob.h_x, prob.H_p_diag, T)
-    psi_qutip = _qutip_sesolve_final(h_t, psi0, T)
+    psi_qutip = _qutip_sesolve_final(h_t, psi0, T, n)
 
     fid = _fidelity(res.psi_final, psi_qutip)
     assert fid > _LARGE_FIDELITY_TROTTER, (
@@ -398,7 +416,7 @@ def test_quantum_annealer_large_n_matches_qutip_adaptive(n: int) -> None:
     )
 
     h_t = _qutip_hamiltonian_auto(prob.h_x, prob.H_p_diag, T)
-    psi_qutip = _qutip_sesolve_final(h_t, psi0, T)
+    psi_qutip = _qutip_sesolve_final(h_t, psi0, T, n)
 
     fid = _fidelity(res.psi_final, psi_qutip)
     assert fid > _LARGE_FIDELITY_ADAPTIVE, (

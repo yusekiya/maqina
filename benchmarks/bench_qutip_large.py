@@ -101,9 +101,14 @@ def _build_qutip_hamiltonian_dense(
         for k in range(dim):
             h_drv[k, k ^ mask] += -h_x[i]
     h_p = np.diag(h_p_diag).astype(np.complex128)
+    # dims=[[2]*n, [2]*n] を明示する. sparse 経路 (qutip.tensor) は自動で
+    # tensor product dims を持つので, dense 経路もこれに揃えて psi0
+    # (`dims=[[2]*n, [1]*n]`) と sesolve の型整合を取る. dims を省略すると
+    # flat dims ([[dim], [dim]]) になり sparse Hamiltonian と統一できない.
+    dims = [[2] * n, [2] * n]
     return [
-        [qutip.Qobj(h_drv), f"(1 - t/{T})"],
-        [qutip.Qobj(h_p), f"(t/{T})"],
+        [qutip.Qobj(h_drv, dims=dims), f"(1 - t/{T})"],
+        [qutip.Qobj(h_p, dims=dims), f"(t/{T})"],
     ]
 
 
@@ -148,15 +153,21 @@ def _build_qutip_hamiltonian_auto(
 
 
 def _run_qutip_cell(
-    h_t: list, psi0: np.ndarray, T: float, dt: float
+    h_t: list, psi0: np.ndarray, T: float, dt: float, n: int
 ) -> tuple[float, np.ndarray]:
     """QuTiP sesolve を ``max_step=dt`` で走らせて ``(wall_sec, psi_final)``.
 
     ``atol = 1e-12``, ``rtol = 1e-10`` で内部 ODE solver の局所誤差を絞り,
     ``max_step = dt`` で「最大 1 step 幅 = dt」を強制する. 実効的に dt が
     QuTiP の step 上限となり, dt → 0 で参照解に収束する想定.
+
+    ``n`` (スピン数) を必須引数で受けるのは, psi0 を tensor product dims
+    (``[[2]*n, [1]*n]``) で構築するため. dense / sparse 経路ともに
+    Hamiltonian 側の dims は ``[[2]*n, [2]*n]`` に統一されており, psi0 もこの
+    tensor product dims と整合させないと QuTiP solver が
+    ``TypeError: incompatible dimensions`` を投げる.
     """
-    psi0_q = qutip.Qobj(psi0.reshape(-1, 1))
+    psi0_q = qutip.Qobj(psi0.reshape(-1, 1), dims=[[2] * n, [1] * n])
     options = {
         "atol": 1e-12,
         "rtol": 1e-10,
@@ -280,7 +291,7 @@ def _sweep_one_n(
         n_steps = max(1, int(round(T / dt)))
         # QuTiP cell.
         if "qutip" in solvers and h_t is not None:
-            wall, psi = _run_qutip_cell(h_t, psi0, T, dt)
+            wall, psi = _run_qutip_cell(h_t, psi0, T, dt, n)
             records.append(_CellRecord(n, "qutip", dt, n_steps, wall, psi))
         # kryanneal cells.
         for method in ("m2", "trotter", "cfm4"):
@@ -376,9 +387,7 @@ def _write_csv(
             else:
                 fid = _fidelity(ref_cell.psi_final, r.psi_final)
                 infid = max(0.0, 1.0 - fid)
-            log10_infid = (
-                f"{np.log10(infid):.6f}" if infid > 0.0 else "nan"
-            )
+            log10_infid = f"{np.log10(infid):.6f}" if infid > 0.0 else "nan"
             writer.writerow(
                 {
                     "n": r.n,
@@ -404,7 +413,9 @@ def _write_md(
     lines: list[str] = []
     lines.append("# bench_qutip_large.py")
     lines.append("")
-    lines.append("QuTiP sesolve vs kryanneal の dt sweep ベンチ (issue #65 Phase 6 C4).")
+    lines.append(
+        "QuTiP sesolve vs kryanneal の dt sweep ベンチ (issue #65 Phase 6 C4)."
+    )
     lines.append("")
     lines.append(
         "fidelity の基準は **dt sweep 中の最小 dt の QuTiP cell** "
@@ -564,9 +575,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--results-dir",
         type=Path,
         default=None,
-        help=(
-            f"results 出力先 (default: {DEFAULT_RESULTS_ROOT}/<YYYYMMDD-HHMMSS>/)"
-        ),
+        help=(f"results 出力先 (default: {DEFAULT_RESULTS_ROOT}/<YYYYMMDD-HHMMSS>/)"),
     )
     return parser.parse_args(argv)
 
