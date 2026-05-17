@@ -123,7 +123,7 @@ def test_python_m2_estimate_psi_matches_cfm4_step() -> None:
     psi_estimate, _err = _python_cfm4_step_with_m2_estimate(
         psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, a_mid, b_mid, dt, m, krylov_tol
     )
-    psi_step, _m_eff = _python_cfm4_step(
+    psi_step, _m_eff, _err_lanczos = _python_cfm4_step(
         psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol
     )
     diff = np.linalg.norm(psi_estimate - psi_step)

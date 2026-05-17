@@ -107,18 +107,22 @@ def test_python_cfm4_matches_rust(n: int, seed: int) -> None:
     m = 24
     krylov_tol = 1e-12
 
-    # issue #52 A: cfm4_step (Rust / Python) は (psi, m_eff_sum) を返す.
-    # m_eff_sum (= 2 stage の Lanczos 部分空間次元の合計) も完全一致する
-    # のが新しい契約 (β_k 早期打切が決定論的).
-    psi_py, m_eff_py = _python_cfm4_step(
+    # issue #93 (Phase 7): cfm4_step (Rust / Python) は
+    # (psi, m_eff_sum, err_lanczos_sum) を返す. m_eff_sum (2 stage の Lanczos
+    # 部分空間次元合計) と err_lanczos_sum (2 stage の Lanczos 誤差推定上界の
+    # triangle inequality 和) も完全一致するのが新しい契約.
+    psi_py, m_eff_py, err_lanczos_py = _python_cfm4_step(
         psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol
     )
-    psi_rust, m_eff_rust = _rust_mod.cfm4_step_py(
+    psi_rust, m_eff_rust, err_lanczos_rust = _rust_mod.cfm4_step_py(
         psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol
     )
     assert m_eff_py == m_eff_rust, (
         f"m_eff_sum mismatch: py={m_eff_py}, rust={m_eff_rust}"
     )
+    assert abs(err_lanczos_py - err_lanczos_rust) <= 1e-13 * max(
+        abs(err_lanczos_rust), 1.0
+    ), f"err_lanczos mismatch: py={err_lanczos_py}, rust={err_lanczos_rust}"
     rel = np.linalg.norm(psi_py - psi_rust) / max(np.linalg.norm(psi_rust), 1.0)
     assert rel < 1e-13, f"n={n}, seed={seed}: rel = {rel}"
 
@@ -130,7 +134,7 @@ def test_python_cfm4_preserves_norm() -> None:
     for n in [2, 3, 4]:
         h_x, h_p_diag, psi, a_s1, b_s1, a_s2, b_s2 = _random_setup(n, seed=4025 + n)
         for dt in [0.05, 0.3, 1.2]:
-            psi_new, _m_eff = _python_cfm4_step(
+            psi_new, _m_eff, _err_lanczos = _python_cfm4_step(
                 psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, 24, 1e-12
             )
             rel = abs(np.linalg.norm(psi_new) - np.linalg.norm(psi)) / max(
@@ -146,7 +150,7 @@ def test_python_cfm4_dt_zero_is_identity() -> None:
     """
     n = 4
     h_x, h_p_diag, psi, a_s1, b_s1, a_s2, b_s2 = _random_setup(n, seed=4026)
-    psi_new, _m_eff = _python_cfm4_step(
+    psi_new, _m_eff, _err_lanczos = _python_cfm4_step(
         psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, 0.0, 24, 1e-12
     )
     rel = np.linalg.norm(psi_new - psi) / max(np.linalg.norm(psi), 1.0)
@@ -207,7 +211,7 @@ def test_python_cfm4_time_independent_lte_order_5() -> None:
         b_s1 = b_base * f(_CFM4_C1 * dt)
         a_s2 = a_base * f(_CFM4_C2 * dt)
         b_s2 = b_base * f(_CFM4_C2 * dt)
-        actual, _m_eff = _python_cfm4_step(
+        actual, _m_eff, _err_lanczos = _python_cfm4_step(
             psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, 24, 1e-14
         )
         errs.append(
