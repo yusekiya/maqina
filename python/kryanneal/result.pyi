@@ -122,6 +122,19 @@ class QuantumResult:
         どの経路でも常に非 None で返る (最終状態の付随情報なので
         ``save_tlist`` の有無に依らない). 数値的には ``np.abs(psi_final)
         ** 2`` と同値で, 呼出側で都度計算する手間を省くキャッシュ.
+    beta_m_stats
+        Phase 7 (issue #93) 追加. adaptive Richardson 経路で per-step の
+        Lanczos a posteriori 誤差代表値 ``β_m_eff = err_lanczos_total / dt``
+        の累積統計. キーは ``"mean"`` / ``"median"`` / ``"min"`` / ``"max"``
+        / ``"p10"`` / ``"p90"`` で全て ``float``. 固定 dt 経路 (m2 /
+        trotter / cfm4 / trotter_suzuki4) では ``None``. 値が小さい (≪
+        ``tol_step``) なら Krylov 部分空間で十分閉じている, 値が大きい
+        (~ ``tol_step`` 以上) なら ``m`` を増やすことを検討すべき診断指標.
+    n_krylov_insufficient
+        Phase 7 (issue #93) 追加. adaptive Richardson 経路で
+        ``err_lanczos_total > tol_step`` を検出した累積 step 数. Krylov
+        充分性の集計診断指標. 0 なら全 step が Krylov 充分, 非ゼロなら
+        ``m`` 増大を検討する. 固定 dt 経路では ``None``.
     """
     psi_final: np.ndarray
     t_history: np.ndarray | None
@@ -135,3 +148,5 @@ class QuantumResult:
     times: np.ndarray | None = None
     states: np.ndarray | None = None
     probabilities: np.ndarray | None = None
+    beta_m_stats: dict[str, float] | None = None
+    n_krylov_insufficient: int | None = None

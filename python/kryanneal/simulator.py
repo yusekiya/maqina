@@ -484,20 +484,33 @@ class AnnealingSimulator:
         # 解決 (_resolve_dt_max_auto) が内部で floor 済み.
         if dt_max_resolved < dt0:
             dt_max_resolved = dt0
-        psi_new, _t_hist, _dt_hist, _n_rej, m_eff_hist, _snapshot = (
-            evolve_schedule_adaptive_richardson(
-                h_x=self.problem.h_x,
-                h_p_diag=self.problem.H_p_diag,
-                schedule=self.schedule,
-                psi0=self._psi,
-                t0=self._t,
-                t1=t_next,
-                m=m_eff_param,
-                krylov_tol=krylov_tol,
-                tol_step=tol_step,
-                dt0=dt0,
-                dt_max=dt_max_resolved,
-            )
+        # issue #93 (Phase 7): driver は 10-tuple. simulator では β_m /
+        # err_lanczos / err_magnus / n_krylov_insufficient は使わない
+        # (simulator は per-step API なので diagnostic 集計は QuantumAnnealer
+        # 経由で行う). 全て discard.
+        (
+            psi_new,
+            _t_hist,
+            _dt_hist,
+            _n_rej,
+            m_eff_hist,
+            _beta_m_hist,
+            _err_lanczos_hist,
+            _err_magnus_hist,
+            _n_krylov_insufficient,
+            _snapshot,
+        ) = evolve_schedule_adaptive_richardson(
+            h_x=self.problem.h_x,
+            h_p_diag=self.problem.H_p_diag,
+            schedule=self.schedule,
+            psi0=self._psi,
+            t0=self._t,
+            t1=t_next,
+            m=m_eff_param,
+            krylov_tol=krylov_tol,
+            tol_step=tol_step,
+            dt0=dt0,
+            dt_max=dt_max_resolved,
         )
         self._psi = psi_new
         self._t = t_next

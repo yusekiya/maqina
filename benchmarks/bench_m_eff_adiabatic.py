@@ -116,12 +116,18 @@ def _run_adaptive(
     dt_max = max(min(10.0 * dt0, 4.0 * m_max / max(norm_h, 1e-30)), dt0)
 
     t_start = time.perf_counter()
+    # issue #93 (Phase 7): driver は 10-tuple. β_m / err_lanczos / err_magnus /
+    # n_krylov_insufficient を Step 2 (#93) bench で出すために受け取る.
     (
         psi_final,
         t_history,
         dt_history,
         n_rejects,
         m_eff_history,
+        beta_m_history,
+        err_lanczos_history,
+        err_magnus_history,
+        n_krylov_insufficient,
         _snapshot,
     ) = evolve_schedule_adaptive_richardson(
         h_x=prob.h_x,
@@ -141,7 +147,17 @@ def _run_adaptive(
     )
     wall = time.perf_counter() - t_start
     _ = psi_final
-    return wall, t_history, dt_history, m_eff_history, int(n_rejects)
+    return (
+        wall,
+        t_history,
+        dt_history,
+        m_eff_history,
+        int(n_rejects),
+        beta_m_history,
+        err_lanczos_history,
+        err_magnus_history,
+        int(n_krylov_insufficient),
+    )
 
 
 def _per_time_bin_stats(
@@ -524,16 +540,28 @@ def main(argv: list[str] | None = None) -> int:
                         flush=True,
                     )
                     prob, sched, psi0 = _make_random_problem(n, T, args.seed + n)
-                    wall, t_history, dt_history, m_eff_history, n_rejects = (
-                        _run_adaptive(
-                            prob,
-                            sched,
-                            psi0,
-                            T,
-                            atol,
-                            m_max,
-                            krylov_tol_factor=args.krylov_tol_factor,
-                        )
+                    # issue #93 (Phase 7): _run_adaptive は 9-tuple. β_m /
+                    # err_lanczos / err_magnus / n_krylov_insufficient は
+                    # Commit 5 (Step 2) で MD/CSV に出すまでは consume せずに
+                    # 末尾 4 値を discard する.
+                    (
+                        wall,
+                        t_history,
+                        dt_history,
+                        m_eff_history,
+                        n_rejects,
+                        _beta_m_history,
+                        _err_lanczos_history,
+                        _err_magnus_history,
+                        _n_krylov_insufficient,
+                    ) = _run_adaptive(
+                        prob,
+                        sched,
+                        psi0,
+                        T,
+                        atol,
+                        m_max,
+                        krylov_tol_factor=args.krylov_tol_factor,
                     )
                     summary = _summary_stats(m_eff_history, m_max)
                     time_bins = _per_time_bin_stats(

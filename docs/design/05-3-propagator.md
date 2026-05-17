@@ -267,6 +267,68 @@ def evolve_schedule_adaptive_richardson(
 `QuantumAnnealer.run(method="cfm4_adaptive_richardson", ...)` はこれを
 内部で呼ぶ薄いラッパ。
 
+#### Richardson 誤差源分離 (Phase 7 / issue #93)
+
+Phase 6 C4 (issue #65) の `bench_qutip_large.py` long-T シナリオで CFM4
+adaptive Richardson が QuTiP に Pareto 劣位だった原因として, Richardson
+推定子の `err = ‖ψ_full - ψ_h2‖` が **dt 起因の Magnus 誤差** と
+**Lanczos 部分空間有限性に起因の Krylov 誤差** を区別できず, PI controller
+が両方を盲目的に dt 縮小で対処していた点が定量化された (#65 bench コメント,
+#93 issue body, `tools/verify_beta_m_estimator.py`).
+
+Phase 7 (#93) では Lanczos の a posteriori 誤差推定子
+
+```
+err_lanczos_per_call ≈ β_m · |c_m| · ‖ψ_in‖ · dt / m_eff
+```
+
+(Saad 1992 / Hochbruck-Lubich 1997 + 高次補正; `tools/verify_beta_m_estimator.py`
+の 108 cell sweep で 5% 精度を実証) を `lanczos_propagate` から expose し,
+`cfm4_step` / `cfm4_step_with_richardson_estimate` が triangle inequality で
+6 Lanczos call ぶんを集約して `err_lanczos_total` を提供する.
+
+adaptive Richardson driver は `err_lanczos_total` を `err` から差し引き,
+Magnus 起因の駆動量を取り出す:
+
+```python
+err_magnus = max(0.0, err - err_lanczos_total)
+
+# accept は err_magnus ベース.
+accept = (err_magnus <= tol_step) or (dt_try <= dt_min)
+
+if accept:
+    # PI controller は err_magnus で dt 更新. dt 縮小で減らない Krylov 誤差を
+    # 駆動量に含めないので, Krylov 飽和時の dt 過度縮小と step reject 爆発を
+    # 回避する.
+    err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+    dt = pi_dt_next(dt_try, err_for_pi, p=4, ...)
+
+# 診断: err_lanczos > tol_step なら Krylov 不足. m_max を増やす必要のサイン.
+if err_lanczos_total > tol_step:
+    n_krylov_insufficient += 1
+```
+
+`evolve_schedule_adaptive_richardson` の return tuple は 10-tuple に拡張:
+
+```
+(psi_final, t_history, dt_history, n_rejects,
+ m_eff_history, beta_m_history, err_lanczos_history, err_magnus_history,
+ n_krylov_insufficient, snapshot)
+```
+
+`QuantumResult` 側にも `beta_m_stats` (dict: mean/median/min/max/p10/p90) と
+`n_krylov_insufficient` (int) を追加.
+
+**後方互換性**: default `krylov_tol = 1e-12` では β_m が十分小さく
+`err_lanczos_total << tol_step` となり `err_magnus ≈ err`. PI controller の
+挙動は Phase 6 以前と数値的にほぼ同等 (regression check は
+`tests/test_adaptive.py::test_adaptive_richardson_error_decomposition_consistency`).
+
+**今後の拡張余地** (#93 Step 4 として別 issue 化検討): `err_lanczos > tol_step`
+検出時に `m_max` を `2 × m_max` まで動的拡張 (expokit-style escalation) して
+1 step 内で再 build する経路. 本 Phase では diagnostic counter
+`n_krylov_insufficient` を expose するに留め, 自動 escalation は行わない.
+
 #### adaptive driver の DX 改善 (Phase 4 follow-up, issue #43 / #54)
 
 `m` / `dt_init` / `dt_max` / `krylov_tol` の手動チューニングを段階的に

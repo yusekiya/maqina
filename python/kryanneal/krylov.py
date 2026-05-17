@@ -1853,7 +1853,18 @@ def evolve_schedule_adaptive_richardson(
     observables: "dict[str, Observable] | None" = None,
     save_tlist: np.ndarray | None = None,
     store_states: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, SnapshotData | None]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    SnapshotData | None,
+]:
     """CFM4:2 + step-doubling Richardson 推定子による adaptive dt ドライバ.
 
     PI controller (``docs/design/05-3-propagator.md`` §5.3) で local error を ``tol_step``
@@ -1915,6 +1926,24 @@ def evolve_schedule_adaptive_richardson(
         するため. β_k 早期打切により ``m_eff < m`` になる step では
         ``m_eff_sum`` が ``6m`` 未満になり, ``n_matvec`` 推定 (現状
         ``n_steps_actual · 6m``) より実コストは小さい.
+    beta_m_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の β_m 統計値.
+        ``cfm4_step_with_richardson_estimate`` 内部の 6 Lanczos 呼出のうち
+        ``err_lanczos_total`` 算出に使われた β_m 上界 (実装は
+        ``err_lanczos_total / (‖ψ_in‖·dt·sum(1/m_eff_i))`` 相当の代表値)
+        を保存する. issue #93 (Phase 7).
+    err_lanczos_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の
+        ``err_lanczos_total`` (Lanczos a posteriori 誤差上界の triangle
+        inequality 和; Hochbruck-Lubich + 高次補正). issue #93 (Phase 7).
+    err_magnus_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の
+        ``err_magnus = max(0, err - err_lanczos_total)`` (Magnus 起因の dt
+        誤差成分). PI controller の駆動量に使われた値. issue #93 (Phase 7).
+    n_krylov_insufficient : int
+        累積で ``err_lanczos_total > tol_step`` を検出した step 数 (accept
+        / reject 両方をカウント). Krylov 充分性の診断指標で, 大きい場合は
+        ``m`` を増やすことを検討すべき. issue #93 (Phase 7).
     snapshot : SnapshotData | None
         ``save_tlist=None`` のとき ``None``. 非 None のとき dict
         ``{"times": np.ndarray, "observables_history": dict[str, np.ndarray],
@@ -1979,6 +2008,15 @@ def evolve_schedule_adaptive_richardson(
     # cumulative cost の観点では sunk だが本 history には含めない
     # (PI accept ステップ数とインデックスを揃える設計).
     m_eff_hist: list[int] = []
+    # issue #93 (Phase 7): Lanczos 誤差源分離のため accept された step の
+    # err_lanczos_total / err_magnus / β_m を保存する. β_m は本 driver では
+    # 6 Lanczos 呼出の代表値として "err_lanczos_total を逆算した実効 β_m"
+    # を保存 (個別 β_m は cfm4_step 層に閉じる; driver 層では aggregated
+    # err のみが意味を持つ).
+    beta_m_hist: list[float] = []
+    err_lanczos_hist: list[float] = []
+    err_magnus_hist: list[float] = []
+    n_krylov_insufficient = 0
     # 初期時刻 ``t0`` が ``save_tlist[0]`` と一致するなら先頭 snapshot を取る.
     if recorder is not None and save_targets is not None:
         recorder.record(t, psi)
@@ -2014,11 +2052,13 @@ def evolve_schedule_adaptive_richardson(
         a_s2_h2, b_s2_h2 = schedule.coeffs_at(t_s2_h2)
 
         # issue #93 (Phase 7): dispatcher は
-        # (psi_new, err, m_eff_sum, err_lanczos_total) を返す. 本 commit (Step 1b)
-        # では err_lanczos_total を discard する. Commit 4 (Step 3) で
-        # err_magnus = max(0, err - err_lanczos_total) として PI controller の
-        # Magnus 起因駆動量に切り替える.
-        psi_new, err, m_eff_sum, _err_lanczos_total = (
+        # (psi_new, err, m_eff_sum, err_lanczos_total) を返す. err_lanczos_total
+        # は Hochbruck-Lubich + 高次補正による Lanczos a posteriori 誤差上界の
+        # 6 Lanczos call 合計. err_magnus = max(0, err - err_lanczos_total) を
+        # PI controller の駆動量とし, dt 起因 (Magnus) と Krylov 起因の誤差を
+        # 分離する. err_lanczos_total > tol_step は Krylov 不足の診断信号
+        # (m_max を増やすべきサイン; m_max 自動 escalation は #93 Step 4).
+        psi_new, err, m_eff_sum, err_lanczos_total = (
             _adaptive_dispatch_richardson_estimate(
                 rust_mod,
                 psi,
@@ -2042,14 +2082,32 @@ def evolve_schedule_adaptive_richardson(
                 richardson_extrapolate,
             )
         )
+        # err_magnus = max(0, err - err_lanczos_total). triangle inequality の
+        # 上界なので err_lanczos が err を超えるケースがあり, その場合は
+        # Lanczos 誤差が err 全体を説明している (= Magnus 誤差は実質 0).
+        err_magnus = max(0.0, err - err_lanczos_total)
+        if err_lanczos_total > tol_step:
+            n_krylov_insufficient += 1
 
-        accept = (err <= tol_step) or (dt_try <= dt_min)
+        # accept 判定は err_magnus ベース. err_lanczos が支配的な step では
+        # err > tol_step でも err_magnus <= tol_step なら accept する
+        # (dt を縮めても Krylov 誤差は減らない → 縮める意味がない).
+        accept = (err_magnus <= tol_step) or (dt_try <= dt_min)
         if accept:
             psi = psi_new
             t = t + dt_try
             t_hist.append(t)
             dt_hist.append(dt_try)
             m_eff_hist.append(int(m_eff_sum))
+            err_lanczos_hist.append(float(err_lanczos_total))
+            err_magnus_hist.append(float(err_magnus))
+            # 代表 β_m: err_lanczos_total を逆算した実効 β_m を保存
+            # (個別 β_m は cfm4_step 層で集約済み). ‖ψ‖ ≈ 1 (unitary),
+            # 6 Lanczos 平均 で逆算: β_m_eff ≈ err_lanczos_total / dt
+            # (|c_m| × 1/m_eff ~ 1/m_eff 規模で代表値. 詳細解析は bench 側).
+            beta_m_hist.append(
+                float(err_lanczos_total / dt_try) if dt_try > 0.0 else 0.0
+            )
             n_consecutive_rejects = 0
             # save_tlist 経路: target にピタリ到達したら snapshot を取り
             # next_save_idx を進める. ``clamped_to_target`` で意図的に
@@ -2062,9 +2120,13 @@ def evolve_schedule_adaptive_richardson(
                         and abs(t - float(save_targets[next_save_idx])) <= _MERGE_TOL
                     ):
                         next_save_idx += 1
+            # PI controller は err_magnus で dt を更新. err_lanczos 由来の
+            # 部分は dt 縮小では改善しないので除外して safe.
+            # err_magnus = 0 の場合は最大成長 (Krylov 充分 + Magnus 誤差なし).
+            err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
             dt = _pi_dt_next(
                 dt_try,
-                err,
+                err_for_pi,
                 tol_step=tol_step,
                 safety=safety,
                 growth_max=growth_max,
@@ -2078,8 +2140,10 @@ def evolve_schedule_adaptive_richardson(
             if n_consecutive_rejects > max_rejects:
                 raise RuntimeError(
                     f"adaptive driver: exceeded max_rejects={max_rejects} "
-                    f"consecutive rejects at t={t}, dt={dt_try}, err={err}; "
-                    f"consider relaxing tol_step or shrinking dt0."
+                    f"consecutive rejects at t={t}, dt={dt_try}, "
+                    f"err={err}, err_magnus={err_magnus}, "
+                    f"err_lanczos={err_lanczos_total}; "
+                    f"consider relaxing tol_step or increasing m."
                 )
             dt = max(dt_try * 0.5, dt_min)
 
@@ -2090,5 +2154,9 @@ def evolve_schedule_adaptive_richardson(
         np.asarray(dt_hist, dtype=np.float64),
         int(n_rejects),
         np.asarray(m_eff_hist, dtype=np.int64),
+        np.asarray(beta_m_hist, dtype=np.float64),
+        np.asarray(err_lanczos_hist, dtype=np.float64),
+        np.asarray(err_magnus_hist, dtype=np.float64),
+        int(n_krylov_insufficient),
         snapshot,
     )

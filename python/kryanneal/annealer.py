@@ -387,15 +387,20 @@ class QuantumAnnealer:
                         f"m_max must be a positive integer or None, got {m_max!r}"
                     )
                 m_eff_param = int(m_max)
-            # C3/C4 (issue #52 A) + Phase 5 (issue #47): driver は 6-tuple
-            # `(psi, t_hist, dt_hist, n_rejects, m_eff_hist, snapshot)` を返す.
-            # ``snapshot`` は ``save_tlist=None`` のとき ``None``.
+            # issue #93 (Phase 7) + Phase 5 (issue #47): driver は 10-tuple
+            # ``(psi, t_hist, dt_hist, n_rejects, m_eff_hist, beta_m_hist,
+            #    err_lanczos_hist, err_magnus_hist, n_krylov_insufficient,
+            #    snapshot)`` を返す.
             (
                 psi_final,
                 _t_history,
                 dt_history,
                 _n_rejects,
                 m_eff_history,
+                beta_m_history,
+                _err_lanczos_history,
+                _err_magnus_history,
+                n_krylov_insufficient,
                 snapshot,
             ) = evolve_schedule_adaptive_richardson(
                 h_x=self.problem.h_x,
@@ -415,11 +420,7 @@ class QuantumAnnealer:
             )
             n_steps_actual = int(dt_history.shape[0])
             # C4 (issue #52 A): per-step `m_eff_sum` (= 6 Lanczos call の合計)
-            # の集計を `QuantumResult.m_eff_stats` に格納する. accept された
-            # step 数 == m_eff_history.shape[0] == n_steps_actual (driver 仕様).
-            # n_steps_actual == 0 の縮退ケース (t1 == t0 を許さない driver
-            # 入力検証で実用上は通らないが念のため) は空 history なので
-            # stats を空 dict ではなく None として扱う.
+            # の集計を `QuantumResult.m_eff_stats` に格納する.
             if m_eff_history.size > 0:
                 m_eff_stats: dict[str, int | float] | None = {
                     "total": int(np.sum(m_eff_history)),
@@ -428,12 +429,27 @@ class QuantumAnnealer:
                     "min": int(np.min(m_eff_history)),
                     "max": int(np.max(m_eff_history)),
                 }
-                # 実 matvec 数を m_eff_sum の累積で正確に出す (旧推定
-                # `n_steps_actual · 6m` は upper bound; 早期打切で乖離する).
+                # 実 matvec 数を m_eff_sum の累積で正確に出す.
                 n_matvec = int(np.sum(m_eff_history))
             else:
                 m_eff_stats = None
                 n_matvec = n_steps_actual * 6 * m_eff_param
+
+            # issue #93 (Phase 7): β_m 統計値も同様に集計. driver 内部で代表
+            # β_m_eff を保存しており, ここでは accept された step 全体の分布を
+            # mean / median / min / max / p10 / p90 にまとめる.
+            beta_m_stats: dict[str, float] | None
+            if beta_m_history.size > 0:
+                beta_m_stats = {
+                    "mean": float(np.mean(beta_m_history)),
+                    "median": float(np.median(beta_m_history)),
+                    "min": float(np.min(beta_m_history)),
+                    "max": float(np.max(beta_m_history)),
+                    "p10": float(np.percentile(beta_m_history, 10.0)),
+                    "p90": float(np.percentile(beta_m_history, 90.0)),
+                }
+            else:
+                beta_m_stats = None
             return self._build_result(
                 psi_final=psi_final,
                 snapshot=snapshot,
@@ -442,6 +458,8 @@ class QuantumAnnealer:
                 n_matvec=int(n_matvec),
                 n_steps_actual=n_steps_actual,
                 m_eff_stats=m_eff_stats,
+                beta_m_stats=beta_m_stats,
+                n_krylov_insufficient=int(n_krylov_insufficient),
             )
 
         # 固定 dt 経路は n_steps が必須.
@@ -615,6 +633,8 @@ class QuantumAnnealer:
         n_matvec: int,
         n_steps_actual: int,
         m_eff_stats: dict[str, int | float] | None,
+        beta_m_stats: dict[str, float] | None = None,
+        n_krylov_insufficient: int | None = None,
     ) -> QuantumResult:
         """``QuantumResult`` を組み立てる. ``probabilities`` は常に eager 計算.
 
@@ -653,6 +673,8 @@ class QuantumAnnealer:
             method=method,
             n_steps_actual=n_steps_actual,
             m_eff_stats=m_eff_stats,
+            beta_m_stats=beta_m_stats,
+            n_krylov_insufficient=n_krylov_insufficient,
             times=times,
             states=states,
             probabilities=probabilities,
