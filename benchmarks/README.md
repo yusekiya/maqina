@@ -14,7 +14,7 @@
 | `bench_block_fusion.py` | `trotter_step` (multi-qubit gate fusion) と `apply_h_kryanneal` (L2-aware chunk_size) の per-step time を `N ∈ {18, 20, 22}` で計測. C2 完了時点 (baseline) と C3 適用後 (after) の 2 回 measure を `--label` で識別して取り, 手動 diff で per-cell speedup を算出する運用. acceptance: N=20, `trotter_step` で >= 1.3× | Phase 6 C3 (issue #64) |
 | `bench_blas_compare.py` | BLAS feature on/off の同一マシン比較 | Phase 6 予定 |
 | `bench_vs_qutip.py` | QuTiP `sesolve` との fidelity vs wall time | Phase 3 以降予定 |
-| `bench_qutip_large.py` | QuTiP `sesolve` vs kryanneal の **work-precision diagram** ベンチ. 各 solver が固有の精度つまみ (kryanneal m2/trotter/cfm4 = `n_steps`, kryanneal cfm4_adaptive_richardson = `atol`, QuTiP = `tol` で atol/rtol 共通) を独自 sweep し, 共通 reference (QuTiP `tol=1e-13`) に対する infidelity と wall_sec を per-cell 1 回測定. MD/CSV は infidelity 昇順 + Pareto 最適マーク付きで出力されるため「目標精度 X を最速で出すのは誰か」が 1 表で読める | Phase 6 C4 (issue #65) |
+| `bench_qutip_large.py` | QuTiP `sesolve` vs kryanneal の **work-precision diagram** ベンチ. 複数 **scenario** (`standard` = T=1, `long-T` = T=1e4, `stiff` = h_p_scale=10, `stiff-long-T`) と複数 N を 1 invocation で sweep. 各 solver は固有の精度つまみ (kryanneal m2/trotter/cfm4 = `dt`, kryanneal cfm4_adaptive_richardson = `atol`, QuTiP = `tol` で atol=rtol) を独自 sweep し, 共通 reference (QuTiP `tol=ref_tol`) との infidelity と wall_sec を per-cell 1 回測定. MD/CSV は per-(scenario, n) で infidelity 昇順 + Pareto 最適マーク付き. `--add-scenario "name:T=...,h_p=...,h_x=..."` でカスタム scenario も追加可能 | Phase 6 C4 (issue #65) |
 
 ## 実行
 
