@@ -254,54 +254,53 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_apply_h
 `crate::bench_api` (`src/lib.rs`) で再 export している. Python 側 API
 (`_rust.apply_h_kryanneal_py`) には影響なし.
 
-計測例 (Linux):
+計測例 (Linux, AMD EPYC で実証済み):
 
 ```bash
-# 基本: cache / IPC
+# 基本: IPC + cache
 RAYON_NUM_THREADS=64 perf stat \
-    -e cycles,instructions,cache-references,cache-misses,LLC-loads,LLC-load-misses,dTLB-load-misses,branch-misses \
-    -- ./target/release/perf_apply_h 20 1000
+    -e cycles,instructions,branch-misses \
+    -e cache-references,cache-misses \
+    -e L1-dcache-loads,L1-dcache-load-misses \
+    -e dTLB-loads,dTLB-load-misses \
+    -- ./target/release/perf_apply_h 20 500
 
-# Intel 専用: stall reason
+# AMD Zen 3 専用: L2 fill latency / stall (issue #79 で実用したセット)
 RAYON_NUM_THREADS=64 perf stat \
-    -e cycle_activity.stalls_l1d_miss,cycle_activity.stalls_l2_miss,cycle_activity.stalls_l3_miss,cycle_activity.stalls_mem_any \
-    -- ./target/release/perf_apply_h 20 1000
-
-# Intel uncore: DRAM controller throughput (要 root)
-sudo RAYON_NUM_THREADS=64 perf stat -a \
-    -e uncore_imc_0/cas_count_read/,uncore_imc_0/cas_count_write/ \
-    -- ./target/release/perf_apply_h 20 1000
+    -e cycles,instructions,branch-misses \
+    -e stalled-cycles-backend,stalled-cycles-frontend \
+    -e l2_request_g1.all_no_prefetch,l2_cache_req_stat.ic_dc_miss_in_l2 \
+    -e l2_latency.l2_cycles_waiting_on_fills \
+    -- ./target/release/perf_apply_h 20 500
 ```
 
 binary は stderr に wall time / per-iter time / sink (DCE 防止) を出し,
 stdout は空に保つ (perf の出力を汚さない).
 
-## apply_h_kryanneal の DRAM bandwidth 経路 (Phase 6 D, issue #79)
+## Phase 6 D 実験と未採用の根拠 (issue #79, 2026-05-17)
 
-Phase 6 D (issue #79) で `apply_h_kryanneal_rayon` の高 i pass を
-**group-fused 3-phase 形** に書き換え (詳細は `docs/design.md` §5.1.4)。
-chunk closure に diag + 全 i を fuse する旧 C1 形では高 i (`mask >=
-chunk_size`) の partner が別 chunk から DRAM 再 load されていたのを,
-2^fused_k 個の連続 chunk を 1 つの super-chunk (= group) にまとめて 1 thread
-に渡し group 内高 i partner を L2 resident で完結させる.
+Phase D で `apply_h_kryanneal_rayon` を **連続 k 個の高 i を group-fused
+3-phase 形** に書き換える試み (DRAM v traffic を `dim · (1 + h_baseline) →
+dim · (1 + h_naive)` に削減する設計) を行ったが, **本 Linux サーバー
+(AMD EPYC 7713P, 64 物理コア, L2 = 512 KB/core, L3 = 32 MB/CCX × 8) で
+perf 計測した結果 N=20 で 50% 真の compute regression を確認** し,
+revert. 詳細な perf 値と判断は `docs/design.md` §5.1.4 にアーカイブ.
 
-- 3 phase: (1) per-chunk diag + low-i (`i < chunk_log`), (2) group-fused 高 i
-  (`i ∈ [chunk_log, i_split)`), (3) per-chunk 残り高 i (`i >= i_split`).
-  各 `y[k]` への accumulation 順序は `diag → i=0 → ... → i=n-1` で旧 C1 /
-  serial と一致 → **bit-identical 維持**, 既存テスト書き換え不要。
-- `MAX_FUSED_HIGH_K = 6` で group_size を ~1 MB (典型 L2/core) 以下に抑える.
-  `fused_k` は `min(n - chunk_log, MAX_FUSED_HIGH_K, log2(n_chunks_total) -
-  log2_ceil(nth))` で並列度確保. `fused_k = 0` 時は旧 C1 経路にフォールバック
-  (`apply_h_kryanneal_rayon_c1`)。
-- 改善対象は **`apply_h_kryanneal` のみ** (Lanczos / CFM4:2 / M2 から呼ばれる).
-  `apply_single_mode_axis_i` (Trotter 経路) は C3 (#64) で既に group fusion
-  済みなので Phase D の対象外。
-- bench: `benchmarks/bench_block_fusion.py --kernels apply_h_kryanneal` で
-  N ∈ {18, 20, 22} を計測 (script は C3 で整備済み, 新規 bench 不要)。
-  acceptance は N=20 で >=1.3× 改善 (bench 運用は pre-merge cycle,
-  `.claude/solve-overrides.md` 参照)。
-- **`--no-default-features` ビルド**: rayon 自体が外れて scalar 単スレッド
-  `apply_h_kryanneal_serial` 経路に戻り Phase D も無効。
+要点だけ抜粋:
+
+- C1 baseline は IPC=2.98 (Zen 3 理論 max の 60-75%) で **既に compute-near-peak**.
+  「DRAM bandwidth bound だから traffic 削減すれば改善」前提が成立しなかった.
+- Phase D の chunk 跨ぎ XOR access pattern が HW prefetcher を破壊し,
+  per-L2-miss avg latency が 195 → 251 cycles (+30%) に劣化.
+- cache-miss rate は baseline/after とも 3-7% で **DRAM access はそもそも
+  少なかった**. 真の bottleneck は L2 fill latency (L3 / cross-CCX).
+- N=18 は実質変化なし (Python bench で見えた 0.53× は alloc/GC noise).
+
+issue #79 で B (SIMD i≥3), C (prefetch), D (streaming store) として残されていた
+代替カードも **IPC 3.0 baseline 前提では効果薄** が予想されるため別途
+sub-issue 化していない. 再挑戦時は `src/bin/perf_apply_h.rs` + perf stat で
+ハードウェア counter を最初に取り「何 bound か」を確認してから設計に入る運用.
+
 
 ## 設計判断の出典 (cv_ising 流用箇所)
 
