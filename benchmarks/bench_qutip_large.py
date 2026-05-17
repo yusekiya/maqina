@@ -13,20 +13,21 @@
     1 軸 sweep で十分捕らえられる)
 
 * 複数 **scenario** を 1 script invocation で sweep する. 各 scenario は
-  ``(T, h_p_scale, h_x_scale)`` の 3 つ組で問題インスタンスを規定する.
+  ``(T, h_p_scale, h_x_scale, n_values)`` で問題インスタンスを規定する.
   代表的な regime をカバーするため既定 scenario は:
 
-  - ``standard``: ``T=1, h_p_scale=1, h_x_scale=1`` — 基本ケース
-  - ``long-T``: ``T=1e4, h_p_scale=1`` — 量子アニーリングの実用 T レンジ
-    (issue #65 review で確認した user の研究ケース)
-  - ``stiff``: ``T=1, h_p_scale=10`` — ``H_p_diag`` の dynamic range 拡大
-    (QuTiP の adaptive ODE が ``‖H‖`` 律速で step を縮める領域;
-    Lanczos + Magnus は ``dt · ‖H‖ ≲ 4m`` で step を維持可)
-  - ``stiff-long-T``: ``T=1e4, h_p_scale=10`` — 両極端の組合せ (非 default
-    だが ``--scenarios`` で opt-in 可能)
+  - ``standard``: ``T=1, h_p_scale=1, N=10,12`` — 基本ケース
+  - ``long-T``: ``T=1e4, h_p_scale=1, N=8,10`` — 量子アニーリングの実用
+    T レンジ (T=1e4 と N 大の組合せは 1 cell が分単位になるため N を絞る)
+  - ``stiff``: ``T=1, h_p_scale=10, N=10,12`` — ``H_p_diag`` の dynamic
+    range 拡大 (QuTiP の adaptive ODE が ``‖H‖`` 律速で step を縮める領域)
+  - ``large-N``: ``T=1, h_p_scale=1, N=12,14,16`` — 大規模 Hilbert 空間
+    (dim=2^N up to 65536). T を短く取って 1 cell を秒オーダに保つ
+  - ``stiff-long-T``: ``T=1e4, h_p_scale=10, N=6,8`` — opt-in 用最重 case
 
   ``h_p_scale`` は ``H_p_diag`` 振幅を ``Uniform(-1, 1)`` から
   ``Uniform(-h_p_scale, h_p_scale)`` にスケール, ``h_x_scale`` は同様.
+  ``n_values`` は scenario 内蔵; CLI ``--n-values`` で全 scenario を上書き可.
 
 * **reference state** は QuTiP ``sesolve`` at ``tol=ref_tol`` で
   (scenario, n) ごとに 1 回だけ計算 (default ``ref_tol=1e-11``; long-T では
@@ -104,28 +105,51 @@ DEFAULT_RESULTS_ROOT = REPO_ROOT / "benchmarks" / "results"
 
 @dataclass(frozen=True)
 class _Scenario:
-    """1 つの問題 regime を ``(T, h_p_scale, h_x_scale)`` で規定."""
+    """1 つの問題 regime を ``(T, h_p_scale, h_x_scale, n_values)`` で規定.
+
+    ``n_values`` は scenario ごとに適切な N 範囲を埋め込む (long-T や
+    stiff-long-T では小さい N に絞らないと 1 cell が分単位の wall time に
+    なるため). CLI ``--n-values`` を明示指定すると全 scenario をその値で
+    override する.
+    """
 
     name: str
     T: float
     h_p_scale: float
     h_x_scale: float
+    n_values: tuple[int, ...]
 
 
 # 既定 scenario. 量子アニーリングの典型的な regime をカバーする:
-# - standard: T=1, 振幅 1 (基本ケース)
-# - long-T: T=1e4, 振幅 1 (実用アニーリング時間)
-# - stiff: T=1, h_p_scale=10 (dynamic range 拡大 → QuTiP step 縮小)
-# - stiff-long-T: 両極端
+# - standard: T=1, 振幅 1, N=10-12 (基本ケース, 全 N で軽い)
+# - long-T: T=1e4, 振幅 1, N=8-10 (実用アニーリング時間; N 大は long-T と
+#   かけ合わせると 1 cell が分単位なので絞る)
+# - stiff: T=1, h_p_scale=10, N=10-12 (dynamic range 拡大 → QuTiP の step
+#   縮小領域. T 短いので N は中規模で取れる)
+# - large-N: T=1, h_p_scale=1, N=12-16 (大規模 Hilbert. dim=65536 まで.
+#   QuTiP sparse matvec が次元に sublinear で効くので N が大きい領域で
+#   kryanneal matrix-free との比較が情報量大)
+# - stiff-long-T: T=1e4, h_p_scale=10, N=6-8 (最も重い組合せ; opt-in)
 _BUILTIN_SCENARIOS: dict[str, _Scenario] = {
-    "standard": _Scenario("standard", T=1.0, h_p_scale=1.0, h_x_scale=1.0),
-    "long-T": _Scenario("long-T", T=1.0e4, h_p_scale=1.0, h_x_scale=1.0),
-    "stiff": _Scenario("stiff", T=1.0, h_p_scale=10.0, h_x_scale=1.0),
-    "stiff-long-T": _Scenario("stiff-long-T", T=1.0e4, h_p_scale=10.0, h_x_scale=1.0),
+    "standard": _Scenario(
+        "standard", T=1.0, h_p_scale=1.0, h_x_scale=1.0, n_values=(10, 12)
+    ),
+    "long-T": _Scenario(
+        "long-T", T=1.0e4, h_p_scale=1.0, h_x_scale=1.0, n_values=(8, 10)
+    ),
+    "stiff": _Scenario(
+        "stiff", T=1.0, h_p_scale=10.0, h_x_scale=1.0, n_values=(10, 12)
+    ),
+    "large-N": _Scenario(
+        "large-N", T=1.0, h_p_scale=1.0, h_x_scale=1.0, n_values=(12, 14, 16)
+    ),
+    "stiff-long-T": _Scenario(
+        "stiff-long-T", T=1.0e4, h_p_scale=10.0, h_x_scale=1.0, n_values=(6, 8)
+    ),
 }
 
 # default で走らせる scenario 名 (stiff-long-T は opt-in).
-_DEFAULT_SCENARIO_NAMES: list[str] = ["standard", "long-T", "stiff"]
+_DEFAULT_SCENARIO_NAMES: list[str] = ["standard", "long-T", "stiff", "large-N"]
 
 # 比較対象 solver. 各 solver は固有の "精度つまみ" を持つ.
 _VALID_SOLVERS: tuple[str, ...] = (
@@ -151,9 +175,8 @@ _DEFAULT_QUTIP_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-12]
 # default は 1e-11 で実用的な ground truth に. user は ``--ref-tol`` で上書き可.
 _DEFAULT_REF_TOL: float = 1e-11
 
-# 既定 n. long-T scenario が含まれるため [8, 10] に絞る (N=12-14 long-T だと
-# 1 cell 数分級になる; 必要なら user が --n-values で上書き).
-_DEFAULT_N_VALUES: list[int] = [8, 10]
+# NOTE: 既定 N 値は scenario ごとに `_BUILTIN_SCENARIOS[].n_values` に
+# 埋め込んだ. CLI ``--n-values`` を明示指定するとここで上書きされる挙動.
 
 
 # ---------------------------------------------------------------------------
@@ -635,7 +658,12 @@ def _write_md(
     lines.append("")
     for k, v in machine_info.items():
         lines.append(f"- **{k}**: `{v}`")
-    lines.append(f"- **n_values**: `{args.n_values}`")
+    if args.n_values is not None:
+        lines.append(
+            f"- **n_values (override)**: `{args.n_values}` (applied to all scenarios)"
+        )
+    else:
+        lines.append("- **n_values**: per-scenario default (see Scenarios table below)")
     lines.append(f"- **solvers**: `{args.solvers}`")
     lines.append(f"- **m2 dt sweep**: `{args.m2_dts}`")
     lines.append(f"- **trotter dt sweep**: `{args.trotter_dts}`")
@@ -647,10 +675,13 @@ def _write_md(
     # Scenario summary.
     lines.append("## Scenarios")
     lines.append("")
-    lines.append("| name | T | h_p_scale | h_x_scale |")
-    lines.append("|---|---|---|---|")
+    lines.append("| name | T | h_p_scale | h_x_scale | n_values |")
+    lines.append("|---|---|---|---|---|")
     for sc in scenarios:
-        lines.append(f"| {sc.name} | {sc.T:g} | {sc.h_p_scale:g} | {sc.h_x_scale:g} |")
+        n_str = ",".join(str(n) for n in sc.n_values)
+        lines.append(
+            f"| {sc.name} | {sc.T:g} | {sc.h_p_scale:g} | {sc.h_x_scale:g} | {n_str} |"
+        )
     lines.append("")
 
     # group sweep_records by (scenario, n) and emit per-key table.
@@ -738,13 +769,18 @@ def _parse_scenario_list(text: str) -> list[str]:
 
 
 def _parse_scenario_def(text: str) -> _Scenario:
-    """``--add-scenario "name:T=1,h_p=10,h_x=1"`` 形式を ``_Scenario`` に parse."""
+    """``--add-scenario "name:T=1,h_p=10,h_x=1,n=12;14;16"`` 形式を parse する.
+
+    ``n`` の値リストは ``,`` を `key=value` 区切りに使う都合上 ``;`` 区切り
+    で受ける. ``n`` 未指定の custom scenario は CLI ``--n-values`` か
+    fallback ``(10,)`` を使う (``_resolve_scenarios`` で解決).
+    """
     if ":" not in text:
         raise argparse.ArgumentTypeError(
-            f"--add-scenario expects 'name:T=...,h_p=...,h_x=...', got {text!r}"
+            f"--add-scenario expects 'name:T=...,h_p=...,h_x=...,[n=...]', got {text!r}"
         )
     name, params = text.split(":", 1)
-    kv: dict[str, float] = {}
+    kv: dict[str, str] = {}
     for piece in params.split(","):
         piece = piece.strip()
         if not piece:
@@ -752,11 +788,23 @@ def _parse_scenario_def(text: str) -> _Scenario:
         if "=" not in piece:
             raise argparse.ArgumentTypeError(f"expected key=value, got {piece!r}")
         k, v = piece.split("=", 1)
-        kv[k.strip()] = float(v.strip())
-    T_val = kv.get("T", 1.0)
-    h_p_val = kv.get("h_p", kv.get("h_p_scale", 1.0))
-    h_x_val = kv.get("h_x", kv.get("h_x_scale", 1.0))
-    return _Scenario(name.strip(), T=T_val, h_p_scale=h_p_val, h_x_scale=h_x_val)
+        kv[k.strip()] = v.strip()
+    T_val = float(kv.get("T", "1.0"))
+    h_p_val = float(kv.get("h_p", kv.get("h_p_scale", "1.0")))
+    h_x_val = float(kv.get("h_x", kv.get("h_x_scale", "1.0")))
+    if "n" in kv:
+        n_values = tuple(int(s.strip()) for s in kv["n"].split(";") if s.strip())
+    else:
+        # caller (`_resolve_scenarios`) が global ``--n-values`` を当てる. それも
+        # 無ければ fallback として (10,) を使う.
+        n_values = ()
+    return _Scenario(
+        name.strip(),
+        T=T_val,
+        h_p_scale=h_p_val,
+        h_x_scale=h_x_val,
+        n_values=n_values,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -792,11 +840,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--n-values",
         type=_parse_int_list,
-        default=list(_DEFAULT_N_VALUES),
+        default=None,
         help=(
-            f"comma-separated sweep over spin counts (default: "
-            f"{_DEFAULT_N_VALUES}). long-T scenario が含まれる場合は "
-            f"小さい N に絞らないと cell wall time が分単位になる."
+            "comma-separated sweep over spin counts. **省略時は各 scenario の "
+            "規定 N を使う** (例: long-T は N=8,10, large-N は N=12,14,16). "
+            "明示指定すると全 scenario の N をこの値で上書きする (注: long-T と "
+            "N=12-14 等の組合せは 1 cell が分単位になる)."
         ),
     )
     parser.add_argument(
@@ -881,10 +930,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _resolve_scenarios(args: argparse.Namespace) -> list[_Scenario]:
-    """``--scenarios`` 名前リスト + ``--add-scenario`` から ``_Scenario`` 列を作る."""
+    """``--scenarios`` 名前リスト + ``--add-scenario`` から ``_Scenario`` 列を作る.
+
+    ``--n-values`` が CLI で指定されていれば全 scenario の ``n_values`` を
+    それで上書きする. 未指定なら built-in scenario は規定 ``n_values`` を
+    使い, custom scenario (``--add-scenario`` で ``n=...`` 未指定のもの) は
+    fallback ``(10,)`` を使う.
+    """
     pool: dict[str, _Scenario] = dict(_BUILTIN_SCENARIOS)
     for sc in args.add_scenario:
         pool[sc.name] = sc
+
+    global_n_override: tuple[int, ...] | None = (
+        tuple(args.n_values) if args.n_values is not None else None
+    )
+
     out: list[_Scenario] = []
     for name in args.scenarios:
         if name not in pool:
@@ -892,7 +952,23 @@ def _resolve_scenarios(args: argparse.Namespace) -> list[_Scenario]:
                 f"unknown scenario {name!r}; available: "
                 f"{sorted(pool.keys())} (define custom via --add-scenario)"
             )
-        out.append(pool[name])
+        sc = pool[name]
+        if global_n_override is not None:
+            n_values = global_n_override
+        elif sc.n_values:
+            n_values = sc.n_values
+        else:
+            # custom scenario で n 未指定 / --n-values 未指定の場合の fallback.
+            n_values = (10,)
+        if n_values != sc.n_values:
+            sc = _Scenario(
+                name=sc.name,
+                T=sc.T,
+                h_p_scale=sc.h_p_scale,
+                h_x_scale=sc.h_x_scale,
+                n_values=n_values,
+            )
+        out.append(sc)
     return out
 
 
@@ -920,7 +996,7 @@ def main(argv: list[str] | None = None) -> int:
     pareto_per_key: dict[tuple[str, int], list[bool]] = {}
 
     for scenario in scenarios:
-        for n in args.n_values:
+        for n in scenario.n_values:
             records, ref = _sweep_one_scenario_n(
                 scenario=scenario,
                 n=n,
