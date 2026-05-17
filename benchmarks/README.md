@@ -14,6 +14,7 @@
 | `bench_block_fusion.py` | `trotter_step` (multi-qubit gate fusion) と `apply_h_kryanneal` (L2-aware chunk_size) の per-step time を `N ∈ {18, 20, 22}` で計測. C2 完了時点 (baseline) と C3 適用後 (after) の 2 回 measure を `--label` で識別して取り, 手動 diff で per-cell speedup を算出する運用. acceptance: N=20, `trotter_step` で >= 1.3× | Phase 6 C3 (issue #64) |
 | `bench_blas_compare.py` | BLAS feature on/off の同一マシン比較 | Phase 6 予定 |
 | `bench_vs_qutip.py` | QuTiP `sesolve` との fidelity vs wall time | Phase 3 以降予定 |
+| `bench_qutip_large.py` | QuTiP `sesolve` vs kryanneal の **dt sweep** ベンチ. 各 (solver, dt) cell を 1 回だけ走らせ最終 state と wall time を同時取得し, 最小 dt の QuTiP cell を reference に fidelity と wall time の dt 依存性を CSV + md で出す. QuTiP 側の dt は `options.max_step` で制御 | Phase 6 C4 (issue #65) |
 
 ## 実行
 
