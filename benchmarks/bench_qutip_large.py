@@ -171,18 +171,22 @@ _DEFAULT_CFM4_DTS: list[float] = [0.005, 0.02, 0.05, 0.2, 0.5]
 _DEFAULT_ADAPTIVE_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-11]
 _DEFAULT_QUTIP_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-12]
 
-# m2 / trotter の dt 下限. 低次精度 (global p=2) のため long-T (T=1e4) と
-# 組合せると n_steps = T/dt が 1e7+ オーダになり 1 cell が 30-60 分かかる
-# (issue #65 review 実測). work-precision Pareto では低精度・高速側を
-# QuTiP/trotter, 高精度側を cfm4 がカバーするので m2/trotter の極小 dt は
-# 情報量が低く実用 bench wall time に見合わない. dt < ``_M2_DT_MIN`` /
-# ``_TROTTER_DT_MIN`` の cell は自動 skip する. CLI ``--m2-dt-min`` /
-# ``--trotter-dt-min`` で上書き可能 (極小 dt で work-precision 曲線を伸ばし
-# たい場合は 0.0 や 1e-4 等を指定).
-# default 0.005: T=1e4 で n_steps ≤ 2e6 (cell 5-10 分), T=1 で n_steps ≤ 200
-# (cell <0.1s) と現実的な範囲.
+# 各 method の dt 下限. fixed-dt 経路は ``n_steps = round(T/dt)`` なので
+# long-T (T=1e4) と組合せると 1 cell が分単位の wall time になる. dt 下限を
+# 設けて cell wall time を実用範囲にキャップする (CLI 上書き可).
+#
+# - m2 / trotter (global p=2): default 0.005. long-T で n_steps ≤ 2e6 (cell
+#   ~ 5-10 分 at n=10). 低次精度なので極小 dt cell は work-precision Pareto
+#   で QuTiP / trotter / cfm4 がカバーする領域に隠れて情報量低い.
+# - cfm4 (global p=4): default 0.01. per-step が m2 の 2x (2m=48 matvec)
+#   なので m2 より厳しい floor が必要. long-T で n_steps ≤ 1e6
+#   (cell ~ 10-20 分 at n=10). short-T では cfm4 dt=0.01 でも 1-fid ~ 1e-14
+#   級まで届くので Pareto を失わない.
+# CLI ``--m2-dt-min`` / ``--trotter-dt-min`` / ``--cfm4-dt-min`` で上書き可
+# (0.0 で無効化).
 _M2_DT_MIN: float = 0.005
 _TROTTER_DT_MIN: float = 0.005
+_CFM4_DT_MIN: float = 0.01
 
 # Reference の QuTiP tol. long-T (T=1e4) で 1e-13 まで絞ると数分かかるため,
 # default は 1e-11 で実用的な ground truth に. user は ``--ref-tol`` で上書き可.
@@ -393,6 +397,7 @@ def _sweep_one_scenario_n(
     cfm4_dts: list[float],
     m2_dt_min: float,
     trotter_dt_min: float,
+    cfm4_dt_min: float,
     adaptive_atols: list[float],
     qutip_tols: list[float],
     ref_tol: float,
@@ -449,7 +454,7 @@ def _sweep_one_scenario_n(
     for method, dt_sweep_raw, dt_min in (
         ("m2", m2_dts, m2_dt_min),
         ("trotter", trotter_dts, trotter_dt_min),
-        ("cfm4", cfm4_dts, 0.0),  # cfm4 は global p=4 で下限不要
+        ("cfm4", cfm4_dts, cfm4_dt_min),
     ):
         if method not in solvers:
             continue
@@ -696,7 +701,9 @@ def _write_md(
     lines.append(
         f"- **trotter dt sweep**: `{args.trotter_dts}` (dt_min={args.trotter_dt_min:g})"
     )
-    lines.append(f"- **cfm4 dt sweep**: `{args.cfm4_dts}`")
+    lines.append(
+        f"- **cfm4 dt sweep**: `{args.cfm4_dts}` (dt_min={args.cfm4_dt_min:g})"
+    )
     lines.append(f"- **cfm4_adaptive_richardson atol sweep**: `{args.adaptive_tols}`")
     lines.append(f"- **qutip tol sweep**: `{args.qutip_tols}`")
     lines.append("")
@@ -948,6 +955,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--cfm4-dt-min",
+        type=float,
+        default=_CFM4_DT_MIN,
+        help=(
+            f"cfm4 で sweep する dt の下限 (default: {_CFM4_DT_MIN:g}). "
+            "global p=4 ながら per-step が m2 の 2x (2m=48 matvec) なので "
+            "long-T で同じく cell wall time が膨らむため独立に下限を持つ. "
+            "0.0 で下限無効."
+        ),
+    )
+    parser.add_argument(
         "--adaptive-tols",
         type=_parse_float_list,
         default=list(_DEFAULT_ADAPTIVE_TOLS),
@@ -1055,6 +1073,7 @@ def main(argv: list[str] | None = None) -> int:
                 cfm4_dts=args.cfm4_dts,
                 m2_dt_min=args.m2_dt_min,
                 trotter_dt_min=args.trotter_dt_min,
+                cfm4_dt_min=args.cfm4_dt_min,
                 adaptive_atols=args.adaptive_tols,
                 qutip_tols=args.qutip_tols,
                 ref_tol=args.ref_tol,
