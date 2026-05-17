@@ -1,7 +1,7 @@
 //! 実対称三重対角行列の hand-rolled 完全固有分解.
 //!
 //! [`tridiag_eigh`] は Lanczos 内部 (m ≈ 24) で得られる実対称三重対角行列の
-//! 完全固有分解を行う低レベルユーティリティ. 詳細は `docs/design.md` §7.1.
+//! 完全固有分解を行う低レベルユーティリティ. 詳細は `docs/design/07-rust-extension.md` §7.1.
 //!
 //! - アルゴリズム: implicit shift QL (Wilkinson shift), EISPACK `tql2` 互換
 //!   (Golub-Van Loan, "Matrix Computations" 4th ed., §8.3).
@@ -63,7 +63,7 @@ impl std::error::Error for TridiagError {}
 ///
 /// # アルゴリズム
 /// implicit shift QL with Wilkinson shift (Golub-Van Loan §8.3,
-/// EISPACK `tql2` 互換). 詳細は `docs/design.md` §7.1.
+/// EISPACK `tql2` 互換). 詳細は `docs/design/07-rust-extension.md` §7.1.
 ///
 /// - Deflation 閾値: `|e[k]| ≤ ε · (|d[k]| + |d[k+1]|)` (ε = `f64::EPSILON`).
 /// - 最大反復数: `30 · m` 回 (LAPACK `dsteqr` と同じ). 超過時は

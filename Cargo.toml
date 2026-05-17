@@ -59,7 +59,7 @@ path = "src/bin/perf_apply_h.rs"
 # 有効化する. 普通の `cargo test` / `cargo build` では無効のまま.
 #
 # `rayon`: matvec / Trotter primitives (`src/matvec.rs`) の bit-flip pass を
-# `rayon::par_chunks_mut` で L2 並列化する (`docs/design.md` §12 Phase 6 C1,
+# `rayon::par_chunks_mut` で L2 並列化する (`docs/design/12-release-plan.md` §12 Phase 6 C1,
 # issue #62). default ON で BLAS と同様, scalar single-threaded ビルドは
 # `cargo build --no-default-features` で従来挙動を維持できる. rayon thread
 # 数は環境変数 `RAYON_NUM_THREADS` で制御し, BLAS thread (既存
@@ -68,7 +68,7 @@ path = "src/bin/perf_apply_h.rs"
 #
 # `simd`: `src/matvec.rs::apply_h_kryanneal` の bit-flip pass のうち
 # i=0,1,2 (stride 1/2/4 連続アクセス領域) を `wide::f64x4` 経由で SIMD 特化
-# する (`docs/design.md` §12 Phase 6 C2, issue #63). default ON で stable Rust
+# する (`docs/design/12-release-plan.md` §12 Phase 6 C2, issue #63). default ON で stable Rust
 # だけで AVX2 / AVX-512 / NEON への自動 dispatch が効く (`wide` クレートが
 # `target_feature` を見て選択). `--no-default-features` で scalar 経路に戻り
 # `wide` 依存も外れる. SIMD は per-thread 最適化なので rayon と直交し,
@@ -87,7 +87,7 @@ numpy = "0.28"
 num-complex = "0.4"
 # Lanczos 内の m × m (m ≈ 24) 実対称三重対角固有分解は src/tridiag.rs に
 # hand-rolled な implicit QL with Wilkinson shift で実装する (詳細は
-# docs/design.md §7.1)。LAPACK 依存を切ることで macOS Apple Accelerate
+# docs/design/07-rust-extension.md §7.1)。LAPACK 依存を切ることで macOS Apple Accelerate
 # を Level-1/2 BLAS でフル活用しつつ追加 install を不要にする。
 ndarray = "0.16"
 cblas = { version = "0.5", optional = true }

@@ -1,7 +1,7 @@
 # benchmarks/
 
 `kryanneal` の per-step 性能計測 CLI スクリプト群を置く. 設計上の位置付けは
-`docs/design.md` §10, ベンチ規約の詳細は `CLAUDE.md` 「ベンチマーク」節を
+`docs/design/10-benchmarks.md` §10, ベンチ規約の詳細は `CLAUDE.md` 「ベンチマーク」節を
 参照すること.
 
 ## スクリプト一覧
@@ -78,7 +78,7 @@ uv run python benchmarks/bench_per_step.py
 **重要**: 同じ `n_steps` での raw per-step 比較は LTE order の違い
 (M2 / Strang は `O(dt^3)`, Suzuki S_4 は `O(dt^5)`) を **無視している**
 ので, 「精度を揃えた wall time 比較」を主張するには別途 required
-`n_steps` の見積もりが必要 (`docs/design.md` §5.3 のクロスオーバ議論).
+`n_steps` の見積もりが必要 (`docs/design/05-3-propagator.md` §5.3 のクロスオーバ議論).
 
 ディレクトリは `.gitignore` で除外済み. 計測結果を共有する場合は
 markdown を抜粋して PR / issue 本文に貼り付ける.

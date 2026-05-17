@@ -34,7 +34,7 @@ uv run maturin develop --uv --release   # 性能計測時
 
 ## Documentation
 
-- 設計書 (一次資料): [`docs/design.md`](docs/design.md)
+- 設計書 (一次資料): [`docs/design/INDEX.md`](docs/design/INDEX.md)
 - テスト実行手順: [`.claude/skills/test-runner/SKILL.md`](.claude/skills/test-runner/SKILL.md) (Claude Code skill, `/test-runner` で発火可能; `docs/testing.md` はポインタ)
 - ベンチマーク: [`docs/benchmarks.md`](docs/benchmarks.md) (Phase 1 では未整備)
 - API リファレンス: `python/kryanneal/*.pyi` (per-module PEP 484 stub, full docstring 付き。`tools/gen_api_stubs.py` で自動生成)

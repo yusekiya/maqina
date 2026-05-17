@@ -11,7 +11,7 @@
   Hamiltonian ``H_driver = -Σ_i h_x_i X_i`` の係数).
 
 shape / dtype / NaN-free / `n` と各次元の整合性は本コンストラクタで検証
-する. 物理的取り決め (bit 規約等) は ``docs/design.md`` および
+する. 物理的取り決め (bit 規約等) は ``docs/design/INDEX.md`` および
 ``CLAUDE.md`` 「物理的取り決め」節を参照.
 
 Note
@@ -22,7 +22,7 @@ Note
 dataclass 既定の ``__eq__`` (タプル比較) が ``ValueError: The truth value of
 an array ...`` で破綻するため.
 
-``from_pauli_terms`` / ``from_J_h`` classmethod は ``docs/design.md`` §4.2 に
+``from_pauli_terms`` / ``from_J_h`` classmethod は ``docs/design/04-python-api.md`` §4.2 に
 記載されているが, ``builders`` モジュールの実装が別 issue のため本リリース
 では未提供 (Phase 1 内, builders 実装後に追加予定).
 """

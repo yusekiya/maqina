@@ -6,7 +6,7 @@
 ここに **公開 driver 関数** (``evolve_schedule_*``) と **Python リファレンス
 実装** を置く. Rust 拡張 (``kryanneal._rust``) が利用可能なら fast path に
 ディスパッチし, 利用不可なら Python リファレンスで silent fallback する
-契約 (詳細は ``docs/design.md`` §3, §5).
+契約 (詳細は ``docs/design/03-architecture.md`` §3, §5).
 
 Phase 1 実装範囲
 ----------------
@@ -127,7 +127,7 @@ def evolve_schedule_trotter(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Sch
     Lanczos を介さず ``exp(-i·dt·H_drv) = Π_i R_i(dt)`` を閉形式で書く
     operator splitting 経路. LTE は ``O(dt^3)`` で M2 と同じ局所オーダだが,
     per-step コストは ``(N+1)·dim`` 要素アクセス (m=24 の Lanczos より軽い).
-    詳細は ``docs/design.md`` §5.3 の Trotter サブセクションを一次資料とする.
+    詳細は ``docs/design/05-3-propagator.md`` §5.3 の Trotter サブセクションを一次資料とする.
 
     Parameters
     ----------
@@ -154,7 +154,7 @@ def evolve_schedule_trotter(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Sch
         無いが, ``M2`` ドライバの ``n_steps × m`` と同様の「dim-walk
         見積もり」として ``n_steps × (N + 1)`` (phase pass 1 + bit-flip
         pass N の合計) を返す. ``QuantumResult.n_matvec`` の解釈は
-        ``docs/design.md`` §4.4 (Trotter 注記) を参照.
+        ``docs/design/04-python-api.md`` §4.4 (Trotter 注記) を参照.
 
     Raises
     ------
@@ -174,7 +174,7 @@ def evolve_schedule_trotter_suzuki4(h_x: np.ndarray, h_p_diag: np.ndarray, sched
     Lanczos を介さない operator splitting 経路の 4 次版. LTE は ``O(dt^5)``
     で CFM4:2 と同じ局所オーダだが, per-step は ``5·(N + 1)·dim`` 要素アクセス
     (Strang S_2 の 5 倍, M2 の Lanczos m=24 と比べて N の係数次第).
-    詳細は ``docs/design.md`` §5.3 (Trotter-Suzuki S_4 サブセクション).
+    詳細は ``docs/design/05-3-propagator.md`` §5.3 (Trotter-Suzuki S_4 サブセクション).
 
     Parameters
     ----------
@@ -200,7 +200,7 @@ def evolve_schedule_trotter_suzuki4(h_x: np.ndarray, h_p_diag: np.ndarray, sched
         無いが, Strang ドライバとの整合のため
         ``n_steps × 5 × (N + 1)`` (5 sub-step × ``phase pass 1 + bit-flip
         pass N``) を返す. ``QuantumResult.n_matvec`` の解釈は
-        ``docs/design.md`` §4.4 (Trotter 注記) を参照.
+        ``docs/design/04-python-api.md`` §4.4 (Trotter 注記) を参照.
 
     Raises
     ------
@@ -222,7 +222,7 @@ def evolve_schedule_cfm4(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedu
     適用する. Lanczos を 2 回 / step 呼ぶ (per-step matvec は ``2m``) ので
     M2 中点則 (per-step matvec ``m``) より 2 倍重いが, LTE が ``O(dt^5)`` で
     2 オーダ高精度. 「長時間 / 高精度」要求では同精度比較で総コストが M2 を
-    下回るクロスオーバが発生する (``docs/design.md`` §5.3 / §12).
+    下回るクロスオーバが発生する (``docs/design/05-3-propagator.md`` §5.3 / §12).
 
     Parameters
     ----------
@@ -261,7 +261,7 @@ def evolve_schedule_cfm4(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedu
 def evolve_schedule_adaptive_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, save_tlist: np.ndarray | None=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """CFM4:2 + M2 embedded 推定子による adaptive dt ドライバ (Phase 4 C3).
 
-    PI controller (``docs/design.md`` §5.3) で local error を ``tol_step``
+    PI controller (``docs/design/05-3-propagator.md`` §5.3) で local error を ``tol_step``
     以下に保ちつつ dt を伸縮させて ``[t0, t1]`` 区間を進む. 各 step は
     CFM4:2 1 step + M2 1 step (同じ入口 ψ) を走らせ
     ``err = ‖ψ_cfm4 - ψ_m2‖`` を embedded error として PI 制御へ流す.
@@ -291,7 +291,7 @@ def evolve_schedule_adaptive_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule:
         Lanczos の β 打切り閾値 (既定 ``1e-12``).
     tol_step
         accept 判定の局所誤差閾値 (既定 ``1e-8``; 保守寄りの選定根拠は
-        ``docs/design.md`` §5.3 PI controller defaults 表のノート参照).
+        ``docs/design/05-3-propagator.md`` §5.3 PI controller defaults 表のノート参照).
     dt0
         初期 dt (既定 ``0.5``).
     dt_min
@@ -336,7 +336,7 @@ def evolve_schedule_adaptive_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule:
 def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, SnapshotData | None]:
     """CFM4:2 + step-doubling Richardson 推定子による adaptive dt ドライバ.
 
-    PI controller (``docs/design.md`` §5.3) で local error を ``tol_step``
+    PI controller (``docs/design/05-3-propagator.md`` §5.3) で local error を ``tol_step``
     以下に保ちつつ dt を伸縮させて ``[t0, t1]`` 区間を進む. 各 step は
     full-step CFM4:2 (dt) と half-step×2 CFM4:2 (dt/2 を 2 回) を同入口 ψ
     から走らせ ``err = ‖ψ_full - ψ_h2‖`` を 4 次推定子として PI 制御へ流す.
@@ -347,7 +347,7 @@ def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, s
     per-step matvec は **6m** (Lanczos 呼出 6 回; full 2m + half×2 で 4m).
     smooth schedule では M2 embedded 比 2 オーダ高精度なので許容 dt を
     1~2 桁伸ばせ, 同精度比較で total コストが M2 を下回るクロスオーバが
-    出る (``docs/design.md`` §5.3 / §12).
+    出る (``docs/design/05-3-propagator.md`` §5.3 / §12).
 
     Rust 拡張が import 済なら ``_rust.cfm4_step_with_richardson_estimate_py``
     を, そうでなければ Python リファレンス
@@ -358,7 +358,7 @@ def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, s
     h_x, h_p_diag, schedule, psi0, t0, t1
         ``evolve_schedule_adaptive_m2`` と同じ.
     m, krylov_tol, tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects
-        PI controller の既定パラメータ (``docs/design.md`` §5.3).
+        PI controller の既定パラメータ (``docs/design/05-3-propagator.md`` §5.3).
     richardson_extrapolate
         ``True`` で外挿後の ``ψ_acc`` を accept 時の状態とする
         (実効 6 次精度; 既定 ``False``).

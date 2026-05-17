@@ -2,7 +2,7 @@
 
 ``__init__`` の shape / dtype / contiguity / finiteness 検証, ``expectation``
 の数値正しさ, ``magnetization`` / ``ising_energy`` factory の挙動を確認
-する. 仕様は ``docs/design.md`` §4.6 を参照.
+する. 仕様は ``docs/design/04-python-api.md`` §4.6 を参照.
 """
 
 from __future__ import annotations

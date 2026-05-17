@@ -38,7 +38,7 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
   * ``dt_init = None`` → ``dt0 = max(min(c · T^β, T), floor)``
     (既定 ``c=0.1, β=0.5, floor=1e-3``, T = ``t1 - t0``). linear schedule
     の Magnus 級数 T スケーリング (s-space scaling invariance,
-    ``docs/design.md`` §5.3) から導いた保守値で PI controller の warmup
+    ``docs/design/05-3-propagator.md`` §5.3) から導いた保守値で PI controller の warmup
     step を T 依存に削減する.
   * ``dt_max = None`` → ``dt_max = max(min(10·dt0, 4m / ‖H‖_est), dt0)``,
     ``‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|`` の Gershgorin 上界に
@@ -55,7 +55,7 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
   絞ることで精度を担保). β_k < ``krylov_tol`` で Lanczos 早期打切が
   既存実装で効くため, ``m_eff ≤ m_max`` の運用. ``m_eff`` 累積統計の
   ``QuantumResult`` 露出は Rust API 拡張 (``lanczos_propagate`` の戻り値
-  追加) が必要なため本フェーズでは保留 (``docs/design.md`` §5.3 参照).
+  追加) が必要なため本フェーズでは保留 (``docs/design/05-3-propagator.md`` §5.3 参照).
 
 実装方針: ``kryanneal.krylov.evolve_schedule_m2`` /
 ``evolve_schedule_trotter`` / ``evolve_schedule_trotter_suzuki4`` /
@@ -122,7 +122,7 @@ class QuantumAnnealer:
         よる高速化が欲しい場合は user が opt-in で発動する:
         ``atol`` を緩める (例 ``atol=1e-5`` → effective ``1e-8``) か,
         ``krylov_tol`` を明示的に緩める (例 ``krylov_tol=1e-6``).
-        詳細は ``docs/design.md`` §5.3 follow-up 節 E 参照.
+        詳細は ``docs/design/05-3-propagator.md`` §5.3 follow-up 節 E 参照.
 
     Raises
     ------
@@ -172,14 +172,14 @@ class QuantumAnnealer:
             応用で許容範囲で, その場合 PI step 数が減るうえ
             ``krylov_tol = None`` ならば Lanczos 早期打切 (`atol · 1e-3`)
             も自動的に緩んで二重に高速化される. 詳細は
-            ``docs/design.md`` §5.3 PI controller defaults 表のノート.
+            ``docs/design/05-3-propagator.md`` §5.3 PI controller defaults 表のノート.
         dt_init
             adaptive 経路の初期 dt 提案. driver の ``dt0`` に map される.
             ``None`` (既定) のとき
             ``dt0 = max(min(c · T^β, T), _AUTO_DT_INIT_FLOOR)``
             (T = ``t1 - t0``, 既定 ``c=0.1, β=0.5, floor=1e-3``) で auto
             resolve し, PI controller の warmup step を T 依存で削減する
-            (s-space scaling invariance, ``docs/design.md`` §5.3,
+            (s-space scaling invariance, ``docs/design/05-3-propagator.md`` §5.3,
             issue #54 で None default 化, 旧 ``"auto"`` リテラル相当).
             例えば ``T=100`` で ``dt0=1.0``, ``T=1`` で ``dt0=0.1``,
             ``T=0.01`` で ``dt0=0.01`` (床値より大きいので formula 値).
@@ -213,7 +213,7 @@ class QuantumAnnealer:
             m_max`` になる。固定 dt 経路では無視される。
             ``m_eff`` 累積統計の ``QuantumResult`` 露出は Rust API 拡張
             (``lanczos_propagate`` の戻り値追加 + PyO3 plumbing) が
-            必要なため本フェーズでは保留 (``docs/design.md`` §5.3 参照)。
+            必要なため本フェーズでは保留 (``docs/design/05-3-propagator.md`` §5.3 参照)。
         observables
             Phase 5 (issue #47) で有効化. ``{name: Observable}`` dict もしくは
             ``None``. ``save_tlist`` 非 None かつ非空 dict のとき, 各
@@ -246,14 +246,14 @@ class QuantumAnnealer:
 
             * ``"m2"``: ``n_steps × m`` (Lanczos の matvec 見積もり).
             * ``"trotter"``: ``n_steps × (N + 1)`` (phase pass 1 + bit-flip
-              pass N の dim-walk 見積もり; ``docs/design.md`` §4.4 参照).
+              pass N の dim-walk 見積もり; ``docs/design/04-python-api.md`` §4.4 参照).
             * ``"trotter_suzuki4"``: ``n_steps × 5 × (N + 1)`` (5 sub-step
               × Strang per-step コスト).
             * ``"cfm4"``: ``n_steps × 2m`` (CFM4:2 は 1 step あたり Lanczos
               を 2 回呼ぶため M2 の 2 倍).
             * ``"cfm4_adaptive_richardson"``: ``n_steps_actual × 6m``
               (full CFM4:2 ``2m`` + half×2 CFM4:2 ``4m`` = ``6m``,
-              ``docs/design.md`` §5.3).
+              ``docs/design/05-3-propagator.md`` §5.3).
 
             ``n_steps`` は固定 dt 経路では要求 step 数, adaptive 経路では
             実 step 数 (``n_steps_actual`` と同値) を返す.

@@ -2,7 +2,7 @@
 
 ``__post_init__`` で shape / dtype / contiguity / NaN / ``n`` 整合性が
 ValueError に変換されることを確認する. 物理的取り決めは ``CLAUDE.md``
-「物理的取り決め」節と ``docs/design.md`` §2.2 / §4.2 を参照.
+「物理的取り決め」節と ``docs/design/02-physics.md`` §2.2 / §4.2 を参照.
 """
 
 from __future__ import annotations

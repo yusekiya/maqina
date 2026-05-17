@@ -35,7 +35,7 @@ Usage
 >>> res = ann.run(psi0, 0.0, sched.T, method="m2", n_steps=300)
 >>> print(np.abs(res.psi_final[:8]) ** 2)   # 最終状態 |ψ(T)|^2 の冒頭 8 成分
 
-設計詳細は ``docs/design.md`` 参照. 各公開モジュールに対応する ``.pyi``
+設計詳細は ``docs/design/INDEX.md`` 参照. 各公開モジュールに対応する ``.pyi``
 スタブ (``python/kryanneal/*.pyi``) を一次 API リファレンスとして読むことを
 推奨する.
 """
@@ -69,7 +69,7 @@ def _warn_if_no_blas() -> None:
 
     ``_rust.__has_blas__`` を import 時に読み, ``False`` (scalar fallback)
     の場合に ``RuntimeWarning`` を発する. scalar fallback ビルドのまま
-    長時間ベンチを回す事故を防ぐためのアラート (``docs/design.md`` §7.5).
+    長時間ベンチを回す事故を防ぐためのアラート (``docs/design/07-rust-extension.md`` §7.5).
     Rust 拡張自体が import できない環境では何もせず, 上位 (krylov 層) の
     Python リファレンス fallback に任せる.
 

@@ -10,7 +10,7 @@
 
 Phase 1–5 subset
 ----------------
-``docs/design.md`` §4.4 の ``QuantumResult`` に対応するフィールドを保持する:
+``docs/design/04-python-api.md`` §4.4 の ``QuantumResult`` に対応するフィールドを保持する:
 
 * ``psi_final`` — 終端 ``ψ(T)`` (常に非 None)
 * ``t_history`` — 互換目的の deprecated 別名 (Phase 1 以来の名前を残す;

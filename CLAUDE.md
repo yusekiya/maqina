@@ -29,7 +29,7 @@ Hamiltonian の時間発展演算子を近似する。adaptive dt ドライバ
 
 ## 設計書
 
-`docs/design.md` が一次資料。実装に着手する前に必ず読む。主要セクション:
+`docs/design/INDEX.md` が一次資料。実装に着手する前に必ず読む。主要セクション:
 
 - §3 アーキテクチャ / ディレクトリレイアウト
 - §4 公開 Python API (`IsingProblem`, `Schedule`, `QuantumAnnealer`, ...)
@@ -84,7 +84,25 @@ kryanneal/
 ├── tests/                      # pytest (Python 統合テスト)
 ├── benchmarks/
 └── docs/
-    ├── design.md               # 一次設計書
+    ├── design/                 # 一次設計書 (章別分割; INDEX.md がエントリポイント)
+    │   ├── INDEX.md            # 目次 + §N.M → ファイル mapping + 横断トピック
+    │   ├── 01-goals.md         # §1 ゴール
+    │   ├── 02-physics.md       # §2 物理モデル (bit 規約)
+    │   ├── 03-architecture.md  # §3 アーキテクチャ / レイアウト
+    │   ├── 04-python-api.md    # §4 公開 Python API
+    │   ├── 05-1-matvec.md      # §5.1 matvec / per-axis primitives
+    │   ├── 05-2-lanczos.md     # §5.2 Lanczos
+    │   ├── 05-3-propagator.md  # §5.3 M2/CFM4/Trotter/PI controller
+    │   ├── 05-4-python-reference.md
+    │   ├── 06-builders.md      # §6
+    │   ├── 07-rust-extension.md  # §7
+    │   ├── 08-qutip-comparison.md  # §8
+    │   ├── 09-testing.md       # §9
+    │   ├── 10-benchmarks.md    # §10
+    │   ├── 11-build-infrastructure.md
+    │   ├── 12-release-plan.md  # §12 Phase 1-6
+    │   ├── 13-future-work.md
+    │   └── 14-references.md
     ├── conventions.md          # 開発規約 (ビルド基盤 / バージョニング)
     ├── testing.md              # /test skill 用
     └── benchmarks.md
@@ -284,7 +302,7 @@ Phase D で `apply_h_kryanneal_rayon` を **連続 k 個の高 i を group-fused
 dim · (1 + h_naive)` に削減する設計) を行ったが, **本 Linux サーバー
 (AMD EPYC 7713P, 64 物理コア, L2 = 512 KB/core, L3 = 32 MB/CCX × 8) で
 perf 計測した結果 N=20 で 50% 真の compute regression を確認** し,
-revert. 詳細な perf 値と判断は `docs/design.md` §5.1.4 にアーカイブ.
+revert. 詳細な perf 値と判断は `docs/design/05-1-matvec.md` §5.1.4 にアーカイブ.
 
 要点だけ抜粋:
 
@@ -305,11 +323,11 @@ sub-issue 化していない. 再挑戦時は `src/bin/perf_apply_h.rs` + perf s
 ## 設計判断の出典 (cv_ising 流用箇所)
 
 - CFM4:2 係数: `cv_ising/rust/src/cfm4.rs` の `a_high = 1/4 + √3/6` 等
-  (`docs/design.md` §5.3 に inline 済み)
+  (`docs/design/05-3-propagator.md` §5.3 に inline 済み)
 - PI controller の式・既定値: `cv_ising/src/cv_ising/krylov.py` の
   `evolve_schedule_adaptive_m2` / `evolve_schedule_adaptive_richardson`
-  (`docs/design.md` §5.3 に inline 済み)
-- maturin レイアウトの「適切な」形と stub 配置: `docs/design.md` §3.3, §7.6
+  (`docs/design/05-3-propagator.md` §5.3 に inline 済み)
+- maturin レイアウトの「適切な」形と stub 配置: `docs/design/03-architecture.md` §3.3, §7.6
   (PyO3/maturin#490, #771, #885 を踏まえて選定)
 - BLAS feature on/off の分岐パターン: cv_ising と同じ `cfg(feature = "blas")`
   + `blas-src` (macOS=Accelerate / Linux=OpenBLAS) で揃える
