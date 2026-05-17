@@ -1011,32 +1011,46 @@ apply_h_kryanneal 経路 (cfm4_step / m2_midpoint_step 内) は既存実装で 1
 matvec = 1 barrier なので追加の fusion は不要 (上記スコープ A は trotter
 経路のみ).
 
-##### B. `apply_h_kryanneal` の L2-aware chunk_size 再調整
+##### B. `trotter_step` の phase_p を rayon 並列化
 
-issue #68 観測 `apply_h_kryanneal` 6.13× scaling 飽和の理由仮説:
-
-- 現状 chunk_size clamp: `chunk_size ∈ [RAYON_CHUNK_MIN=64, RAYON_CHUNK_MAX=16K]`.
-  N=20, 64 threads で `dim / (64*4) = 4096` → `4K` Complex64 = `64 KB`.
-- 一方 N=22 では `dim / (64*4) = 16K` → `RAYON_CHUNK_MAX` で clamp された
-  16K Complex64 = `256 KB`. これが **64 thread 同時実行で per-core L2
-  (1 MB)** を占有しきれない. しかも diag pass + 全 i bit-flip pass を
-  fuse するので thread は v と y の両方を chunk_size 分 cache に持つ必要.
-- 高 i pass で `v[k ^ mask]` が **chunk 外** = 別 chunk_b を読むとき, chunk_b
-  全体 (= chunk_size) は L2 になければ DRAM から再 load. これが #68 で
-  観測された DRAM bandwidth bound の主因.
-
-**対策**: `chunk_size` の上限を per-core L2 fit に明示的に設計する:
+`trotter_step` の前後 2 回の `phase_p(dt/2)` (`psi[k] *= exp(-i·b_t·h_p_diag[k]·dt/2)`)
+は scalar serial loop だった. dim=2^20=1M で各 phase pass あたり数 ms 級
+のコストがあり, A (multi-qubit gate fusion) で bit-flip pass の barrier が
+削減された後はこちらが per-step time の支配項になる. 解決:
 
 ```rust
-// L2 cache per core (AMD EPYC 9554: 1 MB, Intel Xeon Sapphire Rapids: 2 MB)
-// を保守的に 512 KB と見積もり, chunk + chunk_pair partner (v 読込先) 両方が
-// 同時に乗るように chunk_size = L2 / 4 = 128 KB.  Complex64 = 16 byte なので
-// 2^13 = 8K 要素.
-const RAYON_CHUNK_MAX: usize = 1 << 13;   // (旧 1 << 14 = 16K)
+fn apply_phase_p(psi: &mut [Complex64], h_p_diag: &[f64], b_t: f64, dt_half: f64) {
+    if psi.len() >= PHASE_RAYON_MIN_DIM {   // = 1 << 17, MIN_RAYON_DIM と同じ
+        psi.par_iter_mut().zip(h_p_diag.par_iter()).for_each(|(psi_k, &h_p_k)| {
+            let phi = -b_t * h_p_k * dt_half;
+            let (s, c) = phi.sin_cos();
+            *psi_k *= Complex64::new(c, s);
+        });
+        return;
+    }
+    // scalar fallback
+    ...
+}
 ```
 
-これは **C3 の主修正ではない** (single constant 変更) が, A の multi-qubit
-fusion 実装と合わせて bench で同時測定する.
+各 k は独立な multiplicative update なので rayon 並列でも **bit-identical**
+を保つ (任意 scheduling で同じ結果).
+
+##### C. `apply_h_kryanneal` の chunk_size: 旧値維持
+
+PR #78 初版で `RAYON_CHUNK_MAX` を `1 << 14` (= 256 KB) → `1 << 13` (= 128 KB)
+に縮める変更を入れたが, Linux 本番 bench で `apply_h_kryanneal` の **N=18
+で 0.69×, N=20 で 0.91× regression** という mixed な結果になった (小 dim
+で並列度が落ちる方が L2 fit 改善より影響大). **旧値 `1 << 14` に戻す**.
+
+L2 pressure は既存の動的 chunk_size 計算 `(dim / (nth * 4)).clamp(MIN, MAX)`
+の中で 64 thread 環境では target が MAX 未満になるため間接的に効く設計に
+依存する (大 thread 数で自動的に小 chunk になる).
+
+A (multi-qubit gate fusion) の rayon 実装でも同じ動的 chunk_size 計算を
+踏襲し group_block の整数倍に揃える pattern を採用 (PR #78 v2 で
+chunk_size を固定 `RAYON_CHUNK_MAX` にしていたのを動的化, N=18 並列度
+不足の regression を修正).
 
 ##### Acceptance と bench
 
@@ -2050,10 +2064,15 @@ Phase 1 の baseline と比較できることが本 phase の前提。
     `trotter_step` が **0.81× regression** したため per-axis 逐次経路に
     切替 (dense matmul の compute は per-axis × k の 2× 重く, TFIM 規模では
     memory-bandwidth gain よりも compute 増が勝った). 詳細は §5.1.3.
-  - **B. L2-aware chunk_size**: `apply_h_kryanneal_rayon` の `RAYON_CHUNK_MAX`
-    を `1 << 14` (= 256 KB) → `1 << 13` (= 128 KB) に縮め, 64-thread 同時
-    実行で per-core L2 fit を保証. chunk-pair (高 i pass の `v[k^mask]`)
-    が DRAM round trip にならない範囲に収める.
+  - **B. phase_p の rayon 並列化**: `trotter_step` の前後 2 回の
+    `phase_p(dt/2)` (`psi[k] *= exp(...)`) を rayon `par_iter_mut` で並列化.
+    A 後の支配項 (dim=1M で数 ms 級) を 64 thread に分散させる.
+    各 k 独立 multiplicative update なので bit-identical を維持.
+  - **C. chunk_size 戦略**: PR #78 初版で `RAYON_CHUNK_MAX` を `1<<14` →
+    `1<<13` に縮める変更を入れたが N=18 / N=20 で regression したため
+    旧値に復活. A の fused 経路でも `apply_h_kryanneal_rayon` と同じ
+    動的 chunk_size `(dim/(nth*4)).clamp(MIN, MAX)` を採用 (group_block の
+    整数倍に揃える形で).
 - 物理コア数 vs スループットの sweep をベンチに含め、メモリ帯域律速点を
   明示する (`benchmarks/bench_parallel_scaling.py`, Phase 6 C1 で導入)
 - BLAS feature ON/OFF の数値一致 CI (両ビルドで rel < 1e-13)

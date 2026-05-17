@@ -67,7 +67,44 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
+
 use crate::matvec::{apply_multi_qubit_gate_fused, apply_single_mode_axis_i, MAX_FUSED_K};
+
+/// `phase_p(dt')`: `psi[k] *= exp(-i · b_t · h_p_diag[k] · dt')` を全 k に適用.
+///
+/// 大 dim (≥ 2^17 = 128K Complex64 = 2 MB) では rayon par_iter_mut で並列化
+/// (`apply_h_kryanneal_rayon` の `MIN_RAYON_DIM` と同じ閾値). small dim では
+/// scalar fallback. trotter_step の per-step time のうち, multi-qubit gate
+/// fusion で削減できない diag 部分 (N=20 dim=1M で数 ms 級) を rayon barrier
+/// 2 個 (前後) に詰める (Phase 6 C3, issue #64 v3 修正).
+#[inline]
+fn apply_phase_p(psi: &mut [Complex64], h_p_diag: &[f64], b_t: f64, dt_half: f64) {
+    debug_assert_eq!(psi.len(), h_p_diag.len());
+
+    #[cfg(feature = "rayon")]
+    {
+        // `MIN_RAYON_DIM = 1 << 17` (matvec.rs) と同じ閾値で dispatch.
+        const PHASE_RAYON_MIN_DIM: usize = 1 << 17;
+        if psi.len() >= PHASE_RAYON_MIN_DIM {
+            psi.par_iter_mut()
+                .zip(h_p_diag.par_iter())
+                .for_each(|(psi_k, &h_p_k)| {
+                    let phi = -b_t * h_p_k * dt_half;
+                    let (s, c) = phi.sin_cos();
+                    *psi_k *= Complex64::new(c, s);
+                });
+            return;
+        }
+    }
+    // Scalar fallback.
+    for (psi_k, &h_p_k) in psi.iter_mut().zip(h_p_diag.iter()) {
+        let phi = -b_t * h_p_k * dt_half;
+        let (s, c) = phi.sin_cos();
+        *psi_k *= Complex64::new(c, s);
+    }
+}
 
 /// Multi-qubit gate fusion (Phase 6 C3, issue #64) で `trotter_step` 内の
 /// `Π_i R_i(dt)` を何 qubit ずつまとめて適用するかの単位.
@@ -153,13 +190,8 @@ pub(crate) fn trotter_step(
     let half = 0.5 * dt;
 
     // ---- 前半 phase_p(dt/2): exp(-i · b_t · h_p_diag[k] · dt/2) を要素ごとに乗算 ----
-    // Complex64::new(cos φ, sin φ) = exp(+i·φ); φ = -b_t·h_p_diag[k]·dt/2 を
-    // 採れば exp(-i·b_t·h_p_diag[k]·dt/2) となる.
-    for k in 0..dim {
-        let phi = -b_t * h_p_diag[k] * half;
-        let (s, c) = phi.sin_cos();
-        psi[k] *= Complex64::new(c, s);
-    }
+    // `apply_phase_p` は大 dim では rayon 並列化される (Phase 6 C3 v3).
+    apply_phase_p(psi, h_p_diag, b_t, half);
 
     // ---- 中間 Π_i R_i(dt): 連続 FUSE_K qubit ずつ tensor product にまとめて
     //      1 sweep で適用する (Phase 6 C3, multi-qubit gate fusion, issue #64). ----
@@ -195,11 +227,7 @@ pub(crate) fn trotter_step(
     }
 
     // ---- 後半 phase_p(dt/2): 前半と同じ phase を再度乗算 ----
-    for k in 0..dim {
-        let phi = -b_t * h_p_diag[k] * half;
-        let (s, c) = phi.sin_cos();
-        psi[k] *= Complex64::new(c, s);
-    }
+    apply_phase_p(psi, h_p_diag, b_t, half);
 }
 
 /// `trotter_step` の Python wrap. 結果を新規 array で返す (in-place ではなく

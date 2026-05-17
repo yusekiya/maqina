@@ -56,21 +56,20 @@ use rayon::prelude::*;
 /// rayon chunk あたりの **最大** 要素数. y_chunk + v の partner block (高 i pass
 /// で chunk 外を読む先) の **両方** が L2 cache に同時に乗ることを狙う.
 ///
-/// # 値の見直し (Phase 6 C3, issue #64)
+/// # 値の見直し (Phase 6 C3, issue #64, 第 2 版)
 ///
-/// 旧値 `1 << 14 = 16K` Complex64 = 256 KB は **per-chunk サイズ** としては
-/// L2 (1-2 MB/core) に収まるが, 64 thread が同時に `chunk + chunk_partner` の
-/// 2 × 256 KB = 512 KB を読むと per-core L2 (1 MB) を **使い切ってしまい**,
-/// 高 i pass で `v[k^mask]` の partner block が eviction される
-/// (issue #68 follow-up で `apply_h_kryanneal` が 6.13× (理論 64× の ~9.6%)
-/// で頭打ちになる主因).
+/// PR #78 初版で `1 << 14 = 16K` (= 256 KB) を `1 << 13 = 8K` (= 128 KB) に
+/// 縮めたが, Linux 本番 bench で `apply_h_kryanneal` の **N=18 が 0.69×,
+/// N=20 が 0.91× regression**, N=22 では 1.09× 改善という mixed な結果に
+/// なった (小 dim で並列度が落ちる方が L2 fit 改善より影響大). 旧値に戻す.
 ///
-/// 新値 `1 << 13 = 8K` Complex64 = 128 KB は `chunk + chunk_partner` = 256 KB
-/// で per-core L2 (1 MB) に **1/4 弱** で収まり, 同時に別 pass の y / h_p_diag
-/// に対する余裕も確保する. 値は `benchmarks/bench_block_fusion.py` で sweep
-/// 確認する.
+/// L2 pressure 仮説は **chunk_size を縮める代わりに `apply_h_kryanneal_rayon`
+/// 既存の動的 chunk_size 計算 `(dim / (nth * 4)).clamp(MIN, MAX)` の MAX
+/// 上限値で抑える** ことで間接的に効くことを期待する (thread 数が小さい
+/// 環境では大きい chunk, 64 thread 環境では target が MAX 未満になるので
+/// 自動的に小さい chunk を選ぶ仕組み).
 #[cfg(feature = "rayon")]
-const RAYON_CHUNK_MAX: usize = 1 << 13;
+const RAYON_CHUNK_MAX: usize = 1 << 14;
 
 /// rayon chunk あたりの **最小** 要素数. closure / scheduling overhead を
 /// 償却するため 64 要素 (cache-line 4 要素 × 16) 以上を保証する.
@@ -873,10 +872,17 @@ fn apply_multi_qubit_gate_fused_rayon(
 ) {
     let k = u_list.len();
     let group_block = 1usize << (i_start + k);
-    let chunk_size = if group_block >= RAYON_CHUNK_MAX {
+
+    // 既存 `apply_h_kryanneal_rayon` と同じ pattern で thread 数に応じた
+    // chunk_size を取り, group_block (= 最大 axis の block 2 倍) の整数倍に
+    // 揃える. これで dim が小さいときでも 64 thread に十分な chunk 数を
+    // 配給できる (PR #78 v2 で N=18 が 0.69× regression したのを修正).
+    let nth = rayon::current_num_threads().max(1);
+    let target = (psi.len() / (nth * 4)).clamp(RAYON_CHUNK_MIN, RAYON_CHUNK_MAX);
+    let chunk_size = if group_block >= target {
         group_block
     } else {
-        let n_groups = (RAYON_CHUNK_MAX / group_block).max(1);
+        let n_groups = (target / group_block).max(1);
         n_groups * group_block
     };
     let chunk_size = chunk_size.min(psi.len());
