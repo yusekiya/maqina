@@ -226,18 +226,18 @@ Trotter primitive は `src/trotter.rs` に置く想定だが、`apply_single_mod
     テスト用の小 dim 直接呼び出しでのみ通る).
   - 数値同一性は SIMD ON 両 path で bit-identical, SIMD ON vs scalar 経路は
     `rel < 1e-13` (FMA 折り畳み差で ulp 差が出うる).
-  - **chunk_size = 64 を静的に維持**: `apply_h_kryanneal_rayon` /
-    `apply_multi_qubit_gate_fused_rayon` のような動的計算
-    `(dim/(nth·4)).clamp(MIN, MAX)` には**しない**. 理由は本関数が 1 chunk
-    あたり 1 pass の read-write しかなく (axis pair update のみで chunk 内
-    data reuse なし), chunk が L1 (32 KB) を spill した瞬間に SIMD が
-    memory bandwidth bound に転落するため. PR #80 fixup experiment で
-    chunk_size=4096 (= 64 KB, L1 spill) にすると N=20 SIMD speedup が
-    2.95× → 0.56× へ大幅 regression する観測あり.  L1 fit する 1 KB chunk
-    を多数並べる方が SIMD throughput を最大化できる. これにより rayon
-    scheduling overhead が大きくなって N=18 の SIMD speedup が ~1.0× で
-    頭打ちになる副作用はあるが (§12 C2.5 観測, 構造的境界), N=16 serial と
-    N=20 rayon の主要 size 帯では 1.9-3.5× を達成する.
+  - **chunk_size は動的計算** `(dim/(nth·4)).clamp(MIN, MAX)` + block 丸め
+    + SIMD_BLOCK_MAX (= 8 Complex64) 丸め. `apply_h_kryanneal_rayon` /
+    `apply_multi_qubit_gate_fused_rayon` と同じ pattern. 64 thread 環境
+    (Linux AMD EPYC 7713P) では N=18 で chunk_size = 1024 (= 16 KB, L1
+    cache 内に収まる), N=20 で 4096 (= 64 KB, L2 fit) を確保し,
+    broadcast 定数 (16 個の f64x4 splat) を SIMD inner 数百回で amortize
+    できる. **経緯と false negative 訂正は §5.1.4 末尾「Phase 6 audit:
+    issue #90 perf binary 検証結果」参照** — issue #71 fixup の Python
+    bench で「N=18 で i=0/1/2 0.94-0.97× regression」と判定して Revert
+    した判断は false negative で, 真値は N=18 i=0 で 1.53×, i=2 で 1.82×
+    の **improvement** だった (Python alloc/copy noise が double-edged
+    に作用した典型例).
 
 #### 5.1.3 Phase 6 C3 — DRAM 律速の解消 (multi-qubit gate fusion + phase_p 並列化)
 
@@ -691,4 +691,85 @@ issue #82 で導入した `src/bin/perf_trotter_step.rs` を `perf_apply_h.rs`
 と並行して保持し, 今後の trotter 経路の micro-optimization (C2.5 fixup や
 C4 / C5 等の Phase 6 残タスク) でも perf binary を一次検証経路として使う
 運用に統一する.
+
+##### Phase 6 audit: issue #90 perf binary 検証結果 (2026-05-17)
+
+issue #82 で確立した「Python bench は double-edged noise を持つ」概念
+(同節「Python bench noise が double-edged」) を踏まえ, **過去 phase で
+**棄却** された変更が真には improvement だった可能性** を pre-merge audit
+した結果を archive する.
+
+**issue #82 本文の filter 誤判定訂正**: issue #82 では「#71 fixup
+(`apply_single_mode_axis_i_rayon` 動的 chunk_size, 578d050) は in-place op
+で alloc noise なし → 再評価対象外」と判定したが, **これは誤りだった**.
+理由: `apply_single_mode_axis_i_inplace_py` (in-place 入口) は issue #86
+(2026-05-17) で **初めて追加**されたものであり, #71 fixup commit `578d050`
+と Revert `efc0e76` 時点 (2026-05-17 当日, #85 / #86 マージ直前) の bench
+(`benchmarks/bench_simd_scaling.py`) は `apply_single_mode_axis_i_py`
+(allocate-and-return wrap) を経由していた. → Python alloc/copy noise を
+被っており棄却判断が false negative だった可能性. issue #90 で perf binary
+再評価.
+
+検証対象: `apply_single_mode_axis_i_rayon` の chunk_size 戦略.
+
+- **static**: `RAYON_CHUNK_MIN.next_multiple_of(block)` (block ≤ 8 で 64
+  固定). main tip および 578d050 以前.
+- **dynamic**: `(dim/(nth·4)).clamp(MIN, MAX)` + block 丸め + SIMD_BLOCK_MAX
+  丸め. `apply_h_kryanneal_rayon` / `apply_multi_qubit_gate_fused_rayon`
+  と同じ式. 64 thread Linux で N=18 chunk_size = 1024 (16×), N=20 = 4096.
+  578d050 復元等価.
+
+検証方法: `src/bin/perf_apply_single_mode_axis_i.rs` (issue #90 で導入,
+in-place Rust 直呼び 500 iter で alloc noise 完全排除) を `target-static`
+/ `target-dynamic` 2 build で `perf stat` (Linux AMD EPYC 7713P, 64 threads,
+`RUSTFLAGS="-C target-cpu=native"`).
+
+per-iter time 実測 (1 run の単発計測, ms):
+
+| N  | i | static  | dynamic | speedup (static/dynamic) |
+|----|---|---------|---------|--------------------------|
+| 18 | 0 | 0.22805 | 0.14917 | **1.53×** ← key cell     |
+| 18 | 2 | 0.25346 | 0.13892 | **1.82×**                |
+| 18 | 8 | 0.15695 | 0.18522 | 0.85× (scalar path)      |
+| 20 | 0 | 0.43529 | 0.27300 | **1.59×**                |
+| 20 | 2 | 0.45517 | 0.26362 | **1.73×**                |
+| 20 | 8 | 0.32455 | 0.25112 | 1.29×                   |
+| 22 | 0 | 1.09669 | 0.84427 | 1.30×                   |
+| 22 | 2 | 1.06040 | 0.74807 | 1.42×                   |
+| 22 | 8 | 0.92224 | 0.73465 | 1.25×                   |
+
+hardware counter (N=18, i=0): cycles 18.66B → 12.36B (**-34%**),
+instructions 4.84B → 3.53B (-27%), IPC 0.26 → 0.29, branch-misses
+31M → 24M (-22%). 578d050 commit message の amortization 仮説
+(broadcast 定数 16 個の f64x4 splat を SIMD inner で amortize) が perf で
+裏付けられた. chunk_size 64 → 1024 で closure invocation 数が 16× 減り
+per-chunk SIMD inner 反復が 8-16 回 → 128 回以上に増えたため.
+
+判定: **動的を main に採用**. issue #82 で構築した判定 table の「動的
+≥ 1.05× → false negative」該当. 578d050 commit message の「N=18 で
+i=0/1/2 各々 0.94-0.97× regression」は完全に Python bench noise が
+真の **1.53-1.82× improvement** を **3-6% regression** に化けさせていた.
+
+**i=8 scalar path の若干 regression (N=18 0.85×)**: block = 2^9 = 512 で
+static は既に block サイズの chunk (512), dynamic は 2× group fusion
+(1024) で chunks-per-thread が 8 → 4 になり負荷分散の粒度が落ちたため.
+N ≥ 20 では dim が大きく chunk_size 差の影響が薄まり, dynamic でも
+1.25-1.29× の improvement. SIMD path (i ∈ {0,1,2}) の全 N 帯 improvement
+を優先し dynamic を採用する.
+
+**過去観測の再解釈** (§5.1.2 旧記述 / 削除済み): PR #80 fixup experiment
+で「chunk_size=4096 (L1 spill) で N=20 SIMD speedup 2.95× → 0.56×」と
+観測されていた **「L1 spill 仮説」も同じ Python alloc noise 由来だった
+可能性が高い**. issue #90 では N=20 で chunk_size = 4096 (= 64 KB, L1
+spill 想定範囲) でも i=0 で 1.59× improvement が観測されており, L1 spill
+が原因なら 0.56× 規模の regression が出るはず. 旧観測は再現性を perf で
+取り直していないため厳密確認は今後の課題だが, 少なくとも当時の判定根拠
+は Python bench の信頼性ごと覆ったと位置付ける.
+
+教訓: **「in-place op だから Python bench noise なし」は automatic な
+filter にしない**. 入口 API が `*_py` (allocate-and-return) か `*_inplace_py`
+かに依存し, 後者は in-place 入口が **実際にいつ追加されたか** で大きく
+変わる (本件では #86 マージ前の bench は in-place wrap 不在で全て alloc
+経路だった). 過去の棄却判断は **bench 実行時点での call path** を確認
+した上で再評価対象に含めるか判断する.
 

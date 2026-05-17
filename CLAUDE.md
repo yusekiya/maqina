@@ -266,7 +266,7 @@ pure-Rust 計測 binary を `src/bin/` に配置:
 |---|---|---|
 | `src/bin/perf_apply_h.rs` | `apply_h_kryanneal` (matvec) | #79 Phase D 試行で確立した DRAM/L2 latency 計測 |
 | `src/bin/perf_trotter_step.rs` | `trotter_step` (Strang 2 次 Trotter 1 step) | #82 で C3 multi-qubit gate fusion + phase_p rayon 化の真の compute speedup 検証 |
-| `src/bin/perf_apply_single_mode_axis_i.rs` | `apply_single_mode_axis_i` (Trotter per-axis 2×2 ユニタリ) | #90 で #71 fixup `578d050` (動的 chunk_size) 棄却判断を perf binary で再評価 |
+| `src/bin/perf_apply_single_mode_axis_i.rs` | `apply_single_mode_axis_i` (Trotter per-axis 2×2 ユニタリ) | #90 で #71 fixup `578d050` (動的 chunk_size) 棄却を perf binary で再評価し dynamic を採用 (詳細は `docs/design/05-1-matvec.md` §5.1.4 末尾) |
 
 いずれも Python の `bench_*.py` が `*_py` (allocate-and-return) 経路の
 alloc/copy overhead で wall-time を歪めるのを回避し,

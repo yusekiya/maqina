@@ -1017,24 +1017,45 @@ fn apply_single_mode_axis_i_rayon(psi: &mut [Complex64], u: &[Complex64; 4], i: 
                 *b_ref = u[2] * a + u[3] * b;
             });
     } else {
-        // 複数 block: chunk_size を block の整数倍で RAYON_CHUNK_MIN 以上に揃える.
-        // block も chunk_size も power of 2 で dim も power of 2 なので chunk
-        // は全て等サイズ (last chunk が短くなることはない).
-        let chunk_size = if block >= RAYON_CHUNK_MIN {
+        // 複数 block: chunk_size を block の整数倍で動的計算する.
+        //
+        // `apply_h_kryanneal_rayon` / `apply_multi_qubit_gate_fused_rayon`
+        // と同じ動的式 `(dim / (nth · 4)).clamp(MIN, MAX)` に揃える. 64 thread
+        // 環境 (Linux AMD EPYC 7713P) では N=18 で chunk_size = 1024 (16×),
+        // N=20 で 4096 が確保され, broadcast 定数 (16 個の f64x4 splat) を
+        // SIMD inner 数百回で amortize できる.
+        //
+        // **経緯 (issue #90)**: issue #71 fixup commit `578d050` で本実装と
+        // 等価な動的 chunk_size を採用しかけたが, 当時の bench
+        // (`benchmarks/bench_simd_scaling.py`, `*_py` allocate-and-return
+        // wrap 経由) が Python alloc/copy noise を被って「N=18 で i=0/1/2
+        // 0.94-0.97× regression」と判定し Revert (`efc0e76`) されていた.
+        // issue #90 で `perf_apply_single_mode_axis_i` (in-place Rust 直呼び)
+        // で再評価したところ, 真値は **N=18 で i=0 1.53× / i=2 1.82×**
+        // (`docs/design/05-1-matvec.md` §5.1.2 / §5.1.4 archive 参照).
+        // Python bench double-edged noise の典型例.
+        let nth = rayon::current_num_threads().max(1);
+        let target = (dim / (nth * 4)).clamp(RAYON_CHUNK_MIN, RAYON_CHUNK_MAX);
+        let chunk_size = if block >= target {
             block
         } else {
-            // block=2 (i=0) なら chunk_size=64, block=4 (i=1) なら 64, ...
-            // block * ceil(RAYON_CHUNK_MIN / block) = block の整数倍で最初の
-            // ≥ RAYON_CHUNK_MIN を取る. block ≤ 8 では chunk_size = 64 で
-            // SIMD_BLOCK_MAX = 8 の倍数を自動的に満たす (SIMD i ∈ {0,1,2}
-            // dispatch の前提).
-            RAYON_CHUNK_MIN.next_multiple_of(block)
+            // n_groups · block で target ≤ chunk_size < target + block.
+            let n_groups = (target / block).max(1);
+            n_groups * block
         };
+        // SIMD カーネルの block-aligned 前提を満たすため SIMD_BLOCK_MAX
+        // (= 8 Complex64) の倍数に丸める. block ∈ {2,4,8} のとき chunk_size
+        // = n_groups · block は target が非 power-of-2 のとき必ずしも SIMD
+        // min unit の倍数になるとは限らないため明示的に整える
+        // (apply_h_kryanneal_rayon と同じ pattern). 丸めた結果が block 未満に
+        // ならないよう最後に block で floor する.
+        #[cfg(feature = "simd")]
+        let chunk_size = (chunk_size - (chunk_size % SIMD_BLOCK_MAX)).max(block);
         let chunk_size = chunk_size.min(dim);
         psi.par_chunks_mut(chunk_size).for_each(|chunk| {
-            // SIMD dispatch for i ∈ {0,1,2}: chunk_size = 64 (block ≤ 8 のとき)
-            // なので i ≤ 2 で必要な min dim (4 または 8) と chunk.len() % SIMD
-            // chunk size 倍数の要件は両方満たす. block == dim 経路は本 else 枝に
+            // SIMD dispatch for i ∈ {0,1,2}: chunk_size は上の動的計算 +
+            // SIMD_BLOCK_MAX 丸めで `chunk.len() % {4,8} == 0` および
+            // `chunk.len() >= block` を満たす. block == dim 経路は本 else 枝に
             // 入らない (上で分岐済み) ので i = n-1 退化ケースとは衝突しない.
             #[cfg(feature = "simd")]
             {
