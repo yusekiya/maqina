@@ -14,6 +14,8 @@
 | `bench_block_fusion.py` | `trotter_step` (multi-qubit gate fusion) と `apply_h_kryanneal` (L2-aware chunk_size) の per-step time を `N ∈ {18, 20, 22}` で計測. C2 完了時点 (baseline) と C3 適用後 (after) の 2 回 measure を `--label` で識別して取り, 手動 diff で per-cell speedup を算出する運用. acceptance: N=20, `trotter_step` で >= 1.3× | Phase 6 C3 (issue #64) |
 | `bench_blas_compare.py` | BLAS feature on/off の同一マシン比較 | Phase 6 予定 |
 | `bench_vs_qutip.py` | QuTiP `sesolve` との fidelity vs wall time | Phase 3 以降予定 |
+| `bench_qutip_large.py` | QuTiP `sesolve` vs kryanneal の **work-precision diagram** ベンチ. 複数 **scenario** (built-in: `standard` T=1 N=10,12 / `long-T` T=1e4 N=8,10 / `stiff` h_p_scale=10 N=10,12 / `large-N` T=1 N=12,14,16 / `stiff-long-T` opt-in N=6,8) を 1 invocation で sweep. 各 scenario は適切な N 範囲を内蔵 (long-T で N=12 にすると 1 cell 分単位なので絞る等). 各 solver は固有の精度つまみ (kryanneal m2/trotter/cfm4 = `dt`, adaptive = `atol`, QuTiP = `tol` で atol=rtol) を独自 sweep し共通 reference との infidelity + wall_sec を per-cell 1 回測定. MD/CSV は per-(scenario, n) で infidelity 昇順 + Pareto 最適 ✓ 付き. `--add-scenario "name:T=...,h_p=...,h_x=...,n=12;14"` でカスタム可. `--ref-validate` で QuTiP self-convergence + kryanneal cross-check による reference 妥当性検証 section を MD に追加 | Phase 6 C4 (issue #65) |
+| `bench_m_eff_adiabatic.py` | kryanneal `cfm4_adaptive_richardson` の **Krylov 部分空間実効次元 `m_eff` の T 依存性** 計測. QuTiP 比較ではなく adaptive driver の内部挙動分析専用. `evolve_schedule_adaptive_richardson` driver を直接呼び `m_eff_history` を取得し, per-(n, T, atol, m_max) の m_eff 分布 (mean/median/min/max/P10/P90/compression_ratio) + per-time-bin histogram を MD/CSV に出す. `--krylov-tol-factor` で β_k 早期打切閾値を調整可 (default 1e-3 = QuantumAnnealer default と一致, 1.0 等で発火しやすくなる) | Phase 6 C4 (issue #65) |
 
 ## 実行
 

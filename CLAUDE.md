@@ -126,6 +126,32 @@ uv run maturin develop --uv                 # Rust 変更後に必須 (--uv は 
 `uv run` を必ず使う (PyO3 の `extension-module` feature とローカル Python の
 ABI を揃える必要があるため、システム Python での実行は避ける)。
 
+### BLAS feature on/off の数値一致検証 (issue #65 Phase 6 C4)
+
+`cargo test --no-default-features` で Rust 内部単体の rel < 1e-13 一致は
+担保されるが, **Python 公開 API レベルでの end-to-end 一致** は以下の
+artifact フローで検証する:
+
+```bash
+# 1. BLAS on build で artifact 生成
+uv run maturin develop --uv --release
+KRYANNEAL_EXPECT_BLAS=1 uv run pytest tests/test_blas_consistency.py
+
+# 2. BLAS off build に切り替えて再生成 (scalar fallback; rayon/simd は ON 維持)
+uv run maturin develop --uv --release --no-default-features \
+    --features extension-module,rayon,simd
+KRYANNEAL_EXPECT_BLAS=0 uv run pytest tests/test_blas_consistency.py
+
+# 3. 2 つの artifact を diff
+uv run python tools/diff_blas_artifacts.py \
+    tests/artifacts/blas_on.npz tests/artifacts/blas_off.npz
+```
+
+`KRYANNEAL_EXPECT_BLAS` を渡しておくと「誤った build に対する silent 上書き
+保存」を防ぐ (build mode と env var が不一致なら test 自身が skip). diff
+script は default で rel < 1e-13 / atol < 1e-13 を assert. ローカル切替の
+都度 BLAS on/off build を行うため小規模 (n ∈ {4,6,8}) sample のみ.
+
 ## API リファレンス
 
 `python/kryanneal/*.pyi` (per-module PEP 484 stub) に公開 API のシグネチャと
@@ -153,6 +179,7 @@ uv run python tools/gen_api_stubs.py
 uv run python benchmarks/bench_per_step.py
 uv run python benchmarks/bench_blas_compare.py   # BLAS feature on/off 同一マシン比較
 uv run python benchmarks/bench_vs_qutip.py
+uv run python benchmarks/bench_qutip_large.py    # work-precision diagram で QuTiP vs kryanneal を Pareto 比較 (issue #65)
 ```
 
 性能改善の主張をするときの方法 (cv_ising 流):

@@ -214,8 +214,33 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   (hardware counter 計測用 binary).
 - 物理コア数 vs スループットの sweep をベンチに含め、メモリ帯域律速点を
   明示する (`benchmarks/bench_parallel_scaling.py`, Phase 6 C1 で導入)
-- BLAS feature ON/OFF の数値一致 CI (両ビルドで rel < 1e-13) — C4 (#65, open)
-- 大規模 QuTiP 比較 (n=12-16 程度まで) — C4 (#65, open)
+- **C4 (issue #65, 実装済み)**: BLAS feature ON/OFF の数値一致 artifact
+  test + 大規模 QuTiP 比較 (n=12-16). 構成:
+  - **`tests/test_blas_consistency.py`**: 固定 seed の sample 入力 (n ∈ {4,6,8},
+    m2 / trotter / trotter_suzuki4 / cfm4 の 4 method) で psi_final /
+    probabilities / observables 時系列を ``.npz`` に dump.
+    ``KRYANNEAL_EXPECT_BLAS`` env var で build mode を pin できる.
+    artifact 出力先は ``KRYANNEAL_ARTIFACT_DIR`` 上書き可
+    (default ``tests/artifacts/``, gitignore 済み). adaptive Richardson は
+    accept/reject 境界で dt 履歴が BLAS on/off 間で分岐しうるため除外.
+  - **`tools/diff_blas_artifacts.py`**: BLAS on / off ビルドで生成した 2 つの
+    ``.npz`` を読んで全 array が rel < 1e-13 で一致することを assert する
+    standalone script (numpy のみ依存). build profile (``_meta_has_blas``) が
+    一致してたら「同 build を比較してる」と検出して即 fail.
+  - **`tests/test_reference_qutip.py`**: n=12-14 で 4 method (m2 / trotter /
+    cfm4 / cfm4_adaptive_richardson) を QuTiP ``sesolve`` (atol=1e-12 = 収束
+    参照) と fidelity 比較. n=15-16 は cfm4_adaptive_richardson のみ
+    (dense 2^n × 2^n がメモリに乗らないため sparse 経路 = ``sigmax`` tensor 和
+    で構築). n>=14 は ``@pytest.mark.slow``. bit 規約変換 (kryanneal LSB-first
+    vs QuTiP MSB-first) は X を tensor list 位置 ``n-1-i`` に挿入する形で吸収.
+  - **`benchmarks/bench_qutip_large.py`**: dt sweep で QuTiP sesolve vs
+    kryanneal 固定 dt method の **fidelity と wall time を 1 pass 同時測定**.
+    reference は最小 dt の QuTiP cell (dt → 0 収束の代用). QuTiP 側の dt 制御
+    は ``options.max_step = dt`` を使う. CSV + markdown を
+    ``benchmarks/results/<timestamp>/`` 配下に出力.
+  - CI matrix は本 phase の scope 外 (``.github/workflows/`` 未整備). 必要時は
+    follow-up issue で導入する (run 手順は本 artifact + diff スクリプトを
+    そのまま CI から呼べる構成にしてある).
 - ドキュメント整備、Quick start サンプル — C5 (#66, open)
 
 ---
