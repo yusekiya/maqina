@@ -867,7 +867,7 @@ def test_krylov_tol_none_vs_explicit_1e12_same_accuracy() -> None:
 
 def test_krylov_tol_atol_ratio_constant_is_1e_minus_3() -> None:
     """``_KRYLOV_TOL_ATOL_RATIO`` の default 値を 1e-3 で lock-down する
-    (issue #54 で採用された経験値; 変更時は docs/design.md §5.3 E 節と
+    (issue #54 で採用された経験値; 変更時は docs/design/05-3-propagator.md §5.3 E 節と
     bench 結果の更新も必要).
     """
     from kryanneal.annealer import _KRYLOV_TOL_ATOL_RATIO

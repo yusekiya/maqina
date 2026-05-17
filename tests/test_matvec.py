@@ -7,7 +7,7 @@ Rust 側 ``#[cfg(test)] mod tests`` で nalgebra dense 構築との rel < 1e-13
 2. ``y = A·H_drv·v + B·diag(H_p_diag)·v`` の物理 contract が Python
    越境後も保たれていること
 
-の **smoke 1 個** に絞る. Phase 1 段階リリース計画 (``docs/design.md`` §12).
+の **smoke 1 個** に絞る. Phase 1 段階リリース計画 (``docs/design/12-release-plan.md`` §12).
 """
 
 from __future__ import annotations

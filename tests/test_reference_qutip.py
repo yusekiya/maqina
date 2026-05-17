@@ -9,7 +9,7 @@ issue #8 / #21 acceptance: 小規模 (n=4) で random ``H_p_diag`` / ``h_x``
   Strang 2 次は M2 と同じ ``O(dt^3)`` LTE オーダだが, 係数 / 中点採取の
   対称性誤差で ``1e-6`` までは届かないので ``1e-4`` 設定 (issue #21).
 
-QuTiP は dev 依存のみで本番 wheel には入れない契約 (``docs/design.md``
+QuTiP は dev 依存のみで本番 wheel には入れない契約 (``docs/design/08-qutip-comparison.md``
 §8). 拡張未ビルド or QuTiP 未 install の環境では ``pytest.importorskip``
 で skip する.
 """

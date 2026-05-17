@@ -4,7 +4,7 @@
 
 ## ドキュメント整合の対象
 
-- `docs/design.md`: 一次設計書。アーキテクチャ・公開 API・数値カーネル・段階リリース計画 (Phase 1–6) を集約する。設計に関わる変更 (公開 API 追加・カーネル差し替え・新フェーズの確定など) は同コミットに含める。
+- `docs/design/INDEX.md`: 一次設計書。アーキテクチャ・公開 API・数値カーネル・段階リリース計画 (Phase 1–6) を集約する。設計に関わる変更 (公開 API 追加・カーネル差し替え・新フェーズの確定など) は同コミットに含める。
 - `docs/conventions.md`: 開発規約 (ビルド基盤・バージョニングポリシー・umbrella issue DoD 必須項目)。ツールチェイン更新・version bump タイミング・新 Phase 起票ルールを変えたら同コミットに反映する。
 - `.claude/skills/test-runner/SKILL.md`: テスト・lint・build 実行手順の一次資料。テスト規約や実行方法を変えたら同コミットに反映する (`docs/testing.md` はポインタなので drift しない)。
 - `docs/benchmarks.md` (存在する場合): 性能計測手順や結果の参照規約。

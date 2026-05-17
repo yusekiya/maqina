@@ -38,7 +38,7 @@ Usage
 >>> res = ann.run(psi0, 0.0, sched.T, method="m2", n_steps=300)
 >>> print(np.abs(res.psi_final[:8]) ** 2)   # 最終状態 |ψ(T)|^2 の冒頭 8 成分
 
-設計詳細は ``docs/design.md`` 参照. 各公開モジュールに対応する ``.pyi``
+設計詳細は ``docs/design/INDEX.md`` 参照. 各公開モジュールに対応する ``.pyi``
 スタブ (``python/kryanneal/*.pyi``) を一次 API リファレンスとして読むことを
 推奨する.
 """

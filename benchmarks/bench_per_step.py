@@ -8,7 +8,7 @@ Phase 1 の DoD (issue #1) と Phase 2 の DoD (issue #18), Phase 3 の DoD
 (クロスオーバ実測)」を満たすためのベンチエントリポイント.
 Phase 4 C3 (issue #39) で ``method="cfm4_adaptive_richardson"`` を追加.
 
-設計規約は ``docs/design.md`` §10, 実行手順は ``benchmarks/README.md``,
+設計規約は ``docs/design/10-benchmarks.md`` §10, 実行手順は ``benchmarks/README.md``,
 全体規約は ``CLAUDE.md`` 「ベンチマーク」節を参照する.
 
 サポート ``method`` (Phase 4 末時点):
@@ -157,7 +157,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description=(
             "kryanneal per-step wall time benchmark "
             "(M2 / Trotter / Suzuki S_4 / CFM4:2; "
-            "see docs/design.md §10)"
+            "see docs/design/10-benchmarks.md §10)"
         )
     )
     parser.add_argument(

@@ -14,7 +14,7 @@
 //! することで time-dependent でも LTE `O(dt^3)` を保つ (Strang の中点採取則).
 //!
 //! per-step コスト: `(N + 1) · dim` 要素アクセス (matvec 1 pass 相当が `N+1`
-//! 回). 詳細は `docs/design.md` §5.3 (Trotter サブセクション) を一次資料とする.
+//! 回). 詳細は `docs/design/05-3-propagator.md` §5.3 (Trotter サブセクション) を一次資料とする.
 //!
 //! ## R_i の符号 convention
 //!
@@ -242,7 +242,7 @@ pub(crate) fn trotter_step(
 ///
 /// として呼ぶ. Trotter 経路の固定 dt ドライバが内部的に呼び出す Rust 経路は
 /// `trotter_step` を直接使うため, 本 wrap は **参照実装比較とテスト用** の
-/// 公開 API である (`docs/design.md` §7.3).
+/// 公開 API である (`docs/design/07-rust-extension.md` §7.3).
 #[pyfunction]
 #[pyo3(signature = (psi, h_x, h_p_diag, a_t, b_t, dt, n))]
 #[allow(clippy::too_many_arguments)]

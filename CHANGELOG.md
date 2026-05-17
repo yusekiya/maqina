@@ -93,5 +93,5 @@ follow-up` セクションを `## 0.5.0` に繰り上げ忘れていたため, P
       (`0.5` / `10·dt0`) から問題依存 auto 値に挙動が変わる (issue #54
       の motivation: 固定保守値より問題依存値の方が筋).
     - `krylov_tol=1e-12` を再現したい呼出は明示的に渡す.
-  - 詳細根拠は `docs/design.md` §5.3 follow-up 節 E "adaptive driver
+  - 詳細根拠は `docs/design/05-3-propagator.md` §5.3 follow-up 節 E "adaptive driver
     default の統一".

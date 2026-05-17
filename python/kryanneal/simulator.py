@@ -1,6 +1,6 @@
 """``AnnealingSimulator`` — step-wise stateful TFIM 量子ダイナミクスシミュレータ.
 
-設計詳細は ``docs/design.md`` §4.5 を一次資料とする.
+設計詳細は ``docs/design/04-python-api.md`` §4.5 を一次資料とする.
 
 ``QuantumAnnealer.run`` と同じプロパゲータ集合 (``m2`` / ``trotter`` /
 ``trotter_suzuki4`` / ``cfm4`` / ``cfm4_adaptive_richardson``) を内部で使うが,

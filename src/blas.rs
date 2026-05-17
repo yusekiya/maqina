@@ -3,7 +3,7 @@
 //! Lanczos (`src/krylov.rs`) / CFM4:2 (`src/cfm4.rs`, Phase 3 以降) の dim 依存
 //! ops を共通インタフェースで書くため, `cblas` クレート (`feature = "blas"`)
 //! と純 Rust scalar 経路の双方を `#[cfg]` で切替える. 両経路は同一の数値結果
-//! を `rel < 1e-13` で返す契約 (`docs/design.md` §7.2 / §7.4).
+//! を `rel < 1e-13` で返す契約 (`docs/design/07-rust-extension.md` §7.2 / §7.4).
 //!
 //! BLAS feature ON の場合は target ごとに自動選択された backend
 //! (macOS = Apple Accelerate, Linux = system OpenBLAS) を経由する. リンカに
@@ -135,7 +135,7 @@ pub(crate) fn scal_real(alpha: f64, x: &mut [Complex64]) {
 /// の `alpha=1, beta=0` 相当).
 ///
 /// Lanczos の終端再構成 `psi_new = V[:, :m_eff] @ c` を `m_eff` 回の axpy
-/// ではなく 1 度の Level-2 BLAS 呼出で行うために使う (`docs/design.md` §5.2).
+/// ではなく 1 度の Level-2 BLAS 呼出で行うために使う (`docs/design/05-2-lanczos.md` §5.2).
 ///
 /// # Panics
 /// - `a.len() != rows * cols`

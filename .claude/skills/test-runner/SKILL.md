@@ -180,7 +180,7 @@ uv run pre-commit run --all-files  # 全ファイルに対して手動実行
   一致するはず, cv_ising と同じ契約).
 - **clippy `needless_range_loop`**: `for i in 0..n { ... arr[i] ... }` の
   ような「インデックス変数で別スライスを引く」形式は clippy が reject
-  する (`-D warnings` 運用のため即 build fail). `docs/design.md` の擬似
+  する (`-D warnings` 運用のため即 build fail). `docs/design/INDEX.md` の擬似
   コードはインデックス記法で書かれているが, 実装では
   `for (i, &x) in arr.iter().enumerate()` に書き換える. bit-flip 系のように
   `i` を `1 << i` などビット演算でも使う場合, `enumerate()` 経由の `i` を
@@ -208,4 +208,4 @@ uv run pre-commit run --all-files  # 全ファイルに対して手動実行
 - `.claude/agents/test-runner.md`: 本 skill を読んで実行する subagent.
 - `CLAUDE.md`: プロジェクト全体ガイド (テストは本 skill を参照).
 - `.claude/solve-overrides.md`: `/solve` skill の kryanneal 固有 delta.
-- `docs/design.md`: 数値カーネル設計 (テスト等価性ペアの定義もここ).
+- `docs/design/INDEX.md`: 数値カーネル設計 (テスト等価性ペアの定義もここ).

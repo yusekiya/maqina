@@ -7,14 +7,14 @@
 //! ```
 //!
 //! 中点で H をフリーズし `lanczos_propagate` を 1 回呼ぶだけの薄いラッパで,
-//! LTE ~ O(dt^3). 詳細は `docs/design.md` §5.3 M2 サブセクション.
+//! LTE ~ O(dt^3). 詳細は `docs/design/05-3-propagator.md` §5.3 M2 サブセクション.
 //!
 //! Phase 3 で `cfm4_step` (Alvermann-Fehske 2011 の 4 次 commutator-free
 //! Magnus, 2 stage) を追加. ガウス-ルジャンドル 2 点ノード
 //! `c_1, c_2 = 1/2 ∓ √3/6` と線形結合係数 `a_high, a_low = 1/4 ± √3/6` を
 //! 用い, 各 stage で `(c_drv, c_diag)` スカラ 2 つに畳み込んで既存
 //! `apply_h_kryanneal` を呼ぶ「線形結合 callback 形式」を採用
-//! (`docs/design.md` §5.2 末尾, §5.3). LTE ~ O(dt^5), per-step matvec は 2m.
+//! (`docs/design/05-2-lanczos.md` §5.2 末尾, §5.3). LTE ~ O(dt^5), per-step matvec は 2m.
 //!
 //! Phase 4 で `cfm4_step_with_m2_estimate` / `cfm4_step_with_
 //! richardson_estimate` を本ファイルに追加予定.
@@ -23,7 +23,7 @@
 //! プロパゲータ** であり, PyO3 wrap `m2_midpoint_step_py` /
 //! `cfm4_step_py` 経由で `_rust` モジュールに exposure される.
 //! `lanczos_propagate` 自身は `pub(crate)` のままで, M2 / CFM4:2 が上位
-//! wrap として公開する設計 (`docs/design.md` §5.2 末尾).
+//! wrap として公開する設計 (`docs/design/05-2-lanczos.md` §5.2 末尾).
 //!
 //! PyO3 の `wrap_pyfunction!` 経由で `_rust` module に登録される関数は
 //! Rust の dead_code 解析からは「呼ばれていない」と見えるため, matvec.rs /
@@ -202,7 +202,7 @@ pub(crate) fn cfm4_a_low() -> f64 {
 ///
 /// 各 stage は `apply_h_kryanneal(·, ·, h_x, h_p_diag, c_drv, c_diag, n)` を
 /// closure として `lanczos_propagate` に渡す「線形結合 callback 形式」
-/// (`docs/design.md` §5.2 末尾) で実装される. これにより Lanczos 2 回 / step,
+/// (`docs/design/05-2-lanczos.md` §5.2 末尾) で実装される. これにより Lanczos 2 回 / step,
 /// per-step matvec は 2m, LTE ~ O(dt^5).
 ///
 /// # 引数
@@ -351,7 +351,7 @@ pub(crate) fn cfm4_step_py<'py>(
 /// CFM4:2 の LTE が `O(dt^5)` なので, 小 dt 領域では
 /// `‖ψ_cfm4 - ψ_m2‖ ≈ ‖ψ_m2 - ψ_exact‖ ∝ dt^3` となり, PI controller の
 /// `p = 2` 指数 `dt_next = dt · safety · (tol/err)^{1/(p+1)}` で扱える
-/// 2 次の推定子になる (`docs/design.md` §5.3 PI controller 表).
+/// 2 次の推定子になる (`docs/design/05-3-propagator.md` §5.3 PI controller 表).
 ///
 /// per-step matvec は CFM4:2 の 2m + M2 の m = **3m** (固定 dt CFM4:2 比 1.5×).
 ///
@@ -515,7 +515,7 @@ pub(crate) fn cfm4_step_with_m2_estimate_py<'py>(
 /// `2 · C_4 · (dt/2)^5 = C_4 · dt^5 / 16` なので両者の差は `(15/16) · C_4 · dt^5`
 /// で先頭次数の係数まで取り出せる. PI controller の `p = 4` 指数
 /// `dt_next = dt · safety · (tol/err)^{1/(p+1)}` で扱える 4 次の推定子になる
-/// (`docs/design.md` §5.3 PI controller 表).
+/// (`docs/design/05-3-propagator.md` §5.3 PI controller 表).
 ///
 /// per-step matvec は full CFM4:2 の 2m + half×2 CFM4:2 の 4m = **6m**
 /// (Lanczos 呼出 6 回, 固定 dt CFM4:2 比 3×). M2 embedded 比 2 オーダ高精度なので

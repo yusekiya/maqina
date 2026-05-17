@@ -118,7 +118,7 @@ def test_run_trotter_smoke_and_ground_state() -> None:
     O(dt^3) LTE のため, M2 と同等の精度を実現できる.
 
     あわせて ``n_matvec = n_steps × (N + 1)`` の Phase 2 規約 (Trotter
-    は dim-walk 見積もり; ``docs/design.md`` §4.4) を検証する.
+    は dim-walk 見積もり; ``docs/design/04-python-api.md`` §4.4) を検証する.
     """
     n = 4
     prob = IsingProblem(

@@ -75,7 +75,7 @@ def instantaneous_eigenstates(
         では無視.
     krylov_tol
         ``β_k < krylov_tol`` で Krylov 部分空間構築を早期打切. default
-        ``1e-12`` (``docs/design.md`` §5.2 の Lanczos と同じ慣習).
+        ``1e-12`` (``docs/design/05-2-lanczos.md`` §5.2 の Lanczos と同じ慣習).
 
     Returns
     -------

@@ -12,10 +12,10 @@
 //!
 //! - [`apply_h_kryanneal`]: 計算ベクトル `v` に対し `y = H(t) v` を 1 回 apply
 //!   する additive matvec. Lanczos (m 回) や CFM4:2 (各 stage) から繰り返し
-//!   呼ばれる. 詳細は `docs/design.md` §5.1.1.
+//!   呼ばれる. 詳細は `docs/design/05-1-matvec.md` §5.1.1.
 //! - [`apply_single_mode_axis_i`]: Trotter 経路で `R_i(θ) = cos(θ)·I + i·sin(θ)·X_i`
 //!   のような 2×2 ユニタリ `U` を axis `i` のペア `(psi[k], psi[k^(1<<i)])`
-//!   に **in-place** 適用する Phase 2 primitive. 詳細は `docs/design.md` §5.1.2.
+//!   に **in-place** 適用する Phase 2 primitive. 詳細は `docs/design/05-1-matvec.md` §5.1.2.
 //!
 //! 両者を同じファイルに置くのは, 同型の bit-flip pass パターン (i 外側 / k 内側,
 //! `mask = 1<<i` で stride を持つ走査) を共有するため. Phase 6 の cache
@@ -25,7 +25,7 @@
 //! (`feature = "rayon"`, default ON). 同じ chunk closure 内で diag pass + 全 i
 //! bit-flip pass を完走する **cache-blocked 形** を採用し, `y_chunk` を L1 cache
 //! resident に保つことで後段 SIMD (Phase 6 C2) / cache block-fusion (Phase 6 C3)
-//! の足場とする (`docs/design.md` §5.1.1 / §12 Phase 6). `--no-default-features`
+//! の足場とする (`docs/design/05-1-matvec.md` §5.1.1 / §12 Phase 6). `--no-default-features`
 //! ビルドでは scalar 単スレッド経路 (`*_serial`) が呼ばれ, 既存挙動を維持する.
 //!
 //! ## Thread pool 競合の注意 (rayon × BLAS)
@@ -149,7 +149,7 @@ const MIN_RAYON_DIM: usize = 1 << 17;
 /// # 高 i との直交性
 ///
 /// i ≥ 3 (stride ≥ 8) は load/store が cache line を跨ぐため SIMD vectorize の
-/// 利得が小さい (`docs/design.md` §12 Phase 6 C2). このカーネル群は i ≤ 2 のみ
+/// 利得が小さい (`docs/design/12-release-plan.md` §12 Phase 6 C2). このカーネル群は i ≤ 2 のみ
 /// 提供し, i ≥ 3 は呼び出し側 (`apply_h_kryanneal_serial` /
 /// `apply_h_kryanneal_rayon`) で scalar inner loop に fallback する.
 ///
@@ -1080,7 +1080,7 @@ fn apply_single_mode_axis_i_rayon(psi: &mut [Complex64], u: &[Complex64; 4], i: 
 ///
 /// `k = 6` は qsim の経験 (`max_fused_size = 4-5` 推奨, `lib/fuser_mqubit.h`)
 /// から十分大きい上限値. 内部 u_list 配列は `[[Complex64; 4]; 6]` = `192 B`
-/// で stack 確保に余裕で収まる (`docs/design.md` §5.1.3).
+/// で stack 確保に余裕で収まる (`docs/design/05-1-matvec.md` §5.1.3).
 pub(crate) const MAX_FUSED_K: usize = 6;
 
 /// `psi` の **連続** k qubit (i_start, i_start+1, ..., i_start+k-1) に
@@ -1288,7 +1288,7 @@ fn apply_fused_axes_to_chunk(chunk: &mut [Complex64], u_list: &[[Complex64; 4]],
 ///
 /// として呼ぶ. `u` は length 4 の `complex128` 配列 (row-major 2×2).
 /// Trotter 経路の Rust 内部呼出は `apply_single_mode_axis_i` を直接使うため,
-/// 本 wrap は **参照実装比較とテスト用** の公開 API である (`docs/design.md`
+/// 本 wrap は **参照実装比較とテスト用** の公開 API である (`docs/design/INDEX.md`
 /// §7.3).
 #[pyfunction]
 #[pyo3(signature = (psi, u, i, n))]
@@ -1338,7 +1338,7 @@ pub(crate) fn apply_single_mode_axis_i_py<'py>(
 /// として呼ぶ. サイト数 `n` は `len(h_x)`, 状態次元 `dim = 2^n` は
 /// `len(h_p_diag)` から取り出す. Lanczos / CFM4 内部呼出は Rust 側で
 /// 完結するため, 本関数は **参照実装比較とテスト用** の公開 API である
-/// (`docs/design.md` §7.3).
+/// (`docs/design/07-rust-extension.md` §7.3).
 #[pyfunction]
 #[pyo3(signature = (v, h_x, h_p_diag, a_t, b_t))]
 pub(crate) fn apply_h_kryanneal_py<'py>(

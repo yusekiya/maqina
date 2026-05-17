@@ -4,7 +4,7 @@
 //! 空間で構築する. 1 step あたりの主コストは `m` 回の matvec と
 //! Level-1 / Level-2 BLAS で, 部分空間内の `m × m` 実対称三重対角の完全
 //! 固有分解は `tridiag_eigh` (LAPACK 非依存, `src/tridiag.rs`) で行う.
-//! 詳細は `docs/design.md` §5.2, §7.1.
+//! 詳細は `docs/design/05-2-lanczos.md` §5.2, §7.1.
 //!
 //! 設計ポイント:
 //!
@@ -23,7 +23,7 @@
 //!   組む (BLAS ON では `zgemv`, OFF では axpy 相当の自前ループ).
 //!
 //! Phase 1 では本関数を Python に公開しない (`pub(crate)`). M2 / CFM4:2 が
-//! 上位で wrap した形で公開する (`docs/design.md` §5.3). 着地直後は内部
+//! 上位で wrap した形で公開する (`docs/design/05-3-propagator.md` §5.3). 着地直後は内部
 //! caller がいないため `dead_code` lint を許容する.
 
 #![allow(dead_code)]

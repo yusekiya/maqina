@@ -99,7 +99,7 @@ def _resolve_dt_init_auto(t0: float, t1: float) -> float:
     ``dt_max >= dt0`` の自然性を保つ).
 
     issue #43 A の motivation: 線形 schedule では Magnus 級数の T
-    スケーリング (s-space scaling invariance, ``docs/design.md`` §5.3)
+    スケーリング (s-space scaling invariance, ``docs/design/05-3-propagator.md`` §5.3)
     から最適 dt が T 依存で伸びるため, ``dt_init`` を T 依存に取れば
     PI controller の warmup step (default ``0.5`` → optimal dt への成長)
     を削減できる. 既定 ``c=0.1``, ``β=0.5`` は理論最適 ``β=0.75`` より

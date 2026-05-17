@@ -1,6 +1,6 @@
 """観測量 ``Observable`` (Z 基底対角 Hermitian 演算子).
 
-設計詳細は ``docs/design.md`` §4.6 を参照. Z 基底で対角な Hermitian
+設計詳細は ``docs/design/04-python-api.md`` §4.6 を参照. Z 基底で対角な Hermitian
 演算子のみを対象とするため, 期待値 ``<ψ|O|ψ> = Σ_k diag[k] · |ψ[k]|^2``
 は実数で, dot product 1 回で計算できる. X / Y 期待値は ψ への bit-flip
 を経由するため遅く, アニーリングのユースケースでは稀, という理由で

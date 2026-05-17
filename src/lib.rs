@@ -12,11 +12,11 @@
 //! Phase 3 で `cfm4_step` を追加:
 //!   - CFM4:2 commutator-free Magnus (Alvermann-Fehske 2011, 2 stage)
 //!   - 線形結合 callback 形式 (各 stage の `(c_drv, c_diag)` を畳み込んで
-//!     既存 `apply_h_kryanneal` を再利用; `docs/design.md` §5.2 末尾)
+//!     既存 `apply_h_kryanneal` を再利用; `docs/design/05-2-lanczos.md` §5.2 末尾)
 //!
 //! Phase 4 で `cfm4_step_with_m2_estimate` (M2 embedded error 推定子) と
 //! `cfm4_step_with_richardson_estimate` (step-doubling Richardson 推定子) を追加.
-//! いずれも `docs/design.md` §5 に詳述.
+//! いずれも `docs/design/INDEX.md` §5 に詳述.
 //!
 //! BLAS feature 経由で `lanczos_propagate` 内の dim 依存 ops を CBLAS に
 //! ディスパッチ (macOS = Apple Accelerate, Linux = system OpenBLAS).
