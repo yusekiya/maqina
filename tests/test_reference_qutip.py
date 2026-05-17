@@ -11,32 +11,37 @@ issue #8 / #21 / #65 acceptance:
     Strang 2 次は M2 と同じ ``O(dt^3)`` LTE オーダだが, 係数 / 中点採取の
     対称性誤差で ``1e-6`` までは届かないので ``1e-4`` 設定 (issue #21).
 
-* 大規模 (n=12-16, issue #65 Phase 6 C4) で QuTiP ``sesolve`` を sparse
-  Hamiltonian 経路 (dense 2^n × 2^n がメモリに乗らない n=15-16 領域) で
-  ground truth として 4 method (m2 / trotter / cfm4 / cfm4_adaptive_richardson)
-  と比較する.
+* 大規模 (n=12-16, issue #65 Phase 6 C4) で QuTiP ``sesolve`` を ground truth
+  として 4 method (m2 / trotter / cfm4 / cfm4_adaptive_richardson) と比較する.
 
   * 固定 dt (m2 / trotter / cfm4): ``n=12-14``, fidelity ``> 1 - 1e-6``.
   * adaptive (cfm4_adaptive_richardson): ``n=12-16``, fidelity ``> 1 - 1e-6``
     (atol=1e-8 で局所誤差を絞った設定).
 
   ``n >= 14`` は ``@pytest.mark.slow`` で除外可能 (CI fast loop 用).
-  ``n=15-16`` は dense Hamiltonian がメモリに乗らないため必ず sparse 経路
-  (``sigmax`` の tensor 和) で構築する.
+
+QuTiP Hamiltonian は **常に sparse 構築** (``qutip.tensor`` of ``sigmax``) を使う.
+QuTiP の Qobj は dense / CSR の data backing を持ち得るが, TFIM の構造では
+``H_drv = -Σ_i h_x_i X_i`` の non-zero が ``n · 2^n`` しかなく, dense 表現
+(``dim^2 = 2^{2n}`` 要素) を取る理由が全く無い. 全 n で sparse 構築すれば
+``sesolve`` 内部の matvec が常に sparse 経路 (≈ ``(n+1)·dim`` flops/step) で
+走り, 数値精度は dense 経路と完全一致のまま wall time を最小化できる
+(dense backing の n=12 で 18.6s だったセルが sparse で <1s レベルになる).
+QuTiP との比較で kryanneal だけが有利になる, という偏ったベンチを避ける
+ための判断 (issue #65 review コメント).
 
 QuTiP は dev 依存のみで本番 wheel には入れない契約
 (``docs/design/08-qutip-comparison.md`` §8). 拡張未ビルド or QuTiP 未 install の
 環境では ``pytest.importorskip`` で skip する.
 
-ビット規約変換ノート (n=12+ の sparse 経路で重要):
+ビット規約変換ノート (sparse 経路の根幹):
 
 * kryanneal: bit 0 = LSB, ``x = Σ_i b_i · 2^i``. X_i は bit i を flip.
 * QuTiP: ``qutip.tensor([A_0, A_1, ..., A_{n-1}])`` は ``np.kron`` 順に積み,
   最初の引数 ``A_0`` が **MSB 側** (最も "遅い" qubit) に対応する.
 * したがって kryanneal の bit i に X を作用させるには
   ``qutip.tensor([I, ..., X, ..., I])`` の **位置 ``n-1-i``** に sx を入れる.
-  これにより既存 dense 経路 (``h_drv[k, k ^ (1 << i)] += -h_x[i]``) と数値
-  一致する.
+  これにより kryanneal の bit-flip pattern (``k ^ (1 << i)``) と数値一致する.
 """
 
 from __future__ import annotations
@@ -52,56 +57,25 @@ qutip = pytest.importorskip("qutip")
 
 
 # ---------------------------------------------------------------------------
-# Hamiltonian builders (dense / sparse)
+# Hamiltonian builder (常に sparse; モジュール docstring の判断根拠参照)
 # ---------------------------------------------------------------------------
 
 
 def _build_qutip_hamiltonian(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) -> list:
-    """QuTiP ``sesolve`` 用 ``H(t) = [[H_drv, A(t)], [H_p, B(t)]]`` を **dense** で組む.
+    """QuTiP ``sesolve`` 用 ``H(t) = [[H_drv, A(t)], [H_p, B(t)]]`` を sparse で組む.
 
     linear schedule (``A(s) = 1 - s``, ``B(s) = s``, ``s = t/T``) を前提.
-    ``H_drv``, ``H_p`` を dense ``Qobj`` として構築する. n が小さい
-    (n <= ~10) ときに使う. n >= 12 では ``_build_qutip_hamiltonian_sparse``
-    に切り替える (n=15 で dense は 16 GB / n=16 で 64 GB を要する).
-    """
-    n = h_x.shape[0]
-    dim = 1 << n
-
-    h_drv = np.zeros((dim, dim), dtype=np.complex128)
-    for i in range(n):
-        mask = 1 << i
-        for k in range(dim):
-            h_drv[k, k ^ mask] += -h_x[i]
-    h_p = np.diag(h_p_diag).astype(np.complex128)
-
-    # dims=[[2]*n, [2]*n] を明示して付ける. sparse 経路 (qutip.tensor 経由) は
-    # 自動で tensor product dims が付くが, dense 経路で何も指定しないと
-    # flat dims ([[dim], [dim]]) になり psi0 (`dims=[[2]*n, [1]*n]`) と sesolve
-    # 側で型不整合になる. dense / sparse 両経路で同じ dims に統一して
-    # ``_qutip_sesolve_final`` の psi0 構築側と整合させる.
-    dims = [[2] * n, [2] * n]
-    h_drv_q = qutip.Qobj(h_drv, dims=dims)
-    h_p_q = qutip.Qobj(h_p, dims=dims)
-    return [
-        [h_drv_q, f"(1 - t/{T})"],
-        [h_p_q, f"(t/{T})"],
-    ]
-
-
-def _build_qutip_hamiltonian_sparse(
-    h_x: np.ndarray, h_p_diag: np.ndarray, T: float
-) -> list:
-    """QuTiP ``sesolve`` 用 ``H(t) = [[H_drv, A(t)], [H_p, B(t)]]`` を **sparse** で組む.
-
     ``H_drv = -Σ_i h_x[i] X_i`` を ``qutip.tensor`` (``np.kron``) ベースで
-    sparse 構築. kryanneal の LSB bit 規約と QuTiP の MSB-first tensor 規約
-    の差を吸収するため, X は tensor list の位置 ``n-1-i`` に挿入する
-    (モジュール docstring の規約変換ノート参照).
+    sparse (CSR backing) 構築する. kryanneal の LSB bit 規約と QuTiP の
+    MSB-first tensor 規約の差を吸収するため, X は tensor list の位置
+    ``n-1-i`` に挿入する (モジュール docstring の規約変換ノート参照).
 
     ``H_p`` は対角なので ``qutip.qdiags`` で sparse 構築する.
 
-    n >= 12 の large 比較 (issue #65) で使う. n=16 (dim=65536) でも
-    sparse non-zero は ~1M 程度なので memory に余裕がある.
+    n=4 から n=16 まで同じ経路で構築する: dense backing にする利得が無く
+    (TFIM の H_drv は non-zero が ``n · 2^n`` しかない), 比較対象として
+    QuTiP を不利な dense matvec に走らせる理由がないため (issue #65 review
+    コメントで dense backing を廃止).
     """
     n = h_x.shape[0]
     sx = qutip.sigmax()
@@ -226,24 +200,6 @@ def test_quantum_annealer_trotter_matches_qutip_sesolve() -> None:
 # 大規模 (n=12-16) end-to-end tests (issue #65 Phase 6 C4)
 # ---------------------------------------------------------------------------
 
-# n=12 / 13 は dense でも数十 MB 級 (n=13 で 128 MB) なので dense 経路で OK.
-# n=14 (256 MB) も dense に乗るが時間がかかる. n=15 (16 GB) / 16 (64 GB) は
-# dense 不可なので必ず sparse 経路.
-_DENSE_THRESHOLD_N: int = 13
-
-
-def _qutip_hamiltonian_auto(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) -> list:
-    """n に応じて dense / sparse 構築を自動切り替えする helper.
-
-    ``n <= _DENSE_THRESHOLD_N`` で dense, それ以上で sparse. dense / sparse
-    どちらも数値的に同じ Hamiltonian を表すので fidelity 比較結果は
-    一致する (sparse の inner solver も dense と同じ CVODE/LSODA を使う).
-    """
-    n = h_x.shape[0]
-    if n <= _DENSE_THRESHOLD_N:
-        return _build_qutip_hamiltonian(h_x, h_p_diag, T)
-    return _build_qutip_hamiltonian_sparse(h_x, h_p_diag, T)
-
 
 def _make_random_problem(
     n: int, seed: int
@@ -275,8 +231,8 @@ _LARGE_ADAPTIVE_N: tuple[tuple[int, bool], ...] = (
     (12, False),
     (13, False),
     (14, True),  # slow
-    (15, True),  # slow + sparse-only
-    (16, True),  # slow + sparse-only
+    (15, True),  # slow
+    (16, True),  # slow
 )
 
 # 固定 dt 経路の n_steps. T=1.0 で n_steps=200 → dt=5e-3. M2 / CFM4 の
@@ -326,8 +282,8 @@ def test_quantum_annealer_large_n_matches_qutip_fixed_dt(n: int, method: str) ->
     fidelity 閾値: ``1 - 1e-6`` (smooth linear schedule, n_steps=200).
     sample 入力は ``_make_random_problem`` で seed 固定.
 
-    n=12 / 13 は dense Hamiltonian で QuTiP に渡し, n=14 は dense 256 MB
-    級なので sparse 経路に切り替える (auto helper ``_qutip_hamiltonian_auto``).
+    QuTiP Hamiltonian は ``_build_qutip_hamiltonian`` で常に sparse 構築
+    (モジュール docstring の判断根拠参照).
     """
     prob, sched, psi0, T = _make_random_problem(n, seed=20260517 + n)
 
@@ -340,7 +296,7 @@ def test_quantum_annealer_large_n_matches_qutip_fixed_dt(n: int, method: str) ->
         n_steps=_LARGE_FIXED_N_STEPS,
     )
 
-    h_t = _qutip_hamiltonian_auto(prob.h_x, prob.H_p_diag, T)
+    h_t = _build_qutip_hamiltonian(prob.h_x, prob.H_p_diag, T)
     psi_qutip = _qutip_sesolve_final(h_t, psi0, T, n)
 
     fid = _fidelity(res.psi_final, psi_qutip)
@@ -372,7 +328,7 @@ def test_quantum_annealer_large_n_matches_qutip_trotter(n: int) -> None:
     ann = QuantumAnnealer(prob, sched)
     res = ann.run(psi0, 0.0, T, method="trotter", n_steps=_LARGE_FIXED_N_STEPS)
 
-    h_t = _qutip_hamiltonian_auto(prob.h_x, prob.H_p_diag, T)
+    h_t = _build_qutip_hamiltonian(prob.h_x, prob.H_p_diag, T)
     psi_qutip = _qutip_sesolve_final(h_t, psi0, T, n)
 
     fid = _fidelity(res.psi_final, psi_qutip)
@@ -398,11 +354,10 @@ def test_quantum_annealer_large_n_matches_qutip_adaptive(n: int) -> None:
     PI controller atol=1e-8 で局所誤差を絞り, fidelity ``> 1 - 1e-6`` を
     要求する (issue #65 acceptance).
 
-    n=15-16 では dense 2^n × 2^n が GB 級になるため sparse 経路を使う
-    (auto helper). adaptive 経路は dt 履歴が問題ごとに変わるが, atol=1e-8
-    は十分小さく PI が許容する最大 dt も Lanczos capacity (``4m / ‖H‖``)
-    を超えないため安定して高精度. 実行時間は QuTiP sesolve 側が支配 (大 n
-    で minutes オーダ).
+    adaptive 経路は dt 履歴が問題ごとに変わるが, atol=1e-8 は十分小さく
+    PI が許容する最大 dt も Lanczos capacity (``4m / ‖H‖``) を超えないため
+    安定して高精度. QuTiP Hamiltonian は ``_build_qutip_hamiltonian``
+    で sparse 構築する (n=15-16 を含め全 n で同じ経路).
     """
     prob, sched, psi0, T = _make_random_problem(n, seed=20260517 + n)
 
@@ -415,7 +370,7 @@ def test_quantum_annealer_large_n_matches_qutip_adaptive(n: int) -> None:
         atol=1e-8,
     )
 
-    h_t = _qutip_hamiltonian_auto(prob.h_x, prob.H_p_diag, T)
+    h_t = _build_qutip_hamiltonian(prob.h_x, prob.H_p_diag, T)
     psi_qutip = _qutip_sesolve_final(h_t, psi0, T, n)
 
     fid = _fidelity(res.psi_final, psi_qutip)

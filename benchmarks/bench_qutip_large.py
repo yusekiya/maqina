@@ -13,6 +13,14 @@
   事後計算で済むため, **状態取得と wall time 測定を同じ run で同時に行う**
   (issue #65 user 指示: 不要な計算反復を避ける).
 
+* **QuTiP Hamiltonian は常に sparse 構築**: ``qutip.tensor`` of ``sigmax`` の
+  和で CSR backing にする (``_build_qutip_hamiltonian``). 旧版は n=13 で
+  dense / sparse 切替していたが, dense backing は dim^2 メモリ + dim^2 matvec
+  という TFIM 構造に対して明らかに無駄 (non-zero は ``n · 2^n`` しかない).
+  比較対象 QuTiP を不必要に遅くしないよう全 n で sparse 固定 (issue #65 review
+  コメント). 旧 dense backing で n=12 が 18.6s だったセルは sparse で <1s
+  レベル.
+
 レポート: ``benchmarks/results/<YYYYMMDD-HHMMSS>/`` に以下を吐く.
 
 * ``bench_qutip_large.csv``: per-cell raw data (n, solver, dt, n_steps,
@@ -67,11 +75,6 @@ except ImportError as exc:  # pragma: no cover - dev dep 必須
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "benchmarks" / "results"
 
-# Hamiltonian 構築閾値. n <= _DENSE_THRESHOLD_N は dense, それ以上は sparse
-# (``qutip.tensor`` of sigmax 経路). dense 2^n × 2^n は n=14 で 256 MB,
-# n=15 で 1 GB, n=16 で 4 GB と急増するため n>=14 から sparse に切り替える.
-_DENSE_THRESHOLD_N: int = 13
-
 # 比較対象 solver. ``qutip`` は QuTiP sesolve, それ以外は kryanneal の固定 dt
 # 経路. adaptive Richardson は dt 指定が無いため本 dt-sweep 構造に乗らない
 # (PI 制御の dt は動的決定). 固定 dt 経路の m2 / trotter / cfm4 で十分.
@@ -79,48 +82,24 @@ _VALID_SOLVERS: tuple[str, ...] = ("qutip", "m2", "trotter", "cfm4")
 
 
 # ---------------------------------------------------------------------------
-# Hamiltonian builders
+# Hamiltonian builder (常に sparse; フェアな比較のための判断)
 # ---------------------------------------------------------------------------
 
 
-def _build_qutip_hamiltonian_dense(
-    h_x: np.ndarray, h_p_diag: np.ndarray, T: float
-) -> list:
-    """QuTiP ``sesolve`` 用 ``[[H_drv, A(t)], [H_p, B(t)]]`` を dense で組む.
+def _build_qutip_hamiltonian(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) -> list:
+    """QuTiP ``sesolve`` 用 ``[[H_drv, A(t)], [H_p, B(t)]]`` を sparse で組む.
 
-    linear schedule (``A(s) = 1 - s``, ``B(s) = s``, ``s = t/T``) を前提.
-    n <= ``_DENSE_THRESHOLD_N`` 向け. kryanneal の dense bit-flip pattern と
-    bit-identical な行列を生成するため, ``h_drv[k, k ^ (1 << i)] += -h_x[i]``
-    のループで直接行列要素を埋める.
-    """
-    n = h_x.shape[0]
-    dim = 1 << n
-    h_drv = np.zeros((dim, dim), dtype=np.complex128)
-    for i in range(n):
-        mask = 1 << i
-        for k in range(dim):
-            h_drv[k, k ^ mask] += -h_x[i]
-    h_p = np.diag(h_p_diag).astype(np.complex128)
-    # dims=[[2]*n, [2]*n] を明示する. sparse 経路 (qutip.tensor) は自動で
-    # tensor product dims を持つので, dense 経路もこれに揃えて psi0
-    # (`dims=[[2]*n, [1]*n]`) と sesolve の型整合を取る. dims を省略すると
-    # flat dims ([[dim], [dim]]) になり sparse Hamiltonian と統一できない.
-    dims = [[2] * n, [2] * n]
-    return [
-        [qutip.Qobj(h_drv, dims=dims), f"(1 - t/{T})"],
-        [qutip.Qobj(h_p, dims=dims), f"(t/{T})"],
-    ]
+    ``H_drv = -Σ_i h_x[i] X_i`` を ``qutip.tensor`` (kron) ベースで CSR sparse
+    構築. kryanneal の LSB bit 規約と QuTiP の MSB-first tensor 規約の差を
+    吸収するため X は tensor list の位置 ``n-1-i`` に挿入する
+    (``tests/test_reference_qutip.py`` と同じ規約変換).
 
-
-def _build_qutip_hamiltonian_sparse(
-    h_x: np.ndarray, h_p_diag: np.ndarray, T: float
-) -> list:
-    """QuTiP ``sesolve`` 用 Hamiltonian を sparse で組む.
-
-    ``H_drv = -Σ_i h_x[i] X_i`` を ``qutip.tensor`` (kron) ベースで sparse 構築.
-    kryanneal の LSB bit 規約と QuTiP の MSB-first tensor 規約の差を吸収する
-    ため X は tensor list の位置 ``n-1-i`` に挿入する (``tests/test_reference_qutip.py``
-    と同じ規約変換).
+    全 n で sparse 経路に固定する: dense backing にする理由が無い
+    (TFIM の H_drv は non-zero が ``n · 2^n`` しかないので dim^2 dense は無駄,
+    かつ比較対象 QuTiP の matvec を不必要に遅くすると bench がフェアでなくなる).
+    旧版の ``_DENSE_THRESHOLD_N`` ベース dense/sparse 切替は issue #65 レビューで
+    廃止 (dense backing の n=12 で 18.6s だったセルが sparse で <1s レベルに
+    落ちることを確認済み).
     """
     n = h_x.shape[0]
     sx = qutip.sigmax()
@@ -136,15 +115,6 @@ def _build_qutip_hamiltonian_sparse(
         [h_drv, f"(1 - t/{T})"],
         [h_p, f"(t/{T})"],
     ]
-
-
-def _build_qutip_hamiltonian_auto(
-    h_x: np.ndarray, h_p_diag: np.ndarray, T: float, n: int
-) -> list:
-    """n に応じて dense / sparse 構築を自動切り替えする."""
-    if n <= _DENSE_THRESHOLD_N:
-        return _build_qutip_hamiltonian_dense(h_x, h_p_diag, T)
-    return _build_qutip_hamiltonian_sparse(h_x, h_p_diag, T)
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +254,7 @@ def _sweep_one_n(
     # Hamiltonian 構築. qutip cell を 1 つでも回すなら必要.
     h_t: list | None = None
     if "qutip" in solvers:
-        h_t = _build_qutip_hamiltonian_auto(h_x, h_p_diag, T, n)
+        h_t = _build_qutip_hamiltonian(h_x, h_p_diag, T)
 
     records: list[_CellRecord] = []
     for dt in dt_list:
