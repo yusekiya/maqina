@@ -1276,11 +1276,37 @@ fn apply_fused_axes_to_chunk(chunk: &mut [Complex64], u_list: &[[Complex64; 4]],
     }
 }
 
-/// `apply_single_mode_axis_i` の Python wrap. 結果を新規 array で返す
-/// (in-place ではなく allocate-and-return パターン. `apply_h_kryanneal_py`
-/// と統一).
+/// `apply_single_mode_axis_i_py` / `apply_single_mode_axis_i_inplace_py` の
+/// 共通 shape 検査. `(dim, u_arr)` を返す.
+fn validate_apply_single_mode_axis_i_shapes(
+    psi_len: usize,
+    u_slice: &[Complex64],
+    i: usize,
+    n: usize,
+) -> PyResult<(usize, [Complex64; 4])> {
+    let dim = 1usize << n;
+    if psi_len != dim {
+        return Err(PyValueError::new_err(format!(
+            "psi length {} does not match 2^n = 2^{} = {}",
+            psi_len, n, dim,
+        )));
+    }
+    if u_slice.len() != 4 {
+        return Err(PyValueError::new_err(format!(
+            "u must be a length-4 row-major 2x2 matrix, got length {}",
+            u_slice.len(),
+        )));
+    }
+    if i >= n {
+        return Err(PyValueError::new_err(format!("i={} must be < n={}", i, n,)));
+    }
+    let u_arr: [Complex64; 4] = [u_slice[0], u_slice[1], u_slice[2], u_slice[3]];
+    Ok((dim, u_arr))
+}
+
+/// `apply_single_mode_axis_i` の Python wrap (allocate-and-return).
 ///
-/// Python 側 (C3 で `_rust.apply_single_mode_axis_i_py` として登録予定) は
+/// Python 側 (`_rust.apply_single_mode_axis_i_py`) は
 ///
 /// ```python
 /// psi_new = _rust.apply_single_mode_axis_i_py(psi, u, i, n)
@@ -1290,6 +1316,12 @@ fn apply_fused_axes_to_chunk(chunk: &mut [Complex64], u_list: &[[Complex64; 4]],
 /// Trotter 経路の Rust 内部呼出は `apply_single_mode_axis_i` を直接使うため,
 /// 本 wrap は **参照実装比較とテスト用** の公開 API である (`docs/design/INDEX.md`
 /// §7.3).
+///
+/// **性能を出したい Python 側ループからは [`apply_single_mode_axis_i_inplace_py`]
+/// (in-place 版) を使うこと**: 本関数は呼び出しごとに `dim · 16 B` の
+/// `complex128` array を新規 allocate するため, per-axis loop を Python 側で
+/// 回す bench (`bench_simd_scaling.py` / `bench_parallel_scaling.py`) 等で
+/// alloc/copy overhead が SIMD / 並列化の効果を覆い隠す (issue #79 / #86).
 #[pyfunction]
 #[pyo3(signature = (psi, u, i, n))]
 pub(crate) fn apply_single_mode_axis_i_py<'py>(
@@ -1302,29 +1334,44 @@ pub(crate) fn apply_single_mode_axis_i_py<'py>(
     let psi_slice = psi.as_slice()?;
     let u_slice = u.as_slice()?;
 
-    let dim = 1usize << n;
-    if psi_slice.len() != dim {
-        return Err(PyValueError::new_err(format!(
-            "psi length {} does not match 2^n = 2^{} = {}",
-            psi_slice.len(),
-            n,
-            dim,
-        )));
-    }
-    if u_slice.len() != 4 {
-        return Err(PyValueError::new_err(format!(
-            "u must be a length-4 row-major 2x2 matrix, got length {}",
-            u_slice.len(),
-        )));
-    }
-    if i >= n {
-        return Err(PyValueError::new_err(format!("i={} must be < n={}", i, n,)));
-    }
+    let (_dim, u_arr) = validate_apply_single_mode_axis_i_shapes(psi_slice.len(), u_slice, i, n)?;
 
-    let u_arr: [Complex64; 4] = [u_slice[0], u_slice[1], u_slice[2], u_slice[3]];
     let mut out: Vec<Complex64> = psi_slice.to_vec();
     apply_single_mode_axis_i(&mut out, &u_arr, i, n);
     Ok(out.into_pyarray(py))
+}
+
+/// `apply_single_mode_axis_i` の Python wrap (in-place 版). `psi` を caller
+/// 側 array に **直接 in-place で** `R_i(u) · psi` で上書きする (戻り値 `None`).
+///
+/// Python 側 (`_rust.apply_single_mode_axis_i_inplace_py`) は
+///
+/// ```python
+/// psi = np.ascontiguousarray(psi0, dtype=np.complex128)  # ループ外で 1 回確保
+/// for i in range(n):
+///     _rust.apply_single_mode_axis_i_inplace_py(psi, u, i, n)
+///     # psi が in-place 更新される
+/// ```
+///
+/// として呼ぶ. `apply_single_mode_axis_i_py` と同じ shape 検査を行い, 不整合
+/// は `PyValueError`. 主な call site: `benchmarks/bench_simd_scaling.py`,
+/// `benchmarks/bench_parallel_scaling.py` (per-axis loop の計測内 alloc 排除).
+/// 詳細は `docs/design/07-rust-extension.md` §7.3.
+#[pyfunction]
+#[pyo3(signature = (psi, u, i, n))]
+pub(crate) fn apply_single_mode_axis_i_inplace_py<'py>(
+    mut psi: PyReadwriteArray1<'py, Complex64>,
+    u: PyReadonlyArray1<'py, Complex64>,
+    i: usize,
+    n: usize,
+) -> PyResult<()> {
+    let u_slice = u.as_slice()?;
+    let psi_slice = psi.as_slice_mut()?;
+
+    let (_dim, u_arr) = validate_apply_single_mode_axis_i_shapes(psi_slice.len(), u_slice, i, n)?;
+
+    apply_single_mode_axis_i(psi_slice, &u_arr, i, n);
+    Ok(())
 }
 
 /// `apply_h_kryanneal` の Python 入口で共通する shape 検査.

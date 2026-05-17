@@ -407,3 +407,64 @@ def test_python_trotter_suzuki4_more_accurate_than_strang() -> None:
         f"expected S_4 to be more accurate than Strang, but err_strang / err_s4 = {ratio} "
         f"(err_strang = {err_strang}, err_s4 = {err_s4})"
     )
+
+
+@pytest.mark.skipif(not _HAS_RUST, reason="kryanneal._rust extension not built")
+@pytest.mark.parametrize("n", [2, 3, 4, 5])
+@pytest.mark.parametrize("seed", [11, 137, 8675309])
+def test_trotter_step_inplace_py_matches_alloc_variant_bitwise(
+    n: int, seed: int
+) -> None:
+    """``trotter_step_inplace_py`` の結果が ``trotter_step_py`` と
+    **bit-for-bit** 一致する (issue #86).
+
+    両者は内部で同じ ``trotter_step`` を呼ぶので, ``psi`` を新規 alloc して
+    返すか caller 提供の buffer を in-place 上書きするかが唯一の違い.
+    演算順序は完全に同一なので bit-identical を期待する.
+    """
+    assert _rust_mod is not None
+    h_x, h_p_diag, psi, a_mid, b_mid = _random_setup(n, seed)
+    dt = 0.17
+
+    psi_alloc = _rust_mod.trotter_step_py(psi, h_x, h_p_diag, a_mid, b_mid, dt, n)
+
+    psi_inplace = psi.copy()
+    ret = _rust_mod.trotter_step_inplace_py(
+        psi_inplace, h_x, h_p_diag, a_mid, b_mid, dt, n
+    )
+    assert ret is None
+    assert np.array_equal(psi_inplace, psi_alloc), (
+        f"n={n}, seed={seed}: in-place / alloc が bitwise 一致しない: "
+        f"max abs diff = {np.max(np.abs(psi_inplace - psi_alloc))}"
+    )
+
+
+@pytest.mark.skipif(not _HAS_RUST, reason="kryanneal._rust extension not built")
+@pytest.mark.parametrize("n", [2, 3, 4, 5])
+@pytest.mark.parametrize("seed", [11, 137, 8675309])
+def test_trotter_suzuki4_step_inplace_py_matches_alloc_variant_bitwise(
+    n: int, seed: int
+) -> None:
+    """``trotter_suzuki4_step_inplace_py`` の結果が ``trotter_suzuki4_step_py``
+    と **bit-for-bit** 一致する (issue #86).
+    """
+    assert _rust_mod is not None
+    h_x, h_p_diag, psi, _, _ = _random_setup(n, seed)
+    rng = np.random.default_rng(seed + 1)
+    a_list = rng.uniform(-1.0, 1.0, size=5).astype(np.float64)
+    b_list = rng.uniform(-1.0, 1.0, size=5).astype(np.float64)
+    dt = 0.17
+
+    psi_alloc = _rust_mod.trotter_suzuki4_step_py(
+        psi, h_x, h_p_diag, a_list, b_list, dt, n
+    )
+
+    psi_inplace = psi.copy()
+    ret = _rust_mod.trotter_suzuki4_step_inplace_py(
+        psi_inplace, h_x, h_p_diag, a_list, b_list, dt, n
+    )
+    assert ret is None
+    assert np.array_equal(psi_inplace, psi_alloc), (
+        f"suzuki4: n={n}, seed={seed}: in-place / alloc が bitwise 一致しない: "
+        f"max abs diff = {np.max(np.abs(psi_inplace - psi_alloc))}"
+    )

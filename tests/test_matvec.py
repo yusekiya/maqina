@@ -236,3 +236,76 @@ def test_apply_single_mode_axis_i_py_simd_path_smoke(i: int) -> None:
     assert isinstance(psi_actual, np.ndarray)
     assert psi_actual.shape == (dim,)
     assert psi_actual.dtype == np.complex128
+
+
+def test_apply_single_mode_axis_i_inplace_py_matches_alloc_variant_bitwise() -> None:
+    """``apply_single_mode_axis_i_inplace_py`` の結果が
+    ``apply_single_mode_axis_i_py`` と **bit-for-bit** 一致する (issue #86).
+
+    両者は内部で同じ ``apply_single_mode_axis_i`` を呼ぶので, ``psi`` を
+    新規 alloc して返すか caller 提供の buffer を in-place 上書きするかが
+    唯一の違い. 演算順序は同一なので bit-identical を期待する.
+
+    SIMD path を踏みやすいよう n=5 (i ∈ {0,1,2} の SIMD block ≤ dim) で
+    実施し, axis i は 0, 1, 2 を sweep する.
+    """
+    _rust = pytest.importorskip("kryanneal._rust")
+
+    n = 5
+    dim = 1 << n
+    for i in (0, 1, 2, 3, 4):
+        rng = np.random.default_rng(20260601 ^ (i << 8))
+        psi0 = (
+            rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)
+        ).astype(np.complex128)
+        u = (
+            rng.uniform(-1.0, 1.0, size=4) + 1j * rng.uniform(-1.0, 1.0, size=4)
+        ).astype(np.complex128)
+
+        psi_alloc = _rust.apply_single_mode_axis_i_py(psi0, u, i, n)
+
+        psi_inplace = psi0.copy()
+        ret = _rust.apply_single_mode_axis_i_inplace_py(psi_inplace, u, i, n)
+        assert ret is None  # PyResult<()> は Python では None.
+
+        assert np.array_equal(psi_inplace, psi_alloc), (
+            f"i={i} in-place / alloc 変種が bitwise 一致しない: "
+            f"max abs diff = {np.max(np.abs(psi_inplace - psi_alloc))}"
+        )
+        # psi0 が破壊されていないことの確認 (alloc 変種の contract と整合).
+        assert not np.array_equal(psi0, psi_inplace), (
+            f"psi0 が in-place 経路で書き換わってしまった (i={i})"
+        )
+
+
+def test_apply_single_mode_axis_i_inplace_py_rejects_wrong_shape() -> None:
+    """``apply_single_mode_axis_i_inplace_py`` の境界チェック.
+
+    ``psi`` の長さが ``2^n`` と不一致 / ``u`` 長さが 4 でない / ``i >= n`` で
+    ``ValueError`` (alloc 変種と同じ shape 検査ヘルパを共有する).
+    """
+    _rust = pytest.importorskip("kryanneal._rust")
+
+    n = 3
+    dim = 1 << n
+    rng = np.random.default_rng(20260601)
+    psi = (
+        rng.uniform(-1.0, 1.0, size=dim) + 1j * rng.uniform(-1.0, 1.0, size=dim)
+    ).astype(np.complex128)
+    u = (rng.uniform(-1.0, 1.0, size=4) + 1j * rng.uniform(-1.0, 1.0, size=4)).astype(
+        np.complex128
+    )
+
+    # psi 長さ違い.
+    psi_wrong = np.empty(dim + 1, dtype=np.complex128)
+    with pytest.raises(ValueError, match="psi length"):
+        _rust.apply_single_mode_axis_i_inplace_py(psi_wrong, u, 0, n)
+
+    # u 長さ違い.
+    u_wrong = np.empty(3, dtype=np.complex128)
+    with pytest.raises(ValueError, match="length-4"):
+        _rust.apply_single_mode_axis_i_inplace_py(psi, u_wrong, 0, n)
+
+    # i >= n.
+    with pytest.raises(ValueError, match="must be < n"):
+        _rust.apply_single_mode_axis_i_inplace_py(psi, u, n, n)

@@ -63,7 +63,7 @@
 #![allow(dead_code)]
 
 use num_complex::Complex64;
-use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
+use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1, PyReadwriteArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -230,9 +230,38 @@ pub(crate) fn trotter_step(
     apply_phase_p(psi, h_p_diag, b_t, half);
 }
 
-/// `trotter_step` の Python wrap. 結果を新規 array で返す (in-place ではなく
-/// allocate-and-return パターン; `apply_h_kryanneal_py` / `m2_midpoint_step_py`
-/// / `apply_single_mode_axis_i_py` と統一).
+/// `trotter_step_py` / `trotter_step_inplace_py` / `trotter_suzuki4_*_py` で
+/// 共有する shape 検査. `psi.len() == 2^n`, `h_x.len() == n`,
+/// `h_p_diag.len() == 2^n` を確認する.
+fn validate_trotter_shapes(
+    psi_len: usize,
+    h_x_len: usize,
+    h_p_diag_len: usize,
+    n: usize,
+) -> PyResult<()> {
+    let dim = 1usize << n;
+    if psi_len != dim {
+        return Err(PyValueError::new_err(format!(
+            "psi length {} does not match 2^n = 2^{} = {}",
+            psi_len, n, dim,
+        )));
+    }
+    if h_x_len != n {
+        return Err(PyValueError::new_err(format!(
+            "h_x length {} does not match n = {}",
+            h_x_len, n,
+        )));
+    }
+    if h_p_diag_len != dim {
+        return Err(PyValueError::new_err(format!(
+            "h_p_diag length {} does not match 2^n = {}",
+            h_p_diag_len, dim,
+        )));
+    }
+    Ok(())
+}
+
+/// `trotter_step` の Python wrap (allocate-and-return).
 ///
 /// Python 側 (`_rust.trotter_step_py`) からは
 ///
@@ -243,6 +272,12 @@ pub(crate) fn trotter_step(
 /// として呼ぶ. Trotter 経路の固定 dt ドライバが内部的に呼び出す Rust 経路は
 /// `trotter_step` を直接使うため, 本 wrap は **参照実装比較とテスト用** の
 /// 公開 API である (`docs/design/07-rust-extension.md` §7.3).
+///
+/// **性能を出したい Python 側 step loop からは [`trotter_step_inplace_py`]
+/// (in-place 版) を使うこと**: 本関数は呼び出しごとに `dim · 16 B` の
+/// `complex128` array を新規 allocate するため, step 数 × repeat 回数で
+/// alloc/copy overhead が Rust 側 micro-optimization の効果を覆い隠す
+/// (issue #79 / #86 で確認済み).
 #[pyfunction]
 #[pyo3(signature = (psi, h_x, h_p_diag, a_t, b_t, dt, n))]
 #[allow(clippy::too_many_arguments)]
@@ -260,33 +295,50 @@ pub(crate) fn trotter_step_py<'py>(
     let h_x_slice = h_x.as_slice()?;
     let h_p_diag_slice = h_p_diag.as_slice()?;
 
-    let dim = 1usize << n;
-    if psi_slice.len() != dim {
-        return Err(PyValueError::new_err(format!(
-            "psi length {} does not match 2^n = 2^{} = {}",
-            psi_slice.len(),
-            n,
-            dim,
-        )));
-    }
-    if h_x_slice.len() != n {
-        return Err(PyValueError::new_err(format!(
-            "h_x length {} does not match n = {}",
-            h_x_slice.len(),
-            n,
-        )));
-    }
-    if h_p_diag_slice.len() != dim {
-        return Err(PyValueError::new_err(format!(
-            "h_p_diag length {} does not match 2^n = {}",
-            h_p_diag_slice.len(),
-            dim,
-        )));
-    }
+    validate_trotter_shapes(psi_slice.len(), h_x_slice.len(), h_p_diag_slice.len(), n)?;
 
     let mut out: Vec<Complex64> = psi_slice.to_vec();
     trotter_step(&mut out, h_x_slice, h_p_diag_slice, a_t, b_t, dt, n);
     Ok(out.into_pyarray(py))
+}
+
+/// `trotter_step` の Python wrap (in-place 版). `psi` を caller 側 array に
+/// **直接 in-place で** `U(dt) · psi` で上書きする (戻り値 `None`).
+///
+/// Python 側 (`_rust.trotter_step_inplace_py`) は
+///
+/// ```python
+/// psi = np.ascontiguousarray(psi0, dtype=np.complex128)  # ループ外で 1 回確保
+/// for k in range(n_steps):
+///     _rust.trotter_step_inplace_py(psi, h_x, h_p_diag, a_t, b_t, dt, n)
+///     # psi が in-place 更新される
+/// ```
+///
+/// として呼ぶ. `trotter_step_py` と同じ shape 検査を行い, 不整合は
+/// `PyValueError`. 主な call site: `python/kryanneal/krylov.py` の Trotter
+/// 経路 step loop, `benchmarks/bench_block_fusion.py` /
+/// `benchmarks/bench_parallel_scaling.py` (計測内 alloc/copy 排除).
+/// 詳細は `docs/design/07-rust-extension.md` §7.3.
+#[pyfunction]
+#[pyo3(signature = (psi, h_x, h_p_diag, a_t, b_t, dt, n))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn trotter_step_inplace_py<'py>(
+    mut psi: PyReadwriteArray1<'py, Complex64>,
+    h_x: PyReadonlyArray1<'py, f64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    a_t: f64,
+    b_t: f64,
+    dt: f64,
+    n: usize,
+) -> PyResult<()> {
+    let h_x_slice = h_x.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let psi_slice = psi.as_slice_mut()?;
+
+    validate_trotter_shapes(psi_slice.len(), h_x_slice.len(), h_p_diag_slice.len(), n)?;
+
+    trotter_step(psi_slice, h_x_slice, h_p_diag_slice, a_t, b_t, dt, n);
+    Ok(())
 }
 
 /// Trotter-Suzuki S_4 のサブステップ係数係数 `p = 1 / (4 - 4^{1/3})`.
@@ -353,8 +405,25 @@ pub(crate) fn trotter_suzuki4_step(
     }
 }
 
-/// `trotter_suzuki4_step` の Python wrap. 結果を新規 array で返す
-/// (`trotter_step_py` と統一の allocate-and-return パターン).
+/// `trotter_suzuki4_step_py` / `trotter_suzuki4_step_inplace_py` で共有する
+/// `a_t_list` / `b_t_list` 長さ検査 (Suzuki S_4 は sub-step 数 5 で固定).
+fn validate_suzuki4_lists(a_t_len: usize, b_t_len: usize) -> PyResult<()> {
+    if a_t_len != 5 {
+        return Err(PyValueError::new_err(format!(
+            "a_t_list length {} does not match Suzuki S_4 sub-step count 5",
+            a_t_len,
+        )));
+    }
+    if b_t_len != 5 {
+        return Err(PyValueError::new_err(format!(
+            "b_t_list length {} does not match Suzuki S_4 sub-step count 5",
+            b_t_len,
+        )));
+    }
+    Ok(())
+}
+
+/// `trotter_suzuki4_step` の Python wrap (allocate-and-return).
 ///
 /// Python 側 (`_rust.trotter_suzuki4_step_py`) からは
 ///
@@ -365,6 +434,9 @@ pub(crate) fn trotter_suzuki4_step(
 /// ```
 ///
 /// として呼ぶ. `a_t_list` / `b_t_list` は length 5 の float64 array.
+///
+/// **性能を出したい Python 側 step loop からは
+/// [`trotter_suzuki4_step_inplace_py`] (in-place 版) を使うこと**.
 #[pyfunction]
 #[pyo3(signature = (psi, h_x, h_p_diag, a_t_list, b_t_list, dt, n))]
 #[allow(clippy::too_many_arguments)]
@@ -384,41 +456,8 @@ pub(crate) fn trotter_suzuki4_step_py<'py>(
     let a_t_slice = a_t_list.as_slice()?;
     let b_t_slice = b_t_list.as_slice()?;
 
-    let dim = 1usize << n;
-    if psi_slice.len() != dim {
-        return Err(PyValueError::new_err(format!(
-            "psi length {} does not match 2^n = 2^{} = {}",
-            psi_slice.len(),
-            n,
-            dim,
-        )));
-    }
-    if h_x_slice.len() != n {
-        return Err(PyValueError::new_err(format!(
-            "h_x length {} does not match n = {}",
-            h_x_slice.len(),
-            n,
-        )));
-    }
-    if h_p_diag_slice.len() != dim {
-        return Err(PyValueError::new_err(format!(
-            "h_p_diag length {} does not match 2^n = {}",
-            h_p_diag_slice.len(),
-            dim,
-        )));
-    }
-    if a_t_slice.len() != 5 {
-        return Err(PyValueError::new_err(format!(
-            "a_t_list length {} does not match Suzuki S_4 sub-step count 5",
-            a_t_slice.len(),
-        )));
-    }
-    if b_t_slice.len() != 5 {
-        return Err(PyValueError::new_err(format!(
-            "b_t_list length {} does not match Suzuki S_4 sub-step count 5",
-            b_t_slice.len(),
-        )));
-    }
+    validate_trotter_shapes(psi_slice.len(), h_x_slice.len(), h_p_diag_slice.len(), n)?;
+    validate_suzuki4_lists(a_t_slice.len(), b_t_slice.len())?;
 
     let mut out: Vec<Complex64> = psi_slice.to_vec();
     trotter_suzuki4_step(
@@ -431,6 +470,56 @@ pub(crate) fn trotter_suzuki4_step_py<'py>(
         n,
     );
     Ok(out.into_pyarray(py))
+}
+
+/// `trotter_suzuki4_step` の Python wrap (in-place 版). `psi` を caller 側
+/// array に **直接 in-place で** `S_4(dt) · psi` で上書きする (戻り値 `None`).
+///
+/// Python 側 (`_rust.trotter_suzuki4_step_inplace_py`) は
+///
+/// ```python
+/// psi = np.ascontiguousarray(psi0, dtype=np.complex128)  # ループ外で 1 回確保
+/// for k in range(n_steps):
+///     _rust.trotter_suzuki4_step_inplace_py(
+///         psi, h_x, h_p_diag, a_t_list, b_t_list, dt, n,
+///     )
+///     # psi が in-place 更新される
+/// ```
+///
+/// として呼ぶ. `trotter_suzuki4_step_py` と同じ shape 検査を行い, 不整合は
+/// `PyValueError`. 主な call site: `python/kryanneal/krylov.py` の
+/// trotter_suzuki4 経路 step loop. 詳細は `docs/design/07-rust-extension.md` §7.3.
+#[pyfunction]
+#[pyo3(signature = (psi, h_x, h_p_diag, a_t_list, b_t_list, dt, n))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn trotter_suzuki4_step_inplace_py<'py>(
+    mut psi: PyReadwriteArray1<'py, Complex64>,
+    h_x: PyReadonlyArray1<'py, f64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    a_t_list: PyReadonlyArray1<'py, f64>,
+    b_t_list: PyReadonlyArray1<'py, f64>,
+    dt: f64,
+    n: usize,
+) -> PyResult<()> {
+    let h_x_slice = h_x.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let a_t_slice = a_t_list.as_slice()?;
+    let b_t_slice = b_t_list.as_slice()?;
+    let psi_slice = psi.as_slice_mut()?;
+
+    validate_trotter_shapes(psi_slice.len(), h_x_slice.len(), h_p_diag_slice.len(), n)?;
+    validate_suzuki4_lists(a_t_slice.len(), b_t_slice.len())?;
+
+    trotter_suzuki4_step(
+        psi_slice,
+        h_x_slice,
+        h_p_diag_slice,
+        a_t_slice,
+        b_t_slice,
+        dt,
+        n,
+    );
+    Ok(())
 }
 
 #[cfg(test)]

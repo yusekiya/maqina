@@ -177,16 +177,18 @@ def child_run(
         )
 
     # ---- trotter_step (full Strang step, 本番ホットパス) ----
-    # `_rust.trotter_step_py` 1 回 = phase pass + 全 i bit-flip pass + phase pass
-    # を Rust 内部で完走する. Python 越境は 1 回だけなので per-i wrap allocation
-    # overhead が混入せず, rayon scaling が公平に見える (issue #68).
+    # `_rust.trotter_step_inplace_py` 1 回 = phase pass + 全 i bit-flip pass +
+    # phase pass を Rust 内部で完走し ``psi`` を in-place 更新する. Python 越境
+    # は 1 回だけなので per-i wrap allocation overhead が混入せず, rayon scaling
+    # が公平に見える (issue #68 / in-place 化 #86).
     dt = 0.01  # 任意の小値. 計測は wall time だけで数値正確性は問わない.
+    psi_trotter = psi.copy()  # 計測内 mutation 用の owned buffer.
     # warm up
     for _ in range(warmup):
-        _ = _rust.trotter_step_py(psi, h_x, h_p_diag, a_t, b_t, dt, n)
+        _rust.trotter_step_inplace_py(psi_trotter, h_x, h_p_diag, a_t, b_t, dt, n)
     for trial in range(repeat):
         t0 = time.perf_counter()
-        _ = _rust.trotter_step_py(psi, h_x, h_p_diag, a_t, b_t, dt, n)
+        _rust.trotter_step_inplace_py(psi_trotter, h_x, h_p_diag, a_t, b_t, dt, n)
         t1 = time.perf_counter()
         results.append(
             TrialResult(
@@ -200,21 +202,21 @@ def child_run(
         )
 
     # ---- apply_single_mode_axis_i_py_sum_diagnostic (本番ホットパスではない) ----
-    # Python 側で per-i 呼び出しを n 回ループする. `_rust.apply_single_mode_axis_i_py`
-    # は wrap 内で `psi.to_vec()` で 16 MB allocation するため per-call cost が
-    # それで支配される. 本番 Trotter は `trotter_step` 1 call で済むので, この
-    # cell は **Python wrap allocation overhead 診断用** に残してあるだけ
-    # (kernel 名で明示, issue #68).
+    # Python 側で per-i 呼び出しを n 回ループする. in-place 版 (#86) を採用後は
+    # **Python boundary 越え × n + Rust 内部 single-axis kernel** の合計を見る
+    # 形になる (旧運用は wrap allocation overhead 計測が主目的だったが, それを
+    # 排した状態で本番 ``trotter_step`` 1 call との差分が「Python loop driver
+    # 自体のオーバヘッド (+ Rust 内部 multi-qubit gate fusion が消える分)」と
+    # 解釈できる). kernel 名は bench history continuity のため維持.
+    psi_per_i = psi.copy()  # 計測内 mutation 用の owned buffer.
     # warm up
     for _ in range(warmup):
-        psi_warm = psi.copy()
         for i in range(n):
-            psi_warm = _rust.apply_single_mode_axis_i_py(psi_warm, u, i, n)
+            _rust.apply_single_mode_axis_i_inplace_py(psi_per_i, u, i, n)
     for trial in range(repeat):
-        psi_run = psi.copy()
         t0 = time.perf_counter()
         for i in range(n):
-            psi_run = _rust.apply_single_mode_axis_i_py(psi_run, u, i, n)
+            _rust.apply_single_mode_axis_i_inplace_py(psi_per_i, u, i, n)
         t1 = time.perf_counter()
         results.append(
             TrialResult(
