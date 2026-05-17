@@ -885,6 +885,195 @@ Trotter primitive は `src/trotter.rs` に置く想定だが、`apply_single_mod
 自体は matvec primitive の隣 (`src/matvec.rs`) でも構わない (Phase 2 で
 実装する際に判断する)。
 
+#### 5.1.3 Phase 6 C3 — DRAM 律速の解消 (multi-qubit gate fusion + L2-aware chunking)
+
+Phase 6 C1 (rayon) + C2 (SIMD) を入れた後の本番 bench (issue #68 follow-up)
+で観測された制約:
+
+| kernel @ N=20 | 1 thread | 64-thread peak | 飽和原因 |
+|---|---|---|---|
+| `apply_h_kryanneal` | 23.8 ms | **6.13× (64 threads)** | DRAM bandwidth 上限 (理論 64× の ~9.6%) |
+| `trotter_step` | 54.8 ms | **1.55× (16 threads)** | per-step rayon barrier × 2n が compute 量を食い潰す |
+
+両ボトルネックの本質は **「v / psi に対する DRAM round trip 回数」が compute
+量に比して過大** であること: C1/C2 で per-pass 計算密度を上げても, memory
+bound に当たれば飽和する。Phase 6 C3 はこの memory traffic 自体を削減する
+最適化レイヤで, 以下の 2 つを **独立した** サブ最適化として扱う:
+
+##### A. trotter_step / cfm4_step の barrier 多重化解消 (multi-qubit gate fusion)
+
+`trotter_step` は `Π_{i=0..n} R_i(dt)` を 1 軸ずつ in-place で適用するため
+per-step rayon barrier が **2n** 個入る (`apply_single_mode_axis_i` × n + diag
+phase × 2)。N=20 で 1.55× で頭打ちになるのはこの barrier overhead が
+compute 短縮分を食い潰すため (`apply_single_mode_axis_i` 1 回の compute
+≈ 2.5 ms に対し rayon barrier ~ms 級, ratio 1:1 程度)。
+
+**解決方針 (Häner-Steiger 2017 §3.3, qsim `MultiQubitGateFuser` 同型)**:
+連続 k 個の `R_i` を **tensor product** `R_{i+k-1} ⊗ ... ⊗ R_i` の
+`2^k × 2^k` ユニタリ `U` にまとめ, **1 sweep** で psi 全体に適用する.
+kryanneal の `H_drv = -Σ h_x_i X_i` は **per-site で commuting** なので
+tensor product 表記が exact (Trotter 誤差は導入しない):
+
+```text
+exp(+i·a_t·dt·Σ_{j∈G} h_x_j X_j) = ⊗_{j∈G} exp(+i·θ_j X_j),  θ_j = a_t·h_x_j·dt
+```
+
+ここで G は連続 k qubit 集合 `{i_start, i_start+1, ..., i_start+k-1}`. これを
+state vector の `(2^k)-sub-block` ごとに 1 回の dense 2^k × 2^k matvec で
+適用する. ω_q-fold の中で **連続 k qubit** に限定すれば sub-block は psi
+の物理メモリ上で **stride `2^i_start` の 2^k 要素列** となり, qsim の
+`_pdep_u64` mask gather が不要 (kryanneal の TFIM 固有の単純化).
+
+擬似コード (`src/matvec.rs::apply_multi_qubit_gate_fused`):
+
+```rust
+/// `psi` の連続 k qubit (i_start .. i_start+k) に 2^k × 2^k ユニタリ `u` を
+/// fused apply (in-place).  `u` は row-major (row index = output bit pattern).
+///
+/// outer 構造: stride = 2^i_start, group_block = 2^(i_start+k).
+/// outer block 数 = dim / group_block, 各 outer block 内に 2^i_start 個の
+/// independent stride-2^i_start subspace がある.
+pub(crate) fn apply_multi_qubit_gate_fused(
+    psi: &mut [Complex64],
+    u: &[Complex64],         // length 2^k · 2^k, row-major
+    i_start: usize,
+    k: usize,
+    n: usize,
+) {
+    let dim = 1 << n;
+    let stride = 1 << i_start;          // 2^i_start
+    let group_block = stride << k;       // 2^(i_start+k)
+    let m = 1 << k;                      // 2^k
+    // outer block 単位で par_chunks_mut.  各 chunk 内では `stride` 個の
+    // 独立 subspace について 2^k × 2^k matmul を実行する.
+    psi.par_chunks_mut(group_block).for_each(|block| {
+        for offset in 0..stride {
+            // subspace 要素: block[offset + j · stride] for j in 0..m
+            let mut x = [Complex64::default(); MAX_FUSED_DIM]; // m <= MAX_FUSED_DIM
+            for j in 0..m {
+                x[j] = block[offset + j * stride];
+            }
+            // y = u @ x  (2^k × 2^k matmul)
+            for row in 0..m {
+                let mut s = Complex64::default();
+                for col in 0..m {
+                    s += u[row * m + col] * x[col];
+                }
+                block[offset + row * stride] = s;
+            }
+        }
+    });
+}
+```
+
+**k の選択方針** (qsim の経験値 `max_fused_size = 4-5` を踏襲):
+
+- `k = 2`: 2^k = 4, 16 byte × 4 = 64 byte = L1 cache line。最小単位。
+- `k = 4`: 2^k = 16, 256 byte stack 配列で済む。compute / barrier ratio 改善。
+- `k = 6`: 2^k = 64, 1024 byte。L1 register pressure 上限近辺。
+
+kryanneal は `k = 4` を default とし `bench_block_fusion.py` で sweep で確認.
+
+**trotter_step の書き換え** (`src/trotter.rs`):
+
+```rust
+const FUSE_K: usize = 4;   // multi-qubit gate fusion 単位
+
+pub(crate) fn trotter_step(psi, h_x, h_p_diag, a_t, b_t, dt, n) {
+    // phase_p(dt/2) は rayon par_chunks_mut で 1 sweep
+    parallel_phase_p(psi, h_p_diag, b_t, dt / 2.0);
+
+    // 連続 FUSE_K qubit ごとに R_i を fuse して 1 sweep で適用
+    let mut i = 0;
+    while i + FUSE_K <= n {
+        let u_2k = build_tensor_product_unitary(&h_x[i..i + FUSE_K], a_t, dt);
+        apply_multi_qubit_gate_fused(psi, &u_2k, i, FUSE_K, n);
+        i += FUSE_K;
+    }
+    // 端数 qubit (i .. n) は従来の per-axis apply.  n が FUSE_K の倍数なら
+    // このループは実行されない.
+    while i < n {
+        let theta = a_t * h_x[i] * dt;
+        let (s, c) = theta.sin_cos();
+        let u = [
+            Complex64::new(c, 0.0),
+            Complex64::new(0.0, s),
+            Complex64::new(0.0, s),
+            Complex64::new(c, 0.0),
+        ];
+        apply_single_mode_axis_i(psi, &u, i, n);
+        i += 1;
+    }
+    parallel_phase_p(psi, h_p_diag, b_t, dt / 2.0);
+}
+```
+
+**期待される barrier 削減**:
+
+- 現状: 2n + 2 barrier @ trotter_step (phase_p × 2 + axis_i × n + 再 diag × 1 が
+  serial loop は除く). N=20 で **40+**.
+- 改修後: `ceil(n / FUSE_K) + 2 + (n mod FUSE_K)` ≈ `n / FUSE_K + 2` (端数なし
+  ケース). N=20, k=4 で **7** (phase_p × 2 + 5 fused gate sweep).
+
+apply_h_kryanneal 経路 (cfm4_step / m2_midpoint_step 内) は既存実装で 1 回の
+matvec = 1 barrier なので追加の fusion は不要 (上記スコープ A は trotter
+経路のみ).
+
+##### B. `apply_h_kryanneal` の L2-aware chunk_size 再調整
+
+issue #68 観測 `apply_h_kryanneal` 6.13× scaling 飽和の理由仮説:
+
+- 現状 chunk_size clamp: `chunk_size ∈ [RAYON_CHUNK_MIN=64, RAYON_CHUNK_MAX=16K]`.
+  N=20, 64 threads で `dim / (64*4) = 4096` → `4K` Complex64 = `64 KB`.
+- 一方 N=22 では `dim / (64*4) = 16K` → `RAYON_CHUNK_MAX` で clamp された
+  16K Complex64 = `256 KB`. これが **64 thread 同時実行で per-core L2
+  (1 MB)** を占有しきれない. しかも diag pass + 全 i bit-flip pass を
+  fuse するので thread は v と y の両方を chunk_size 分 cache に持つ必要.
+- 高 i pass で `v[k ^ mask]` が **chunk 外** = 別 chunk_b を読むとき, chunk_b
+  全体 (= chunk_size) は L2 になければ DRAM から再 load. これが #68 で
+  観測された DRAM bandwidth bound の主因.
+
+**対策**: `chunk_size` の上限を per-core L2 fit に明示的に設計する:
+
+```rust
+// L2 cache per core (AMD EPYC 9554: 1 MB, Intel Xeon Sapphire Rapids: 2 MB)
+// を保守的に 512 KB と見積もり, chunk + chunk_pair partner (v 読込先) 両方が
+// 同時に乗るように chunk_size = L2 / 4 = 128 KB.  Complex64 = 16 byte なので
+// 2^13 = 8K 要素.
+const RAYON_CHUNK_MAX: usize = 1 << 13;   // (旧 1 << 14 = 16K)
+```
+
+これは **C3 の主修正ではない** (single constant 変更) が, A の multi-qubit
+fusion 実装と合わせて bench で同時測定する.
+
+##### Acceptance と bench
+
+- bench: `benchmarks/bench_block_fusion.py` で N ∈ {16, 18, 20, 22} の
+  per-step time を `trotter_step` / `apply_h_kryanneal` 両方計測, FUSE_K ∈
+  {1, 2, 4, 6} を sweep.
+- baseline: Phase 6 C2 完了時点 (`main` branch tip).
+- acceptance: N=20 で `trotter_step` の per-step time が **>= 1.3×** 改善
+  (issue #64 当初目標). `apply_h_kryanneal` 側の改善は副次目標
+  (chunk_size 調整の bench 確認のみ).
+- 数値一致: `cargo test` + `uv run pytest` で `rel < 1e-13`.
+
+##### 設計判断の論拠と参考実装
+
+- **連続 k qubit 限定 (任意 qubit 集合の fusion は対象外)**: kryanneal の
+  TFIM は per-site `H_drv` で qubit i は physical bit index i に固定. trotter
+  経路は per-axis に逐次適用するため `R_i` の順序は **physical order
+  i=0..n** で確定済み. qsim の `_pdep_u64` を使った任意 qubit 集合 fusion は
+  汎用回路シミュレータの要件で, kryanneal では不要.
+- **`apply_h_kryanneal` 側に gate fusion を入れない**: matvec は **sum of
+  X_i + diag** で, 各 X_i は他 qubit に identity. これを tensor product
+  に畳むと `Σ_i (I ⊗ ... ⊗ X_i ⊗ ... ⊗ I)` のままで 2^k × 2^k matrix と
+  しての利点が出ない. 既存の per-axis bit-flip pass + chunk-resident な
+  cache fusion (C1) が apply_h_kryanneal の最適解.
+- **参考実装**: cv-ising-solver には対応する block-fusion 実装が **無い**
+  (CV 版は連続 slab matvec で TFIM 固有の高 stride 問題が起きないため).
+  qsim (`lib/simulator_avx.h::ApplyGateH<H>`, `lib/fuser_mqubit.h`) と
+  Häner-Steiger 2017 (arXiv:1704.01127 §3.2-3.3) が一次根拠.
+
 ### 5.2 Lanczos: `lanczos_propagate`
 
 `exp(-i dt H) ψ` を `m` 次元 Lanczos + 三重対角固有分解で計算する
@@ -1855,10 +2044,21 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   することで本来取りに行く性格のもの。
   bench は PR 本体に含めず, 個別 issue (#63) コメントとして添付済み
   (issue #47 で確定した運用)。
-- **cache block-fusion (C3, issue #64, 計画)**: 大 N (≥20) で高 i の bit-flip
-  pass が DRAM 律速になるのを防ぐため、高 i 群を fuse して L2 cache に
-  収まるブロック単位で低 i pass と一緒に走らせる古典テクニック (qsim の
-  X-gate pass 同様、§5.1.1 末尾の TODO で referenced)。
+- **cache block-fusion (C3, issue #64, 計画)**: DRAM 律速の解消を目的とする
+  最適化レイヤ。issue #68 follow-up bench で `apply_h_kryanneal` が 6.13×
+  (理論 64× の ~9.6%), `trotter_step` が 1.55× (rayon barrier × 2n の
+  overhead) で頭打ちと判明。C3 は以下 2 つの独立サブ最適化で構成
+  (§5.1.3 を一次資料):
+  - **A. multi-qubit gate fusion**: 連続 k qubit (default k=4) の R_i を
+    `2^k × 2^k` tensor product unitary に畳んで 1 sweep で適用. trotter_step
+    の barrier 数を `2n+2` → `n/k + 2` に縮める. kryanneal の `H_drv = -Σ
+    h_x_i X_i` が **per-site commuting** で tensor product 表記が exact
+    (Trotter 誤差を導入しない) という TFIM 固有の単純化を活用. qsim
+    `MultiQubitGateFuser` / Häner-Steiger 2017 §3.3 が先行実装.
+  - **B. L2-aware chunk_size**: `apply_h_kryanneal_rayon` の `RAYON_CHUNK_MAX`
+    を `1 << 14` (= 256 KB) → `1 << 13` (= 128 KB) に縮め, 64-thread 同時
+    実行で per-core L2 fit を保証. chunk-pair (高 i pass の `v[k^mask]`)
+    が DRAM round trip にならない範囲に収める.
 - 物理コア数 vs スループットの sweep をベンチに含め、メモリ帯域律速点を
   明示する (`benchmarks/bench_parallel_scaling.py`, Phase 6 C1 で導入)
 - BLAS feature ON/OFF の数値一致 CI (両ビルドで rel < 1e-13)

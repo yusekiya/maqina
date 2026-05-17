@@ -53,10 +53,24 @@ use pyo3::prelude::*;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
-/// rayon chunk あたりの **最大** 要素数. y_chunk + v の参照範囲が L2 cache
-/// (~256 KB ≈ 16K Complex64) に収まる上限を狙う.
+/// rayon chunk あたりの **最大** 要素数. y_chunk + v の partner block (高 i pass
+/// で chunk 外を読む先) の **両方** が L2 cache に同時に乗ることを狙う.
+///
+/// # 値の見直し (Phase 6 C3, issue #64)
+///
+/// 旧値 `1 << 14 = 16K` Complex64 = 256 KB は **per-chunk サイズ** としては
+/// L2 (1-2 MB/core) に収まるが, 64 thread が同時に `chunk + chunk_partner` の
+/// 2 × 256 KB = 512 KB を読むと per-core L2 (1 MB) を **使い切ってしまい**,
+/// 高 i pass で `v[k^mask]` の partner block が eviction される
+/// (issue #68 follow-up で `apply_h_kryanneal` が 6.13× (理論 64× の ~9.6%)
+/// で頭打ちになる主因).
+///
+/// 新値 `1 << 13 = 8K` Complex64 = 128 KB は `chunk + chunk_partner` = 256 KB
+/// で per-core L2 (1 MB) に **1/4 弱** で収まり, 同時に別 pass の y / h_p_diag
+/// に対する余裕も確保する. 値は `benchmarks/bench_block_fusion.py` で sweep
+/// 確認する.
 #[cfg(feature = "rayon")]
-const RAYON_CHUNK_MAX: usize = 1 << 14;
+const RAYON_CHUNK_MAX: usize = 1 << 13;
 
 /// rayon chunk あたりの **最小** 要素数. closure / scheduling overhead を
 /// 償却するため 64 要素 (cache-line 4 要素 × 16) 以上を保証する.
@@ -736,6 +750,172 @@ fn apply_single_mode_axis_i_rayon(psi: &mut [Complex64], u: &[Complex64; 4], i: 
                 local_base += block;
             }
         });
+    }
+}
+
+/// Multi-qubit gate fusion (Phase 6 C3, issue #64) でサポートする最大 qubit 数.
+///
+/// `k = 6` で fused matrix は `2^6 × 2^6 = 64 × 64` complex = `8 KB` で stack
+/// 配列に余裕で収まる. inner gather/scatter ループの `x` 一時配列も
+/// `2^6 = 64` Complex64 = `1 KB` で同様. これより大きい k は qsim の経験
+/// (max_fused_size = 4-5 推奨) からも cost / benefit が反転し始めるので,
+/// kryanneal では `k <= 6` を hard 制約とする (`docs/design.md` §5.1.3).
+pub(crate) const MAX_FUSED_K: usize = 6;
+
+/// `2^MAX_FUSED_K`. inner gather buffer の固定長.
+const MAX_FUSED_DIM: usize = 1usize << MAX_FUSED_K;
+
+/// `psi` の **連続** k qubit (i_start, i_start+1, ..., i_start+k-1) に
+/// `2^k × 2^k` ユニタリ `u` を **in-place** で fused apply する (Phase 6 C3,
+/// multi-qubit gate fusion, issue #64).
+///
+/// # 用途
+///
+/// `trotter_step` で `Π_{i=0..n} R_i(dt)` を 1 軸ずつ in-place 適用すると
+/// per-step rayon barrier が **2n** 個入って scaling が頭打ちになる
+/// (issue #68 follow-up bench で 1.55× @ 16 threads で飽和観測).
+/// 本関数は kryanneal の `H_drv = -Σ h_x_i X_i` が per-site で commuting
+/// (`exp(+i·a·dt·Σ_{j∈G} h_x_j X_j) = ⊗_{j∈G} exp(+i·θ_j X_j)`) であることを
+/// 利用して, 連続 k qubit の R_i を tensor product で `2^k × 2^k` matrix に
+/// まとめ, **1 sweep / 1 rayon barrier** で apply する. これにより
+/// `trotter_step` の barrier 数は `2n+2 → n/k + 2` に縮む (n=20, k=4 で 40 → 7).
+///
+/// # 構造
+///
+/// `stride = 2^i_start`, `group_block = 2^(i_start+k) = stride · 2^k`,
+/// `m = 2^k`. psi は `dim / group_block` 個の "outer block" に分解され, 各
+/// outer block (長さ `group_block`) 内に `stride` 個の **独立な** subspace
+/// (長さ `m`, stride `stride` の要素列) がある. 各 subspace に `m × m` の
+/// 複素 matmul を実行する:
+///
+/// ```text
+/// psi_out[offset + r·stride] = Σ_c u[r·m + c] · psi_in[offset + c·stride]
+/// ```
+///
+/// 連続 qubit 限定なので `psi_in[offset + c·stride]` の `c` は 0..m の連続
+/// 整数で, qsim の `_pdep_u64` mask gather は不要 (kryanneal の TFIM 固有
+/// の単純化).
+///
+/// # rayon 経路
+///
+/// outer block を `par_chunks_mut(group_block)` で並列分割. 各 chunk closure
+/// 内で `stride` 個の subspace の matmul を完走するので, rayon barrier は
+/// **1 個** だけ (連続 k qubit の R_i ぶん). small dim (`dim < MIN_RAYON_DIM`)
+/// では serial fallback.
+///
+/// `group_block > dim` (= `i_start + k > n`) は呼び出し側で禁止される
+/// (パニック条件参照). `group_block == dim` (= `i_start + k == n`) は退化
+/// ケースで chunk 数 = 1 になり並列化されない. この場合は **k qubit を 1
+/// step ずらして 2 グループに分けて呼ぶ** か, 端数 qubit を従来の
+/// `apply_single_mode_axis_i` で個別 apply するのが呼び出し側の責務.
+///
+/// # 数値同一性
+///
+/// `u` を `R_{i_start+k-1} ⊗ ... ⊗ R_{i_start}` (little-endian tensor product)
+/// として渡せば, `apply_single_mode_axis_i` を i_start..i_start+k で k 回
+/// 順次呼ぶのと **bit-identical** (各要素の sum/mul order が完全に一致).
+/// テスト `apply_multi_qubit_gate_fused_matches_per_axis` で n=4..8, k=2..4 の
+/// fuzz で `rel < 1e-13` を確認する.
+///
+/// # Panics
+/// - `psi.len() != 1 << n`
+/// - `u.len() != 1 << (2k)` (= `m * m`)
+/// - `k < 1` or `k > MAX_FUSED_K`
+/// - `i_start + k > n`
+pub(crate) fn apply_multi_qubit_gate_fused(
+    psi: &mut [Complex64],
+    u: &[Complex64],
+    i_start: usize,
+    k: usize,
+    n: usize,
+) {
+    let dim = 1usize << n;
+    assert_eq!(psi.len(), dim, "psi must have length 2^n");
+    assert!(
+        (1..=MAX_FUSED_K).contains(&k),
+        "k = {} must be in [1, {}]",
+        k,
+        MAX_FUSED_K,
+    );
+    assert!(
+        i_start + k <= n,
+        "i_start ({}) + k ({}) must be <= n ({})",
+        i_start,
+        k,
+        n,
+    );
+    let m = 1usize << k;
+    assert_eq!(u.len(), m * m, "u must have length 2^(2k) = {}", m * m);
+
+    let stride = 1usize << i_start;
+    let group_block = stride << k; // = 2^(i_start + k)
+
+    #[cfg(feature = "rayon")]
+    {
+        if dim >= MIN_RAYON_DIM && group_block < dim {
+            apply_multi_qubit_gate_fused_rayon(psi, u, stride, group_block, m);
+            return;
+        }
+    }
+    apply_multi_qubit_gate_fused_serial(psi, u, stride, group_block, m);
+}
+
+/// `apply_multi_qubit_gate_fused` の scalar 単スレッド実装.
+fn apply_multi_qubit_gate_fused_serial(
+    psi: &mut [Complex64],
+    u: &[Complex64],
+    stride: usize,
+    group_block: usize,
+    m: usize,
+) {
+    let dim = psi.len();
+    let mut base = 0usize;
+    while base < dim {
+        let block = &mut psi[base..base + group_block];
+        apply_fused_gate_to_block(block, u, stride, m);
+        base += group_block;
+    }
+}
+
+/// `apply_multi_qubit_gate_fused` の rayon 並列実装. outer block を
+/// `par_chunks_mut(group_block)` で分割する. 各 chunk が **完全な** outer
+/// block (`group_block` 要素) なので, chunk closure 内で全 subspace matmul
+/// を完走でき, rayon barrier は **1 個** に収まる.
+#[cfg(feature = "rayon")]
+fn apply_multi_qubit_gate_fused_rayon(
+    psi: &mut [Complex64],
+    u: &[Complex64],
+    stride: usize,
+    group_block: usize,
+    m: usize,
+) {
+    psi.par_chunks_mut(group_block).for_each(|block| {
+        apply_fused_gate_to_block(block, u, stride, m);
+    });
+}
+
+/// 1 つの outer block (長さ `group_block = stride · m`) 内の `stride` 個の
+/// 独立 subspace に対して `m × m` 複素 matmul を実行する core kernel.
+///
+/// gather → matmul → scatter の素朴な 3 段ループ. `m <= MAX_FUSED_DIM` なので
+/// stack 配列 `x: [Complex64; MAX_FUSED_DIM]` を使う (heap alloc なし).
+#[inline]
+fn apply_fused_gate_to_block(block: &mut [Complex64], u: &[Complex64], stride: usize, m: usize) {
+    let mut x = [Complex64::new(0.0, 0.0); MAX_FUSED_DIM];
+    for offset in 0..stride {
+        // gather: x[j] = block[offset + j * stride] for j ∈ [0, m).
+        for j in 0..m {
+            x[j] = block[offset + j * stride];
+        }
+        // matmul + scatter: block[offset + r * stride] = Σ_c u[r·m + c] · x[c].
+        for r in 0..m {
+            let row = &u[r * m..(r + 1) * m];
+            let mut s = Complex64::new(0.0, 0.0);
+            for c in 0..m {
+                s += row[c] * x[c];
+            }
+            block[offset + r * stride] = s;
+        }
     }
 }
 
@@ -1713,6 +1893,195 @@ mod tests {
                     k,
                     y_simd[k],
                     y_scalar[k]
+                );
+            }
+        }
+    }
+
+    // ===== Multi-qubit gate fusion (Phase 6 C3, issue #64) のテスト =====
+
+    /// 連続 k qubit `[i_start, i_start+k)` に対応する k 個の 2×2 ユニタリ
+    /// `u_list[j]` の **little-endian tensor product**
+    /// `U = u_list[k-1] ⊗ u_list[k-2] ⊗ ... ⊗ u_list[0]` を構築する.
+    ///
+    /// `U[r, c] = Π_{j=0..k-1} u_list[j][((r>>j)&1)·2 + ((c>>j)&1)]`.
+    /// `r` の bit j は psi sub-block の `offset + j·stride` 要素に対応する
+    /// (= axis `i_start + j` の bit). `apply_multi_qubit_gate_fused` の
+    /// matmul と整合する row-major 2^k × 2^k 行列を返す.
+    fn tensor_product_unitary(u_list: &[[Complex64; 4]]) -> Vec<Complex64> {
+        let k = u_list.len();
+        let m = 1usize << k;
+        let mut u = vec![Complex64::new(0.0, 0.0); m * m];
+        for r in 0..m {
+            for c in 0..m {
+                let mut p = Complex64::new(1.0, 0.0);
+                for (j, u_j) in u_list.iter().enumerate() {
+                    let rj = (r >> j) & 1;
+                    let cj = (c >> j) & 1;
+                    p *= u_j[rj * 2 + cj];
+                }
+                u[r * m + c] = p;
+            }
+        }
+        u
+    }
+
+    /// ランダム 2×2 ユニタリ (Trotter R_i 形 `[c, i·s, i·s, c]`).
+    /// `apply_single_mode_axis_i` のテストで使われる helper の再掲を避けて
+    /// 簡略形を使う.
+    fn random_axis_unitary(rng: &mut Xor64) -> [Complex64; 4] {
+        let theta = rng.signed() * std::f64::consts::PI;
+        let (s, c) = theta.sin_cos();
+        [
+            Complex64::new(c, 0.0),
+            Complex64::new(0.0, s),
+            Complex64::new(0.0, s),
+            Complex64::new(c, 0.0),
+        ]
+    }
+
+    /// `apply_multi_qubit_gate_fused` を `apply_single_mode_axis_i` の k 回連続
+    /// apply と比較する fuzz テスト (rel < 1e-13).
+    ///
+    /// `U = ⊗_j u_list[j]` (little-endian) を fused-apply した結果と, `u_list[0]`
+    /// から順に per-axis で apply した結果が一致することを確認する. k 回の per-axis
+    /// と 1 回の 2^k × 2^k matmul は浮動小数演算の順序が違うので bit-identical
+    /// にはならない (rel ~ 数 × 1e-15 程度の差は出る) → `rel < 1e-13` 緩和.
+    #[test]
+    fn apply_multi_qubit_gate_fused_matches_per_axis_fuzz_50iter() {
+        let mut rng = Xor64::new(0x_64fa_5edf_a571_0a64);
+        for iter in 0..50 {
+            let n = 4 + (rng.next_u64() % 5) as usize; // n ∈ {4..=8}
+            let dim = 1usize << n;
+            let k = 1 + (rng.next_u64() % (MAX_FUSED_K.min(n) as u64)) as usize; // k ∈ [1, min(MAX_FUSED_K, n)]
+            let i_start_max = n - k;
+            let i_start = (rng.next_u64() % (i_start_max as u64 + 1)) as usize;
+
+            // u_list[j] for axis i_start + j.
+            let u_list: Vec<[Complex64; 4]> =
+                (0..k).map(|_| random_axis_unitary(&mut rng)).collect();
+            let u_fused = tensor_product_unitary(&u_list);
+
+            let psi0: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+
+            // Reference: apply per-axis k 回.
+            let mut psi_ref = psi0.clone();
+            for (j, u) in u_list.iter().enumerate() {
+                apply_single_mode_axis_i(&mut psi_ref, u, i_start + j, n);
+            }
+
+            // Under test: apply_multi_qubit_gate_fused.
+            let mut psi_actual = psi0;
+            apply_multi_qubit_gate_fused(&mut psi_actual, &u_fused, i_start, k, n);
+
+            let mut diff_sq = 0.0_f64;
+            let mut ref_sq = 0.0_f64;
+            for kk in 0..dim {
+                let d = psi_actual[kk] - psi_ref[kk];
+                diff_sq += d.norm_sqr();
+                ref_sq += psi_ref[kk].norm_sqr();
+            }
+            let rel = diff_sq.sqrt() / ref_sq.sqrt().max(1.0);
+            assert!(
+                rel < 1e-13,
+                "iter={}, n={}, k={}, i_start={}: fused vs per-axis rel={} >= 1e-13",
+                iter,
+                n,
+                k,
+                i_start,
+                rel,
+            );
+        }
+    }
+
+    /// `apply_multi_qubit_gate_fused_serial` と `_rayon` の数値同一性 fuzz.
+    /// 両 path は完全に同じ inner kernel (`apply_fused_gate_to_block`) を呼ぶので
+    /// **bit-identical** を期待する. `MIN_RAYON_DIM` の閾値を跨ぐ n=17, 18 で確認.
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn apply_multi_qubit_gate_fused_rayon_matches_serial_fuzz() {
+        let mut rng = Xor64::new(0x_dead_8eef_cafe_babe);
+        for n in [17usize, 18] {
+            let dim = 1usize << n;
+            for k in [2usize, 3, 4] {
+                let i_start = 1usize; // stride = 2, group_block = 2^(1+k)
+                let u_list: Vec<[Complex64; 4]> =
+                    (0..k).map(|_| random_axis_unitary(&mut rng)).collect();
+                let u_fused = tensor_product_unitary(&u_list);
+                let psi0: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+
+                let stride = 1usize << i_start;
+                let group_block = stride << k;
+                let m = 1usize << k;
+
+                let mut psi_serial = psi0.clone();
+                apply_multi_qubit_gate_fused_serial(
+                    &mut psi_serial,
+                    &u_fused,
+                    stride,
+                    group_block,
+                    m,
+                );
+
+                let mut psi_rayon = psi0;
+                apply_multi_qubit_gate_fused_rayon(
+                    &mut psi_rayon,
+                    &u_fused,
+                    stride,
+                    group_block,
+                    m,
+                );
+
+                for kk in 0..dim {
+                    assert_eq!(
+                        psi_serial[kk].re.to_bits(),
+                        psi_rayon[kk].re.to_bits(),
+                        "n={}, k={}, kk={}: serial vs rayon re bits differ",
+                        n,
+                        k,
+                        kk,
+                    );
+                    assert_eq!(
+                        psi_serial[kk].im.to_bits(),
+                        psi_rayon[kk].im.to_bits(),
+                        "n={}, k={}, kk={}: serial vs rayon im bits differ",
+                        n,
+                        k,
+                        kk,
+                    );
+                }
+            }
+        }
+    }
+
+    /// `apply_multi_qubit_gate_fused` の `k = 1` (=単一 qubit) 退化ケースが
+    /// `apply_single_mode_axis_i` と一致することを確認 (bit-identical).
+    #[test]
+    fn apply_multi_qubit_gate_fused_k1_matches_axis_i() {
+        let mut rng = Xor64::new(0x_face_b00c_1234_5678);
+        let n = 6;
+        let dim = 1usize << n;
+
+        for i in 0..n {
+            let u = random_axis_unitary(&mut rng);
+            let u_fused = tensor_product_unitary(&[u]); // length 4
+
+            let psi0: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+
+            let mut psi_axis = psi0.clone();
+            apply_single_mode_axis_i(&mut psi_axis, &u, i, n);
+
+            let mut psi_fused = psi0;
+            apply_multi_qubit_gate_fused(&mut psi_fused, &u_fused, i, 1, n);
+
+            for k in 0..dim {
+                let diff = (psi_axis[k] - psi_fused[k]).norm();
+                assert!(
+                    diff < 1e-14,
+                    "i={}, k={}: axis vs fused diff = {}",
+                    i,
+                    k,
+                    diff,
                 );
             }
         }

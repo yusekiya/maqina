@@ -67,7 +67,81 @@ use numpy::{IntoPyArray, PyArray1, PyReadonlyArray1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::matvec::apply_single_mode_axis_i;
+use crate::matvec::{apply_multi_qubit_gate_fused, apply_single_mode_axis_i, MAX_FUSED_K};
+
+/// Multi-qubit gate fusion (Phase 6 C3, issue #64) で `trotter_step` 内の
+/// `Π_i R_i(dt)` を何 qubit ずつまとめて適用するかの単位.
+///
+/// `FUSE_K = 4`: qsim の経験 (`max_fused_size = 4-5` 推奨, `lib/fuser_mqubit.h`)
+/// と inner gather buffer サイズ (`2^k = 16` Complex64 = `256 B` per subspace,
+/// L1 cache resident に余裕で収まる) から default 値. `bench_block_fusion.py`
+/// で per-step time を sweep して必要なら見直す.
+///
+/// `n < FUSE_K` の極小 N (= テスト用) では fused 経路に乗らず端数経路で
+/// per-axis apply される (`apply_single_mode_axis_i` フォールバック).
+///
+/// 制約: `FUSE_K <= MAX_FUSED_K` (matvec 側で `2^MAX_FUSED_K = 64` まで stack
+/// 配列を持つため).
+const FUSE_K: usize = 4;
+const _: () = assert!(FUSE_K <= MAX_FUSED_K);
+
+/// 連続 k axis (i_start, ..., i_start+k-1) の R_i(dt) ユニタリの
+/// **little-endian tensor product** を構築し, `2^k × 2^k` row-major matrix
+/// として `out` に書く.
+///
+/// R_i(dt) = cos(θ_i)·I + i·sin(θ_i)·X_i, θ_i = a_t · h_x[i] · dt の Trotter
+/// convention. row-major 2×2 表現は `[c, i·s, i·s, c]`:
+///
+/// - `R_j[0, 0] = R_j[1, 1] = c_j` (real, diagonal)
+/// - `R_j[0, 1] = R_j[1, 0] = i·s_j` (imaginary, off-diagonal)
+///
+/// tensor product: `out[r·m + c] = Π_j R_j[(r>>j)&1, (c>>j)&1]`. r/c の bit j
+/// は axis `i_start + j` の output/input bit に対応する.
+///
+/// 実装は (mag, imag_count) を集計してから最後に i^imag_count を掛ける形で
+/// `Complex64::mul` の連続呼出を避ける (constants `1`, `i`, `-1`, `-i` のみ).
+fn build_fused_axis_unitary(h_x_slice: &[f64], a_t: f64, dt: f64, out: &mut [Complex64]) {
+    let k = h_x_slice.len();
+    let m = 1usize << k;
+    debug_assert_eq!(out.len(), m * m, "out must have length 2^(2k) = {}", m * m);
+    debug_assert!(
+        k <= MAX_FUSED_K,
+        "k must be <= MAX_FUSED_K = {}",
+        MAX_FUSED_K
+    );
+
+    let mut cs = [(1.0_f64, 0.0_f64); MAX_FUSED_K];
+    for (cs_j, &h_x_j) in cs.iter_mut().zip(h_x_slice.iter()) {
+        let theta = a_t * h_x_j * dt;
+        let (s, c) = theta.sin_cos();
+        *cs_j = (c, s);
+    }
+
+    for r in 0..m {
+        for col in 0..m {
+            let mut mag = 1.0_f64;
+            let mut imag_count: u32 = 0;
+            for (j, &(cv, sv)) in cs.iter().enumerate().take(k) {
+                let rj = (r >> j) & 1;
+                let cj = (col >> j) & 1;
+                if rj == cj {
+                    mag *= cv;
+                } else {
+                    mag *= sv;
+                    imag_count += 1;
+                }
+            }
+            // i^0 = 1, i^1 = i, i^2 = -1, i^3 = -i.
+            out[r * m + col] = match imag_count & 3 {
+                0 => Complex64::new(mag, 0.0),
+                1 => Complex64::new(0.0, mag),
+                2 => Complex64::new(-mag, 0.0),
+                3 => Complex64::new(0.0, -mag),
+                _ => unreachable!(),
+            };
+        }
+    }
+}
 
 /// Strang 2 次 Trotter 1 step. `psi` を in-place で `U(dt) · psi` に上書きする.
 ///
@@ -119,10 +193,27 @@ pub(crate) fn trotter_step(
         psi[k] *= Complex64::new(c, s);
     }
 
-    // ---- 中間 Π_i R_i(dt): 各サイト i に 2×2 ユニタリを in-place 適用 ----
+    // ---- 中間 Π_i R_i(dt): 連続 FUSE_K qubit ずつ tensor product にまとめて
+    //      1 sweep で適用する (Phase 6 C3, multi-qubit gate fusion, issue #64). ----
+    //
+    // `H_drv = -Σ h_x_i X_i` は per-site で commuting なので
+    //   `exp(+i·a·dt·Σ_{j∈G} h_x_j X_j) = ⊗_{j∈G} exp(+i·θ_j X_j)`
+    // が exact. 連続 k qubit に限定すれば psi の sub-block は stride 2^i_start の
+    // 連続 2^k 要素となり, `apply_multi_qubit_gate_fused` で 1 rayon barrier
+    // (= 1 par_chunks_mut 呼出) に詰められる. 端数 (n が FUSE_K の倍数でない
+    // 場合) は従来通り `apply_single_mode_axis_i` で 1 軸ずつ適用する.
+    //
     // θ_i = +a_t · h_x_i · dt (モジュール冒頭 docstring の符号 convention 参照).
-    for (i, &h_x_i) in h_x.iter().enumerate() {
-        let theta = a_t * h_x_i * dt;
+    let mut i_cursor = 0usize;
+    // 2^(2·FUSE_K) の固定長 stack 配列で fused unitary を持つ.
+    let mut u_fused = [Complex64::new(0.0, 0.0); 1 << (2 * FUSE_K)];
+    while i_cursor + FUSE_K <= n {
+        build_fused_axis_unitary(&h_x[i_cursor..i_cursor + FUSE_K], a_t, dt, &mut u_fused);
+        apply_multi_qubit_gate_fused(psi, &u_fused, i_cursor, FUSE_K, n);
+        i_cursor += FUSE_K;
+    }
+    while i_cursor < n {
+        let theta = a_t * h_x[i_cursor] * dt;
         let (s, c) = theta.sin_cos();
         let u = [
             Complex64::new(c, 0.0),
@@ -130,7 +221,8 @@ pub(crate) fn trotter_step(
             Complex64::new(0.0, s),
             Complex64::new(c, 0.0),
         ];
-        apply_single_mode_axis_i(psi, &u, i, n);
+        apply_single_mode_axis_i(psi, &u, i_cursor, n);
+        i_cursor += 1;
     }
 
     // ---- 後半 phase_p(dt/2): 前半と同じ phase を再度乗算 ----
