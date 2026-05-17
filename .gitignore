@@ -25,6 +25,9 @@ python/kryanneal/_rust*.dylib
 # benchmark 結果 (timestamped CSV / markdown)
 /benchmarks/results/
 
+# tools/ 配下の検証スクリプト出力 (timestamped CSV / markdown)
+/tools/results/
+
 # BLAS 数値一致 artifact (test_blas_consistency.py が `blas_on.npz` /
 # `blas_off.npz` を書き込む). 詳細は同テストの docstring 参照.
 /tests/artifacts/
