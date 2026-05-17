@@ -5,7 +5,7 @@ per-step time を計測する.
 
 | kernel | 計測理由 |
 |---|---|
-| ``trotter_step`` | Phase 6 C3 の主スコープ. ``apply_single_mode_axis_i`` を 1 軸ずつ ``n`` 回呼ぶ旧実装から, 連続 ``FUSE_K = 4`` qubit を tensor product でまとめて 1 sweep で適用する ``apply_multi_qubit_gate_fused`` 経路に書き換えた効果を測る. 期待: per-step rayon barrier 数 ``2n+2 → n/FUSE_K + 2``, N=20 で 40 → 7. |
+| ``trotter_step`` | Phase 6 C3 の主スコープ. ``apply_single_mode_axis_i`` を 1 軸ずつ ``n`` 回呼ぶ旧実装から, 連続 ``FUSE_K = 4`` qubit を 1 つの rayon chunk closure 内で per-axis 逐次に適用する ``apply_multi_qubit_gate_fused`` 経路に書き換えた効果を測る. 期待: per-step rayon barrier 数 ``2n+2 → n/FUSE_K + 2``, N=20 で 40 → 7. compute は per-axis × k と同じ (`2k·dim` ops, 増えない) で chunk-resident cache 効果と barrier 削減のみで稼ぐ (dense 2^k×2^k matmul 経路は本 PR 初版で 0.81× regression したため放棄). |
 | ``apply_h_kryanneal`` | Phase 6 C3 の副次スコープ. ``RAYON_CHUNK_MAX`` を ``1<<14`` (= 256 KB chunk) から ``1<<13`` (= 128 KB chunk) に縮めて per-core L2 fit を保証した効果. 高 i pass で chunk-partner block の DRAM round trip が減ることを期待. |
 
 両 kernel とも本 script は **計測本体のみ** 提供する. baseline (Phase 6 C2
@@ -221,9 +221,11 @@ def _write_markdown(
     for k, v in machine.items():
         lines.append(f"- **{k}**: `{v}`")
     lines.append("")
-    lines.append("## per-cell median wall time (repeat={})".format(
-        len(next(iter(cells.values()))) if cells else 0,
-    ))
+    lines.append(
+        "## per-cell median wall time (repeat={})".format(
+            len(next(iter(cells.values()))) if cells else 0,
+        )
+    )
     lines.append("")
     lines.append("| n | kernel | median wall_sec | median calls/sec |")
     lines.append("|---|---|---|---|")
@@ -231,9 +233,7 @@ def _write_markdown(
         wall_list_sorted = sorted(wall_list)
         med = wall_list_sorted[len(wall_list_sorted) // 2]
         calls_per_sec = 1.0 / med if med > 0 else float("inf")
-        lines.append(
-            f"| {n} | {kernel} | {med:.6e} | {calls_per_sec:.3e} |"
-        )
+        lines.append(f"| {n} | {kernel} | {med:.6e} | {calls_per_sec:.3e} |")
     lines.append("")
     lines.append("## 使い方 (baseline vs after の手動 diff)")
     lines.append("")
@@ -245,9 +245,7 @@ def _write_markdown(
         "2. 2 つの md / CSV を見比べ, per-cell speedup = "
         "`baseline_median / after_median` を計算."
     )
-    lines.append(
-        "3. acceptance: `n=20`, `kernel=trotter_step` で `speedup >= 1.3`."
-    )
+    lines.append("3. acceptance: `n=20`, `kernel=trotter_step` で `speedup >= 1.3`.")
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -308,9 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         "--output-dir",
         type=Path,
         default=None,
-        help=(
-            "結果出力ディレクトリ (default benchmarks/results/<YYYYMMDD-HHMMSS>/)"
-        ),
+        help=("結果出力ディレクトリ (default benchmarks/results/<YYYYMMDD-HHMMSS>/)"),
     )
     parser.add_argument(
         "--output-json",
@@ -349,11 +345,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             if kernel == "trotter_step":
                 timings = _measure_trotter_step(
-                    n, repeat=args.repeat, warmup=args.warmup, dt=args.dt,
+                    n,
+                    repeat=args.repeat,
+                    warmup=args.warmup,
+                    dt=args.dt,
                 )
             elif kernel == "apply_h_kryanneal":
                 timings = _measure_apply_h_kryanneal(
-                    n, repeat=args.repeat, warmup=args.warmup,
+                    n,
+                    repeat=args.repeat,
+                    warmup=args.warmup,
                 )
             else:
                 raise AssertionError(f"unreachable: kernel={kernel!r}")

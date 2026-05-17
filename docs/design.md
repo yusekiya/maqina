@@ -908,58 +908,57 @@ phase × 2)。N=20 で 1.55× で頭打ちになるのはこの barrier overhead
 compute 短縮分を食い潰すため (`apply_single_mode_axis_i` 1 回の compute
 ≈ 2.5 ms に対し rayon barrier ~ms 級, ratio 1:1 程度)。
 
-**解決方針 (Häner-Steiger 2017 §3.3, qsim `MultiQubitGateFuser` 同型)**:
-連続 k 個の `R_i` を **tensor product** `R_{i+k-1} ⊗ ... ⊗ R_i` の
-`2^k × 2^k` ユニタリ `U` にまとめ, **1 sweep** で psi 全体に適用する.
+**初期試行 (PR #78 初版, 放棄)**: 連続 k 個の `R_i` を **tensor product**
+`R_{i+k-1} ⊗ ... ⊗ R_i` の `2^k × 2^k` dense unitary に畳んで chunk closure
+内で 1 回の dense matmul (qsim `MultiQubitGateFuser` / Häner-Steiger 2017 §3.3
+同型) で apply する方針を採った. しかし Linux 本番 bench で **N=20 で
+`trotter_step` が 0.81× regression** した. 原因: per-axis × k の compute は
+`2k·dim` ops だが dense matmul は `2^k·dim` ops で k=4 のとき 2× 多く,
+TFIM 規模では memory-bandwidth gain よりも compute 増のほうが勝ったため.
+
+**現実装 (per-axis 逐次)**: tensor product matmul を諦め, **chunk closure 内で
+k 個の axis に対して per-axis 2-pair update を逐次** 実行する形に変更.
 kryanneal の `H_drv = -Σ h_x_i X_i` は **per-site で commuting** なので
-tensor product 表記が exact (Trotter 誤差は導入しない):
-
-```text
-exp(+i·a_t·dt·Σ_{j∈G} h_x_j X_j) = ⊗_{j∈G} exp(+i·θ_j X_j),  θ_j = a_t·h_x_j·dt
-```
-
-ここで G は連続 k qubit 集合 `{i_start, i_start+1, ..., i_start+k-1}`. これを
-state vector の `(2^k)-sub-block` ごとに 1 回の dense 2^k × 2^k matvec で
-適用する. ω_q-fold の中で **連続 k qubit** に限定すれば sub-block は psi
-の物理メモリ上で **stride `2^i_start` の 2^k 要素列** となり, qsim の
-`_pdep_u64` mask gather が不要 (kryanneal の TFIM 固有の単純化).
+`exp(+i·a_t·dt·Σ_{j∈G} h_x_j X_j) = Π_{j∈G} exp(+i·θ_j X_j)` を逐次適用しても
+exact (Trotter 誤差は導入しない). compute は per-axis × k と同じ
+(`2k·dim` ops, 増えない), barrier は 1 per fused call (`n/k 倍` 削減),
+chunk が L2 fit な間に全 k pass を完走することで DRAM round trip 削減
+の効果を狙う.
 
 擬似コード (`src/matvec.rs::apply_multi_qubit_gate_fused`):
 
 ```rust
-/// `psi` の連続 k qubit (i_start .. i_start+k) に 2^k × 2^k ユニタリ `u` を
-/// fused apply (in-place).  `u` は row-major (row index = output bit pattern).
-///
-/// outer 構造: stride = 2^i_start, group_block = 2^(i_start+k).
-/// outer block 数 = dim / group_block, 各 outer block 内に 2^i_start 個の
-/// independent stride-2^i_start subspace がある.
+/// `psi` の連続 k qubit (i_start, ..., i_start+k-1) に 2×2 ユニタリ列 u_list
+/// を per-axis 逐次で in-place 適用する.
 pub(crate) fn apply_multi_qubit_gate_fused(
     psi: &mut [Complex64],
-    u: &[Complex64],         // length 2^k · 2^k, row-major
+    u_list: &[[Complex64; 4]],   // k 個の row-major 2×2 unitary
     i_start: usize,
-    k: usize,
     n: usize,
 ) {
-    let dim = 1 << n;
-    let stride = 1 << i_start;          // 2^i_start
-    let group_block = stride << k;       // 2^(i_start+k)
-    let m = 1 << k;                      // 2^k
-    // outer block 単位で par_chunks_mut.  各 chunk 内では `stride` 個の
-    // 独立 subspace について 2^k × 2^k matmul を実行する.
-    psi.par_chunks_mut(group_block).for_each(|block| {
-        for offset in 0..stride {
-            // subspace 要素: block[offset + j · stride] for j in 0..m
-            let mut x = [Complex64::default(); MAX_FUSED_DIM]; // m <= MAX_FUSED_DIM
-            for j in 0..m {
-                x[j] = block[offset + j * stride];
-            }
-            // y = u @ x  (2^k × 2^k matmul)
-            for row in 0..m {
-                let mut s = Complex64::default();
-                for col in 0..m {
-                    s += u[row * m + col] * x[col];
+    let k = u_list.len();
+    let group_block = 1usize << (i_start + k);     // 最大 axis の block 2 倍
+    // chunk_size を group_block の整数倍で RAYON_CHUNK_MAX 程度に揃える.
+    let chunk_size = if group_block >= RAYON_CHUNK_MAX {
+        group_block
+    } else {
+        (RAYON_CHUNK_MAX / group_block).max(1) * group_block
+    };
+    psi.par_chunks_mut(chunk_size).for_each(|chunk| {
+        // chunk 内で k 個の axis を順次 apply (per-axis 2-pair update).
+        for (j, u) in u_list.iter().enumerate() {
+            let i = i_start + j;
+            let mask = 1usize << i;
+            let block = mask << 1;
+            let mut base = 0;
+            while base + block <= chunk.len() {
+                let (lo, hi) = chunk[base..base + block].split_at_mut(mask);
+                for (a, b) in lo.iter_mut().zip(hi.iter_mut()) {
+                    let (av, bv) = (*a, *b);
+                    *a = u[0]*av + u[1]*bv;
+                    *b = u[2]*av + u[3]*bv;
                 }
-                block[offset + row * stride] = s;
+                base += block;
             }
         }
     });
@@ -968,52 +967,45 @@ pub(crate) fn apply_multi_qubit_gate_fused(
 
 **k の選択方針** (qsim の経験値 `max_fused_size = 4-5` を踏襲):
 
-- `k = 2`: 2^k = 4, 16 byte × 4 = 64 byte = L1 cache line。最小単位。
-- `k = 4`: 2^k = 16, 256 byte stack 配列で済む。compute / barrier ratio 改善。
-- `k = 6`: 2^k = 64, 1024 byte。L1 register pressure 上限近辺。
+- `k = 4`: barrier 削減 4× と chunk-resident cache 効果の bench でのバランス点
+  として default. inner u_list 配列 `[[Complex64; 4]; 4]` = `128 B` で stack 確保.
+- `k <= MAX_FUSED_K = 6`: hard 上限 (実用上の cost / benefit).
 
 kryanneal は `k = 4` を default とし `bench_block_fusion.py` で sweep で確認.
 
 **trotter_step の書き換え** (`src/trotter.rs`):
 
 ```rust
-const FUSE_K: usize = 4;   // multi-qubit gate fusion 単位
+const FUSE_K: usize = 4;
 
 pub(crate) fn trotter_step(psi, h_x, h_p_diag, a_t, b_t, dt, n) {
-    // phase_p(dt/2) は rayon par_chunks_mut で 1 sweep
-    parallel_phase_p(psi, h_p_diag, b_t, dt / 2.0);
+    // ... 前半 phase_p(dt/2) (serial loop, 別 issue でも並列化検討) ...
 
-    // 連続 FUSE_K qubit ごとに R_i を fuse して 1 sweep で適用
+    // 連続 FUSE_K qubit ごとに R_i を fuse して 1 barrier で適用.
     let mut i = 0;
+    let mut u_list = [[Complex64::new(0.0, 0.0); 4]; FUSE_K];
     while i + FUSE_K <= n {
-        let u_2k = build_tensor_product_unitary(&h_x[i..i + FUSE_K], a_t, dt);
-        apply_multi_qubit_gate_fused(psi, &u_2k, i, FUSE_K, n);
+        build_axis_unitaries(&h_x[i..i + FUSE_K], a_t, dt, &mut u_list);
+        apply_multi_qubit_gate_fused(psi, &u_list, i, n);
         i += FUSE_K;
     }
-    // 端数 qubit (i .. n) は従来の per-axis apply.  n が FUSE_K の倍数なら
-    // このループは実行されない.
+    // 端数: n mod FUSE_K 個の qubit を per-axis で apply.
     while i < n {
-        let theta = a_t * h_x[i] * dt;
-        let (s, c) = theta.sin_cos();
-        let u = [
-            Complex64::new(c, 0.0),
-            Complex64::new(0.0, s),
-            Complex64::new(0.0, s),
-            Complex64::new(c, 0.0),
-        ];
+        ...
         apply_single_mode_axis_i(psi, &u, i, n);
         i += 1;
     }
-    parallel_phase_p(psi, h_p_diag, b_t, dt / 2.0);
+
+    // ... 後半 phase_p(dt/2) ...
 }
 ```
 
 **期待される barrier 削減**:
 
-- 現状: 2n + 2 barrier @ trotter_step (phase_p × 2 + axis_i × n + 再 diag × 1 が
-  serial loop は除く). N=20 で **40+**.
-- 改修後: `ceil(n / FUSE_K) + 2 + (n mod FUSE_K)` ≈ `n / FUSE_K + 2` (端数なし
-  ケース). N=20, k=4 で **7** (phase_p × 2 + 5 fused gate sweep).
+- 現状: `2n + 2` barrier @ trotter_step (phase_p × 2 + axis_i × n + 再 diag).
+  N=20 で **40+**.
+- 改修後: `n/k + 2 + (n mod k)` ≈ **`n/k + 2`** (端数なしケース).
+  N=20, k=4 で **7** (phase_p × 2 + 5 fused gate sweep).
 
 apply_h_kryanneal 経路 (cfm4_step / m2_midpoint_step 内) は既存実装で 1 回の
 matvec = 1 barrier なので追加の fusion は不要 (上記スコープ A は trotter
@@ -2049,12 +2041,15 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   (理論 64× の ~9.6%), `trotter_step` が 1.55× (rayon barrier × 2n の
   overhead) で頭打ちと判明。C3 は以下 2 つの独立サブ最適化で構成
   (§5.1.3 を一次資料):
-  - **A. multi-qubit gate fusion**: 連続 k qubit (default k=4) の R_i を
-    `2^k × 2^k` tensor product unitary に畳んで 1 sweep で適用. trotter_step
-    の barrier 数を `2n+2` → `n/k + 2` に縮める. kryanneal の `H_drv = -Σ
-    h_x_i X_i` が **per-site commuting** で tensor product 表記が exact
-    (Trotter 誤差を導入しない) という TFIM 固有の単純化を活用. qsim
-    `MultiQubitGateFuser` / Häner-Steiger 2017 §3.3 が先行実装.
+  - **A. multi-qubit gate fusion (per-axis 逐次経路)**: 連続 k qubit (default
+    k=4) の R_i を **1 つの rayon chunk closure 内で per-axis 2-pair update を
+    逐次** 実行. trotter_step の barrier 数を `2n+2` → `n/k + 2` に縮める.
+    kryanneal の `H_drv = -Σ h_x_i X_i` が **per-site commuting** で逐次適用が
+    exact (Trotter 誤差なし) という TFIM 固有の性質を活用. 初版 (PR #78) は
+    qsim 流 dense 2^k × 2^k matmul を採用したが Linux 本番 bench で
+    `trotter_step` が **0.81× regression** したため per-axis 逐次経路に
+    切替 (dense matmul の compute は per-axis × k の 2× 重く, TFIM 規模では
+    memory-bandwidth gain よりも compute 増が勝った). 詳細は §5.1.3.
   - **B. L2-aware chunk_size**: `apply_h_kryanneal_rayon` の `RAYON_CHUNK_MAX`
     を `1 << 14` (= 256 KB) → `1 << 13` (= 128 KB) に縮め, 64-thread 同時
     実行で per-core L2 fit を保証. chunk-pair (高 i pass の `v[k^mask]`)
