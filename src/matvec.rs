@@ -884,12 +884,7 @@ fn apply_h_kryanneal_rayon(
 /// # Panics
 /// - `psi.len() != 1 << n`
 /// - `i >= n`
-pub(crate) fn apply_single_mode_axis_i(
-    psi: &mut [Complex64],
-    u: &[Complex64; 4],
-    i: usize,
-    n: usize,
-) {
+pub fn apply_single_mode_axis_i(psi: &mut [Complex64], u: &[Complex64; 4], i: usize, n: usize) {
     let dim = 1usize << n;
     assert_eq!(psi.len(), dim, "psi must have length 2^n");
     assert!(i < n, "i={} must be < n={}", i, n);

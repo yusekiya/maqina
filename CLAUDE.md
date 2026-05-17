@@ -255,16 +255,18 @@ i ∈ {0, 1, 2} を SIMD 特化 (`feature = "simd"`, default ON)。
 - **`--no-default-features` ビルド**: SIMD 依存も外れ scalar 経路に戻る。
   `wide` クレートはリンクされない。
 
-## perf 計測用 binary (Phase 6 D follow-up, issue #79 / #82)
+## perf 計測用 binary (Phase 6 D follow-up, issue #79 / #82 / #90)
 
-`apply_h_kryanneal` / `trotter_step` の真の bottleneck (DRAM bound / L3
-contention / barrier 等のどれか) を Linux `perf stat` で hardware counter
-から特定するための pure-Rust 計測 binary を `src/bin/` に配置:
+`apply_h_kryanneal` / `trotter_step` / `apply_single_mode_axis_i` の真の
+bottleneck (DRAM bound / L3 contention / barrier / chunk_size 戦略の差 等の
+どれか) を Linux `perf stat` で hardware counter から特定するための
+pure-Rust 計測 binary を `src/bin/` に配置:
 
 | binary | 対象 kernel | 主な用途 |
 |---|---|---|
 | `src/bin/perf_apply_h.rs` | `apply_h_kryanneal` (matvec) | #79 Phase D 試行で確立した DRAM/L2 latency 計測 |
 | `src/bin/perf_trotter_step.rs` | `trotter_step` (Strang 2 次 Trotter 1 step) | #82 で C3 multi-qubit gate fusion + phase_p rayon 化の真の compute speedup 検証 |
+| `src/bin/perf_apply_single_mode_axis_i.rs` | `apply_single_mode_axis_i` (Trotter per-axis 2×2 ユニタリ) | #90 で #71 fixup `578d050` (動的 chunk_size) 棄却判断を perf binary で再評価 |
 
 いずれも Python の `bench_*.py` が `*_py` (allocate-and-return) 経路の
 alloc/copy overhead で wall-time を歪めるのを回避し,
@@ -275,11 +277,13 @@ Rust 側 micro-optimization の compute 効果だけを切り出す目的.
 ```bash
 RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_apply_h
 RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_trotter_step
+RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_apply_single_mode_axis_i
 ```
 
 対象関数は `pub fn` に上げ, `crate::bench_api` (`src/lib.rs`) で再 export
-している (`apply_h_kryanneal`, `trotter_step`). Python 側 API
-(`_rust.apply_h_kryanneal_py` / `_rust.trotter_step_py` 等) には影響なし.
+している (`apply_h_kryanneal`, `trotter_step`, `apply_single_mode_axis_i`).
+Python 側 API (`_rust.apply_h_kryanneal_py` / `_rust.trotter_step_py` /
+`_rust.apply_single_mode_axis_i_inplace_py` 等) には影響なし.
 
 計測例 (Linux, AMD EPYC で実証済み):
 
@@ -308,6 +312,16 @@ RAYON_NUM_THREADS=64 perf stat \
     -e l2_request_g1.all_no_prefetch,l2_cache_req_stat.ic_dc_miss_in_l2 \
     -e l2_latency.l2_cycles_waiting_on_fills \
     -- ./target/release/perf_trotter_step 20 500
+
+# apply_single_mode_axis_i (issue #90 C2.5 chunk_size audit). 第 3 引数で
+# axis i を指定 (default 0 = SIMD path). i ∈ {0,1,2} で SIMD path,
+# i >= 3 で scalar path.
+RAYON_NUM_THREADS=64 perf stat \
+    -e cycles,instructions,branch-misses \
+    -e stalled-cycles-backend,stalled-cycles-frontend \
+    -e l2_request_g1.all_no_prefetch,l2_cache_req_stat.ic_dc_miss_in_l2 \
+    -e l2_latency.l2_cycles_waiting_on_fills \
+    -- ./target/release/perf_apply_single_mode_axis_i 20 500 0
 ```
 
 binary は stderr に wall time / per-iter time / sink (DCE 防止) を出し,

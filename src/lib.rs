@@ -56,16 +56,19 @@ mod trotter;
 
 /// **In-tree benchmarking / profiling 用の `pub` re-export**.
 ///
-/// `src/bin/perf_apply_h.rs` / `src/bin/perf_trotter_step.rs` (Linux
-/// `perf stat` 等で hardware counter を取るための pure-Rust binary) から
-/// `apply_h_kryanneal` / `trotter_step` を呼べるよう公開する.
-/// このモジュールは Python 側には露出されない (pyo3 `#[pymodule]` には登録
-/// しない).
+/// `src/bin/perf_apply_h.rs` / `src/bin/perf_trotter_step.rs` /
+/// `src/bin/perf_apply_single_mode_axis_i.rs` (Linux `perf stat` 等で
+/// hardware counter を取るための pure-Rust binary) から
+/// `apply_h_kryanneal` / `trotter_step` / `apply_single_mode_axis_i` を
+/// 呼べるよう公開する. このモジュールは Python 側には露出されない
+/// (pyo3 `#[pymodule]` には登録しない).
 ///
 /// Python 経由で呼びたい場合は引き続き `_rust.apply_h_kryanneal_py` /
-/// `_rust.trotter_step_py` (および in-place 版) を使うこと.
+/// `_rust.trotter_step_py` / `_rust.apply_single_mode_axis_i_inplace_py`
+/// (および non-inplace 版) を使うこと.
 pub mod bench_api {
     pub use crate::matvec::apply_h_kryanneal;
+    pub use crate::matvec::apply_single_mode_axis_i;
     pub use crate::trotter::trotter_step;
 }
 
