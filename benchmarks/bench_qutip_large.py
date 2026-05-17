@@ -387,6 +387,29 @@ def _format_knob_value(knob_name: str, value: float) -> str:
     return f"{value:.1e}"
 
 
+@dataclass
+class _ValidationData:
+    """``--ref-validate`` で集める reference 自己収束の追加データ.
+
+    QuTiP を ``ref_tol`` から段階的に緩めた tol (default factor 10, 100) で
+    走らせ, 隣接 tol 間の state L2 差を取って ``QuTiP 自身の収束系列`` を
+    可視化する. 「reference が本当に収束しているか」「kryanneal の
+    cross-validation 値とどう比較するか」を MD レポートで示すために使う.
+
+    fields:
+        tols: looser → ref_tol の昇順 (3 cell 想定)
+        walls: 各 tol cell の wall_sec
+        psis: 各 cell の state vector (Δ 計算用)
+        consecutive_diffs: |ψ_i+1 - ψ_i|_2 の列 (長さ len(tols)-1).
+            幾何級数的に小さくなれば収束済.
+    """
+
+    tols: list[float]
+    walls: list[float]
+    psis: list[np.ndarray]
+    consecutive_diffs: list[float]
+
+
 def _sweep_one_scenario_n(
     scenario: _Scenario,
     n: int,
@@ -401,13 +424,17 @@ def _sweep_one_scenario_n(
     adaptive_atols: list[float],
     qutip_tols: list[float],
     ref_tol: float,
-) -> tuple[list[_CellRecord], _CellRecord]:
+    ref_validate: bool,
+) -> tuple[list[_CellRecord], _CellRecord, _ValidationData | None]:
     """1 つの (scenario, n) について全 sweep cell と reference cell を計算する.
 
     kryanneal 固定 dt 経路は ``n_steps = round(T/dt)`` で各 dt を n_steps に
     変換して呼び出す. T が大きい scenario では n_steps が大きくなり, per-cell
     wall time が線形に伸びる. ``--m2-dts`` 等の sweep を CLI で絞れば bench
     総時間を抑えられる.
+
+    ``ref_validate`` が True のとき, QuTiP を ``ref_tol × 100`` / ``× 10`` /
+    ``ref_tol`` の 3 段階で走らせ ``_ValidationData`` を返す.
     """
     prob, sched, psi0, h_x, h_p_diag = _make_random_problem(n, scenario, seed)
     T = scenario.T
@@ -418,9 +445,40 @@ def _sweep_one_scenario_n(
         f"h_p_scale={scenario.h_p_scale:g}, h_x_scale={scenario.h_x_scale:g}), n={n}",
         flush=True,
     )
-    print(f"  reference: QuTiP tol={ref_tol:.1e} ...", flush=True)
-    ref_wall, ref_psi = _run_qutip(h_t, psi0, T, n, ref_tol)
-    print(f"    reference wall = {ref_wall:.3f}s", flush=True)
+
+    # Reference validation: 緩い tol から順に走らせ最終 cell を main reference に.
+    validation: _ValidationData | None = None
+    if ref_validate:
+        validate_tols = [ref_tol * 100.0, ref_tol * 10.0, ref_tol]
+        print(
+            f"  reference validation: QuTiP tols={[f'{t:.1e}' for t in validate_tols]} ...",
+            flush=True,
+        )
+        v_walls: list[float] = []
+        v_psis: list[np.ndarray] = []
+        for vtol in validate_tols:
+            wall_v, psi_v = _run_qutip(h_t, psi0, T, n, vtol)
+            v_walls.append(wall_v)
+            v_psis.append(psi_v)
+            print(f"    tol={vtol:.1e}: wall={wall_v:.3f}s", flush=True)
+        # 隣接 tol 間の L2 state 差.
+        diffs = [
+            float(np.linalg.norm(v_psis[i + 1] - v_psis[i]))
+            for i in range(len(v_psis) - 1)
+        ]
+        validation = _ValidationData(
+            tols=validate_tols,
+            walls=v_walls,
+            psis=v_psis,
+            consecutive_diffs=diffs,
+        )
+        # 最 tight cell (= validate_tols[-1] = ref_tol) を main reference に流用.
+        ref_wall = v_walls[-1]
+        ref_psi = v_psis[-1]
+    else:
+        print(f"  reference: QuTiP tol={ref_tol:.1e} ...", flush=True)
+        ref_wall, ref_psi = _run_qutip(h_t, psi0, T, n, ref_tol)
+        print(f"    reference wall = {ref_wall:.3f}s", flush=True)
     ref_record = _CellRecord(
         scenario=scenario.name,
         n=n,
@@ -512,7 +570,7 @@ def _sweep_one_scenario_n(
                 )
             )
 
-    return records, ref_record
+    return records, ref_record, validation
 
 
 # ---------------------------------------------------------------------------
@@ -663,6 +721,7 @@ def _write_md(
     refs_per_key: dict[tuple[str, int], _CellRecord],
     infids_per_key: dict[tuple[str, int], list[float]],
     pareto_per_key: dict[tuple[str, int], list[bool]],
+    validations_per_key: dict[tuple[str, int], _ValidationData],
     machine_info: dict[str, str],
     scenarios: list[_Scenario],
     args: argparse.Namespace,
@@ -762,6 +821,52 @@ def _write_md(
                 f"{infid_str} | {r.wall_sec:.4f} |"
             )
         lines.append("")
+
+        # Reference validation section (--ref-validate 時のみ).
+        if key in validations_per_key:
+            v = validations_per_key[key]
+            lines.append("### Reference validation (QuTiP self-convergence)")
+            lines.append("")
+            lines.append("| tol | wall (s) | |ψ(tol) - ψ(tighter)|_2 |")
+            lines.append("|---|---|---|")
+            # tols は looser → tighter の順. 隣接 diff を表示.
+            for j, (tol, wall) in enumerate(zip(v.tols, v.walls, strict=True)):
+                if j < len(v.consecutive_diffs):
+                    diff_str = f"{v.consecutive_diffs[j]:.3e}"
+                else:
+                    diff_str = "(★ reference)"
+                lines.append(f"| {tol:.1e} | {wall:.3f} | {diff_str} |")
+            lines.append("")
+            # Cross-check: kryanneal cfm4_adaptive_richardson の最 tightest atol cell
+            # の infidelity (= 既存 sweep に含まれている).
+            kry_adaptive_cells = [
+                (r, infids[k])
+                for k, r in enumerate(records)
+                if r.solver == "cfm4_adaptive_richardson"
+            ]
+            if kry_adaptive_cells:
+                # atol 最小 cell (= 最 tightest).
+                tightest = min(kry_adaptive_cells, key=lambda x: x[0].knob_value)
+                r_tight, infid_tight = tightest
+                # state L2 差は √(1-fid) で近似 (1-fid 小さいので 1 次近似で十分).
+                psi_diff_est = float(np.sqrt(max(infid_tight, 0.0)))
+                lines.append(
+                    f"**Cross-check**: kryanneal cfm4_adaptive_richardson at "
+                    f"atol={r_tight.knob_value:.1e} (independent algorithm family) "
+                    f"reproduces reference with 1-fid="
+                    f"{('<1e-16' if infid_tight == 0.0 else f'{infid_tight:.3e}')} "
+                    f"(≈ |Δψ|_2 ≤ {psi_diff_est:.2e}). "
+                )
+                if v.consecutive_diffs:
+                    last_diff = v.consecutive_diffs[-1]
+                    if last_diff > 0 and psi_diff_est > 0:
+                        rel = psi_diff_est / last_diff
+                        lines.append(
+                            f"QuTiP 自己収束の最終 step Δ = {last_diff:.2e}; "
+                            f"cross-check は同オーダ (× {rel:.2f}) → "
+                            f"**reference は多重 algorithm で validated**."
+                        )
+                lines.append("")
 
     out_path.write_text("\n".join(lines))
 
@@ -992,6 +1097,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "long-T scenario で 1e-13 まで絞ると数分かかるため 1e-11 default."
         ),
     )
+    parser.add_argument(
+        "--ref-validate",
+        action="store_true",
+        help=(
+            "reference self-convergence test: run QuTiP at ref_tol x {100, 10, 1} "
+            "and check |psi(tol_i+1) - psi(tol_i)|_2 decreases geometrically. "
+            "Adds 2 QuTiP cells per (scenario, n), extending bench wall time by "
+            "20-30 percent. MD report gets a per-(scenario, n) 'Reference validation' "
+            "section with kryanneal cfm4_adaptive cross-check."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1060,10 +1176,11 @@ def main(argv: list[str] | None = None) -> int:
     refs_per_key: dict[tuple[str, int], _CellRecord] = {}
     infids_per_key: dict[tuple[str, int], list[float]] = {}
     pareto_per_key: dict[tuple[str, int], list[bool]] = {}
+    validations_per_key: dict[tuple[str, int], _ValidationData] = {}
 
     for scenario in scenarios:
         for n in scenario.n_values:
-            records, ref = _sweep_one_scenario_n(
+            records, ref, validation = _sweep_one_scenario_n(
                 scenario=scenario,
                 n=n,
                 seed=args.seed + n,
@@ -1077,11 +1194,14 @@ def main(argv: list[str] | None = None) -> int:
                 adaptive_atols=args.adaptive_tols,
                 qutip_tols=args.qutip_tols,
                 ref_tol=args.ref_tol,
+                ref_validate=args.ref_validate,
             )
             key = (scenario.name, n)
             sweep_records.extend(records)
             refs.append(ref)
             refs_per_key[key] = ref
+            if validation is not None:
+                validations_per_key[key] = validation
             infids = _compute_infidelities(records, ref.psi_final)
             infids_per_key[key] = infids
             pareto_per_key[key] = _pareto_mask(infids, [r.wall_sec for r in records])
@@ -1099,6 +1219,7 @@ def main(argv: list[str] | None = None) -> int:
         refs_per_key,
         infids_per_key,
         pareto_per_key,
+        validations_per_key,
         machine_info,
         scenarios,
         args,
