@@ -270,14 +270,23 @@ i ∈ {0, 1, 2} を SIMD 特化 (`feature = "simd"`, default ON)。
   `apply_fused_axes_to_chunk` の SIMD dispatch に入れている。
 - **実 SIMD 性能向上は build 時の `target-cpu` 設定に依存する**: default の
   `x86_64` target では `wide` が scalar fallback ([f64; 4] 相当) を選び
-  正確性のみ提供する。**本番 measure は `RUSTFLAGS="-C target-cpu=native"`
-  を必ず設定する** (AVX2 / AVX-512 / NEON を `wide` の `target_feature` cfg
-  が拾えるようになる)。
-- **`__has_simd__` / `__has_rayon__` フラグ**: `_rust.__has_simd__: bool` /
-  `_rust.__has_rayon__: bool` が build profile を露出する (`__has_blas__`
-  と同様)。bench スクリプト (`bench_simd_scaling.py`) はこれで build を
-  識別する。bench は C2 と C2.5 で kernel 軸を分け
-  (`kernel = apply_h_kryanneal / apply_single_mode_axis_i`),
+  正確性のみ提供する。issue #103 で **repo 同梱の `.cargo/config.toml` に
+  `[build] rustflags = ["-C", "target-cpu=native"]` を入れて default 適用**
+  しているため, `uv add git+...` / `cargo build` / `maturin develop` のどの
+  経路でも build マシン CPU の AVX2 / AVX-512 / NEON が `wide` の
+  `target_feature` cfg で自動的に拾われる。明示的に `RUSTFLAGS` を渡したい
+  ときは env 経由が優先されるので override 可。
+- **build profile 確認フラグ**: cargo feature 有効化を `_rust.__has_simd__`
+  / `__has_rayon__` / `__has_blas__` (各 bool, `cfg!(feature = ...)` 由来),
+  target_feature 有効化を `_rust.__has_avx2__` / `__has_fma__` /
+  `__has_avx512f__` / `__has_neon__` (各 bool, `cfg!(target_feature = ...)`
+  由来), ビルドターゲットを `_rust.__target_arch__` / `__target_os__`
+  (各 str, `std::env::consts` 由来) が expose する (`m.add` 経由, build.rs
+  不要)。ユーザー向けには `kryanneal.show_config()` (numpy.show_config 相当)
+  でこれらを集約 dump できる (issue #103, 詳細は
+  `docs/design/11-build-infrastructure.md` §11.1)。bench スクリプト
+  (`bench_simd_scaling.py`) はこれで build を識別する。bench は C2 と C2.5 で
+  kernel 軸を分け (`kernel = apply_h_kryanneal / apply_single_mode_axis_i`),
   C2.5 の per-axis (`i0/i1/i2`) は `mode` 軸で別カラムに展開する。
 - **`--no-default-features` ビルド**: SIMD 依存も外れ scalar 経路に戻る。
   `wide` クレートはリンクされない。

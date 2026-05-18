@@ -58,9 +58,10 @@ __all__ = [
     "QuantumResult",
     "Schedule",
     "Trajectory",
+    "available_blas_threads",
     "instantaneous_eigenstates",
     "set_blas_threads",
-    "available_blas_threads",
+    "show_config",
 ]
 
 
@@ -146,3 +147,67 @@ def available_blas_threads() -> int:
     else:
         n_blas = n_cpu
     return max(1, min(n_blas, n_cpu))
+
+
+def show_config() -> None:
+    """ビルド構成を stdout に dump する (``numpy.show_config()`` 相当, issue #103).
+
+    repo 同梱の ``.cargo/config.toml`` で ``-C target-cpu=native`` が default
+    適用されるが, それが実際に build 時の SIMD 経路 (``wide::f64x4``) に
+    反映されたか (= AVX2 / AVX-512 / NEON dispatch を選んだか) を確認する
+    ためのヘルパ. ``uv add git+...`` 経由のソースビルド直後やベンチを取る
+    前の build profile 確認に用いる.
+
+    出力項目:
+
+    * ``version``: ``importlib.metadata.version("kryanneal")`` で取得.
+    * ``target arch`` / ``target OS``: Rust 拡張のビルドターゲット
+      (``_rust.__target_arch__`` / ``__target_os__``, ``std::env::consts``
+      由来).
+    * ``cargo features``: ``__has_blas__`` / ``__has_rayon__`` / ``__has_simd__``
+      (``cfg!(feature = "...")`` 由来).
+    * ``target_features``: ``__has_avx2__`` / ``__has_fma__`` /
+      ``__has_avx512f__`` / ``__has_neon__`` (``cfg!(target_feature = "...")``
+      由来). ``target-cpu=native`` の効きを反映.
+
+    Rust 拡張 (``kryanneal._rust``) が import できない環境では各行を
+    ``unavailable`` と表示する.
+    """
+    import importlib
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
+
+    try:
+        rust_mod = importlib.import_module("kryanneal._rust")
+    except ImportError:
+        rust_mod = None
+
+    try:
+        ver = _pkg_version("kryanneal")
+    except PackageNotFoundError:
+        ver = "unknown"
+
+    def _attr(name: str) -> object:
+        if rust_mod is None:
+            return "unavailable"
+        return getattr(rust_mod, name, "unavailable")
+
+    print("kryanneal build configuration")
+    print("-" * 50)
+    print(f"  version       : {ver}")
+    print(f"  target arch   : {_attr('__target_arch__')}")
+    print(f"  target OS     : {_attr('__target_os__')}")
+    print()
+    print("  cargo features:")
+    print(f"    BLAS  : {_attr('__has_blas__')}")
+    print(f"    rayon : {_attr('__has_rayon__')}")
+    print(f"    SIMD  : {_attr('__has_simd__')}")
+    print()
+    print("  target_features (-C target-cpu=native の効きを反映):")
+    for name in ("avx2", "fma", "avx512f", "neon"):
+        val = _attr(f"__has_{name}__")
+        if isinstance(val, bool):
+            marker = "ON " if val else "off"
+        else:
+            marker = "?  "
+        print(f"    [{marker}] {name}")

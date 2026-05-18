@@ -51,7 +51,7 @@ from kryanneal.result import QuantumResult as QuantumResult, Trajectory as Traje
 from kryanneal.schedule import Schedule as Schedule
 from kryanneal.simulator import AnnealingSimulator as AnnealingSimulator
 from typing import Any
-__all__ = ['AnnealingSimulator', 'IsingProblem', 'Observable', 'QuantumAnnealer', 'QuantumResult', 'Schedule', 'Trajectory', 'instantaneous_eigenstates', 'set_blas_threads', 'available_blas_threads']
+__all__ = ['AnnealingSimulator', 'IsingProblem', 'Observable', 'QuantumAnnealer', 'QuantumResult', 'Schedule', 'Trajectory', 'available_blas_threads', 'instantaneous_eigenstates', 'set_blas_threads', 'show_config']
 
 def set_blas_threads(n: int) -> None:
     """ロード済みの全 OpenBLAS pool のスレッド上限を ``n`` に統一する.
@@ -83,5 +83,31 @@ def available_blas_threads() -> int:
     -------
     int
         有効な BLAS スレッド予算. 最小 1.
+    """
+    ...
+
+def show_config() -> None:
+    """ビルド構成を stdout に dump する (``numpy.show_config()`` 相当, issue #103).
+
+    repo 同梱の ``.cargo/config.toml`` で ``-C target-cpu=native`` が default
+    適用されるが, それが実際に build 時の SIMD 経路 (``wide::f64x4``) に
+    反映されたか (= AVX2 / AVX-512 / NEON dispatch を選んだか) を確認する
+    ためのヘルパ. ``uv add git+...`` 経由のソースビルド直後やベンチを取る
+    前の build profile 確認に用いる.
+
+    出力項目:
+
+    * ``version``: ``importlib.metadata.version("kryanneal")`` で取得.
+    * ``target arch`` / ``target OS``: Rust 拡張のビルドターゲット
+      (``_rust.__target_arch__`` / ``__target_os__``, ``std::env::consts``
+      由来).
+    * ``cargo features``: ``__has_blas__`` / ``__has_rayon__`` / ``__has_simd__``
+      (``cfg!(feature = "...")`` 由来).
+    * ``target_features``: ``__has_avx2__`` / ``__has_fma__`` /
+      ``__has_avx512f__`` / ``__has_neon__`` (``cfg!(target_feature = "...")``
+      由来). ``target-cpu=native`` の効きを反映.
+
+    Rust 拡張 (``kryanneal._rust``) が import できない環境では各行を
+    ``unavailable`` と表示する.
     """
     ...

@@ -1,0 +1,26 @@
+# Project-local cargo config for kryanneal.
+#
+# `target-cpu=native` を全 cargo invocation に注入する目的:
+#
+#   * `uv add git+...` でユーザーが本パッケージをソースビルドするときに
+#     環境変数の設定を要求せずに最適化ビルドを default で適用する.
+#   * SIMD feature (`wide::f64x4`) は default `x86_64` target だと
+#     scalar fallback ([f64; 4] 相当) を選ぶため (詳細は CLAUDE.md
+#     "SIMD 経路 (Phase 6 C2 / C2.5)" 節 および
+#     `docs/design/11-build-infrastructure.md` §11.1 参照).
+#
+# 経路: cargo は CWD から root まで遡って `.cargo/config.toml` を merge する
+# (cargo book "Hierarchical structure"). `uv add git+...` → maturin (PEP 517) →
+# cargo の chain でも repo ルート同梱の本ファイルが拾われる.
+#
+# 注意点:
+#
+#   * 生成される `kryanneal._rust.*.so` は **build マシン専用バイナリ**.
+#     別マシンへ wheel を再配布する用途には適さない (現状 wheel 配布なしの
+#     方針なので問題なし).
+#   * user 側で `RUSTFLAGS` env var を set している場合は env が優先されて
+#     本設定は無視される (cargo の rustflags precedence). 別マシン向けに
+#     portable な build をしたい場合は `RUSTFLAGS=" "` 等で override する.
+
+[build]
+rustflags = ["-C", "target-cpu=native"]

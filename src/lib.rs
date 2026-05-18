@@ -33,6 +33,13 @@
 //! 無効ビルド (scalar fallback) の場合に `RuntimeWarning` を 1 度だけ発する.
 //! `__has_rayon__` / `__has_simd__` は bench / 計測時の build profile 確認用.
 //!
+//! さらに `-C target-cpu=native` (repo 同梱 `.cargo/config.toml` 経由で
+//! default 適用; issue #103) の効きを示す `__has_avx2__` / `__has_fma__` /
+//! `__has_avx512f__` / `__has_neon__` (`cfg!(target_feature = "...")` 由来) と,
+//! ビルドターゲットを示す `__target_arch__` / `__target_os__`
+//! (`std::env::consts::ARCH` / `OS`) を expose する. ユーザー側では
+//! `kryanneal.show_config()` でこれらを集約 dump できる (numpy.show_config 相当).
+//!
 //! Python 側 (`kryanneal.krylov`) は本モジュールの import 可否で fast path を
 //! 切替える silent-fallback 設計. Rust 拡張がない環境では Python リファレンス
 //! 実装で動作する.
@@ -90,11 +97,37 @@ const HAS_RAYON: bool = cfg!(feature = "rayon");
 /// 注意; `wide` が target_feature を見て scalar fallback / 実 SIMD を選択する).
 const HAS_SIMD: bool = cfg!(feature = "simd");
 
+/// ビルド時に `target_feature = "avx2"` が有効だったかを示す compile-time フラグ.
+/// Python 側からは `_rust.__has_avx2__` として参照する. repo 同梱の
+/// `.cargo/config.toml` 経由で `-C target-cpu=native` が適用されると, x86_64
+/// (Zen 3 / Skylake 以降) で `True` になり `wide` クレートが AVX2 dispatch を
+/// 選ぶ. issue #103.
+const HAS_AVX2: bool = cfg!(target_feature = "avx2");
+
+/// ビルド時に `target_feature = "fma"` が有効だったかを示す compile-time フラグ.
+/// `target-cpu=native` 適用時, x86_64 では avx2 とセットで ON になることが多い.
+const HAS_FMA: bool = cfg!(target_feature = "fma");
+
+/// ビルド時に `target_feature = "avx512f"` が有効だったかを示す compile-time フラグ.
+/// Zen 4 / Sapphire Rapids 以降の `target-cpu=native` で ON になる.
+const HAS_AVX512F: bool = cfg!(target_feature = "avx512f");
+
+/// ビルド時に `target_feature = "neon"` が有効だったかを示す compile-time フラグ.
+/// aarch64 (Apple Silicon / Armv8) では default ON. `target-cpu=native` 適用とは
+/// 独立に True になる点に注意 (NEON は Armv8 ABI で base feature).
+const HAS_NEON: bool = cfg!(target_feature = "neon");
+
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__has_blas__", HAS_BLAS)?;
     m.add("__has_rayon__", HAS_RAYON)?;
     m.add("__has_simd__", HAS_SIMD)?;
+    m.add("__has_avx2__", HAS_AVX2)?;
+    m.add("__has_fma__", HAS_FMA)?;
+    m.add("__has_avx512f__", HAS_AVX512F)?;
+    m.add("__has_neon__", HAS_NEON)?;
+    m.add("__target_arch__", std::env::consts::ARCH)?;
+    m.add("__target_os__", std::env::consts::OS)?;
     m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_py, m)?)?;
     m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_into_py, m)?)?;
     m.add_function(wrap_pyfunction!(matvec::apply_single_mode_axis_i_py, m)?)?;
