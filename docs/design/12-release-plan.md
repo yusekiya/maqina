@@ -250,6 +250,11 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   v0.8.0 を **1 PR にまとめて版数化** し, `CHANGELOG.md` に 0.6.0 / 0.7.0 /
   0.8.0 の 3 リリースを Keep a Changelog 準拠で起こす (Phase 7, 8 はマージ
   済みだが v0.5.0 のまま停止していたものを finalize で遡及的に版数化)。
+  本番 bench sweep の結果は `benchmarks/results/0.8.0/` に SUMMARY.md +
+  bench_*.md (4 種) として永続化し, Linux AMD EPYC 7713P 上での Phase 6 +
+  Phase 7 + Phase 8 累積効果 (rayon scaling 6×+, QuTiP との Pareto 同等
+  以上達成等) を記録する。version dir 命名規則と CSV 除外運用は
+  `docs/conventions.md` §2.3 で正規化 (本 PR で確立)。
 
 ## Phase 7 (v0.7) — Lanczos β_m exposure + Richardson 誤差源分離
 

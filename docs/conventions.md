@@ -95,3 +95,52 @@ v0.x の範囲では SemVer の通常規約に従い MINOR (`0.N.0` → `0.N+1.0
 - 個別の変更の **詳細根拠** (アルゴリズム選定, 経験則の数値, follow-up
   scope 議論) は `docs/design/INDEX.md` 該当節に書き, `CHANGELOG.md` からは
   リンクで参照する (CHANGELOG が長文化するのを避ける).
+
+### 2.3 リリース bench artifact: `benchmarks/results/<X.Y.Z>/`
+
+Phase 完了 bump 時の本番 bench sweep 結果は **`benchmarks/results/<X.Y.Z>/`**
+ディレクトリにコミットして履歴を残す (例 `benchmarks/results/0.8.0/`).
+従来は `benchmarks/results/<timestamped-dir>/` 配下に gitignore で残すだけ
+だったが, リリース時の bench は累積改善の単一情報源として後から参照する
+価値が高いため version 単位で正式に track する.
+
+**ディレクトリ命名**:
+
+- semver `X.Y.Z` (例 `0.8.0`) **そのまま**, prefix なし (`v0.8.0` の形は
+  使わない).
+- 開発中の ad-hoc bench は従来通り `benchmarks/results/<YYYYMMDD-HHMMSS>/`
+  (gitignore) に出力する. version dir と timestamped dir は混在 OK.
+
+**コミット対象**:
+
+- **必置**: `SUMMARY.md` — 当該 version の bench 全体の解釈 / 累積改善の
+  ハイライト / acceptance 判定をまとめた 1 ファイル. 数値だけだと将来読み
+  返したときに文脈を失うため必ず添える.
+- **生 bench の markdown**: 当該 finalize で取った `bench_*.md` を版数化と
+  同 commit で配置. ファイル名はスクリプトの default 出力名そのまま
+  (`bench_per_step.md` / `bench_parallel_scaling.md` /
+  `bench_block_fusion.md` / `bench_qutip_large.md` 等).
+- **生 CSV は除外**: `.csv` は引き続き gitignore (人が読まない生データで
+  diff の意味が薄く size が大きいため). 必要なら bench 実行マシン上の
+  timestamped dir に残す.
+
+**`.gitignore` の現運用**: `/benchmarks/results/*` で root 直下を ignore
+した上で `!/benchmarks/results/*/` + `!/benchmarks/results/*/*.md` で
+version dir 配下の markdown のみ except する. CSV は default で
+ignore のまま (`benchmarks/results/0.8.0/*.csv` も track されない).
+
+**Phase finalize PR フロー** (#66 / 0.8.0 で確立):
+
+1. Phase finalize bench を Linux サーバーで実行
+   (`benchmarks/results/<YYYYMMDD-HHMMSS>/` に出力, gitignore).
+2. Claude が結果を分析し SUMMARY.md を起草. 4 bench `.md` と合わせて
+   `benchmarks/results/<X.Y.Z>/` に配置 (CSV は ignore のため除外).
+3. Phase finalize PR にコミット同梱して push.
+4. PR コメントには `SUMMARY.md` を `gh pr comment --body-file` で添付
+   (umbrella issue にも re-post).
+5. merge 後は `benchmarks/results/<X.Y.Z>/` が永続記録として GitHub 上に
+   残る (Phase 1 → 当該 version の累積改善の参照可能アーカイブ).
+
+**遡及はしない**: 過去 Phase の bench は当該 child PR コメントで個別に
+記録済みのため `benchmarks/results/0.1.0/` 〜 `0.7.0/` を遡って作らない.
+本ポリシーは 0.8.0 以降の forward-looking 運用.
