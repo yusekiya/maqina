@@ -387,7 +387,7 @@ sub-issue 化していない. 再挑戦時は `src/bin/perf_apply_h.rs` + perf s
 
 Phase 6 完了後の follow-up. CFM4 adaptive Richardson driver が #65 long-T
 シナリオで QuTiP に Pareto 劣位だった原因 (Richardson 推定子が Magnus 誤差と
-Krylov 誤差を区別できない) を解消する.
+Krylov 誤差を区別できない) を解消するための **infrastructure** を導入.
 
 主要 API 変更:
 
@@ -402,13 +402,32 @@ Krylov 誤差を区別できない) を解消する.
   `n_krylov_insufficient`). PI controller の駆動量を `err_magnus = max(0,
   err - err_lanczos_total)` に切替え.
 - **`QuantumResult`**: `beta_m_stats` / `n_krylov_insufficient` フィールド追加.
+- **`benchmarks/bench_qutip_large.py`**: `--krylov-tols` sweep で `atol ×
+  krylov_tol` のクロス評価を可能に. `auto` キーワードで内部自動結合
+  (= `tol_step * 1e-3`) を表現.
 
 後方互換性: default `krylov_tol = 1e-12` では `err_lanczos << tol_step` で
 `err_magnus ≈ err`. 既存 PI controller 挙動とほぼ等価
 (`tests/test_adaptive.py::test_adaptive_richardson_error_decomposition_consistency`).
 
-bench acceptance (#93 Step 3 perf): Linux サーバーで `bench_qutip_large.py
---scenarios long-T` を取り Pareto 劣位の解消 + step reject 増加なしを確認.
+bench acceptance (Linux AMD EPYC 7713P, 2026-05-18):
+
+- ✅ **Safety net 機能**: `bench_qutip_large.py --scenarios long-T
+  --n-values 8,10 --krylov-tols auto,1e-8,1e-6` で `krylov_tol` を 4 桁緩めても
+  `n_steps_eff` 差 0.01-0.02%, wall time 差 ±2%. PI controller が relaxed
+  Krylov 設定下でも安定動作.
+- ❌ **Pareto 劣位は未解消**: TFIM Lanczos の中間 β_j 値が O(‖H‖) で,
+  `krylov_tol=1e-6` でも閾値を超えず m_eff=m_max=24 固定. Lanczos 圧縮そのもの
+  が発火しないため Pareto は 2.5-8× 劣位のまま. 真の bottleneck は Richardson
+  の構造的 6 Lanczos call / step. Phase 7 は **そこに到達するための前提
+  infrastructure** として完了, Pareto win は follow-up に移管.
+
+Follow-up issues:
+
+- **#96**: krylov_tol aggressive 検証 (1e-2/1e-1 で Lanczos 圧縮が発火するか)
+- **#97**: Richardson 構造的 overhead 削減 (embedded estimator / time-reuse /
+  adaptive frequency)
+
 詳細は `docs/design/12-release-plan.md` Phase 7 / `docs/design/05-3-propagator.md`
 "Richardson 誤差源分離" 節.
 
