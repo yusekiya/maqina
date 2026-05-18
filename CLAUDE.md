@@ -424,12 +424,58 @@ bench acceptance (Linux AMD EPYC 7713P, 2026-05-18):
 
 Follow-up issues:
 
-- **#96**: krylov_tol aggressive 検証 (1e-2/1e-1 で Lanczos 圧縮が発火するか)
+- **#98 (Phase 8 で消化)**: Lanczos a posteriori 早期打切. Phase 7 で expose した
+  推定子を Lanczos 内部の打切判定そのものに使う (下記 Phase 8 節).
 - **#97**: Richardson 構造的 overhead 削減 (embedded estimator / time-reuse /
   adaptive frequency)
 
 詳細は `docs/design/12-release-plan.md` Phase 7 / `docs/design/05-3-propagator.md`
 "Richardson 誤差源分離" 節.
+
+## Phase 8 (issue #98): Lanczos a posteriori 早期打切 (`krylov_tol` 意味再定義)
+
+Phase 7 で expose した `β · |c|` a posteriori 推定子を **Lanczos 内部の早期打切
+判定そのもの** に組み込み, Phase 7 で "infrastructure 完了 / Pareto 未解消"
+だった #65 / #94 の本丸 (= Lanczos 圧縮を実際に発火させる) に踏み込む.
+
+### 判定式と意味再定義
+
+| 量 | Phase 7 まで | Phase 8 (現在) |
+|---|---|---|
+| `krylov_tol` の意味 | β 単体閾値 | **Krylov 近似の許容誤差** |
+| Lanczos 早期打切判定 | `β_k < krylov_tol` (実用で発火しない) | `β_k · \|c_last\| · \|dt\| / (k+1) < krylov_tol` (Hochbruck-Lubich 1997) |
+| β 単体の役割 | 打切判定 | numerical breakdown safety (`< 1e-14` で `v_{k+1} = w / β_k` の division by zero 回避のみ) |
+
+`‖ψ‖ = 1` は Lanczos 内部の正規化空間規約 (`v_0 = ψ / ‖ψ‖`). 物理状態ノルム
+は最終 `ψ_new = ‖ψ‖ · V · c` で復元するので, 判定式から `‖ψ‖` ファクタは
+除外できる.
+
+### API 互換性 / セマンティクス変更
+
+公開 API シグネチャは **不変**:
+- `QuantumAnnealer(krylov_tol=None)` / `AnnealingSimulator(krylov_tol=None)`
+  の auto-resolve ロジック (adaptive: `tol_step · 1e-3`, fixed-dt: `1e-12`) も
+  そのまま継承.
+- 同じ default 値 (1e-11 / 1e-12) を渡しても **挙動が変わる** (旧: m_eff = m_max
+  固定, 新: m_eff ≪ m_max になる scenario が増える). 数値結果 (`ψ_new`) は
+  誤差内で一致するが `m_eff_history` 系統計値は変動.
+
+このセマンティクス変更を伴うので **minor bump (`0.7 → 0.8`)**.
+
+### Lanczos 内部 c の規約変更
+
+内部 c 配列は `psi_norm` 抜きで保持し, 終端で `ψ_new = ‖ψ‖ · V · c` の gemv
+coeff に畳み込む形にリファクタ. これにより判定式 `β · |c| · |dt| / m <
+krylov_tol` が `‖ψ‖ = 1` 規約と意味的に整合し, `c_m_abs` (return 値の `|c_m|`)
+も自然に "pure な行列要素" (`‖ψ‖` 抜き = literature 標準) で返せる.
+
+### 詳細
+
+- `docs/design/05-2-lanczos.md` "a posteriori 早期打切 (issue #98 Phase 8)" 節
+  (旧仕様の問題 / 判定式 / overhead 試算).
+- `docs/design/12-release-plan.md` Phase 8 (Definition of Done / Bench acceptance).
+- `src/krylov.rs::tridiag_c_last_abs` / `python/kryanneal/krylov.py::_tridiag_c_last_abs`
+  (per-iter ヘルパ; Rust ↔ Python ref `rel < 1e-13` 一致).
 
 ## 設計判断の出典 (cv_ising 流用箇所)
 

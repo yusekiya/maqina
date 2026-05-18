@@ -16,11 +16,21 @@
 //!   かつ Lanczos の数値直交性が直ちに崩れる経験則 (Paige 1971) に従い,
 //!   3 項漸化式に加えて 2-pass full reortho を毎ステップ実行. m ≪ dim なので
 //!   `m·(m+1)·dim` の追加コストは無視できる.
-//! * **`β_k < tol` 打切り**: 部分空間が flat になった場合は `m_eff = k+1` で
-//!   早期終了し, それ以降の Lanczos vector / tridiag 行は構築しない.
+//! * **a posteriori 早期打切 (issue #98)**: 各 iter `k` で T_{k+1} の三重対角
+//!   固有分解を実行し, Hochbruck-Lubich 1997 の誤差上界
+//!   `err_lanczos ≈ β_k · |c_last| · |dt| / (k+1)` (Lanczos 内部の正規化空間で
+//!   `‖ψ‖ = 1` 規約) を `krylov_tol` と比較. これを下回ったら `m_eff = k+1` で
+//!   早期終了する. `krylov_tol` の意味は **Krylov 近似の許容誤差** (issue
+//!   #98 で意味再定義; 旧 β 単体閾値ではない). 別途 `β_k < 1e-14`
+//!   (machine eps スケール) のときは numerical breakdown として即打切し,
+//!   `v_{k+1} = w / β_k` の division by zero を回避する. per-iter overhead は
+//!   O(k²), 累積 O(m³/3) で baseline O(m·dim·(N+m)) の 0.1% 未満
+//!   (`docs/design/05-2-lanczos.md` の overhead 試算).
 //! * **終端再構成**: column-major の Lanczos vector 行列
-//!   `V[:, :m_eff]` に対し `psi_new = V · c` を `gemv_col_major` 1 回で
-//!   組む (BLAS ON では `zgemv`, OFF では axpy 相当の自前ループ).
+//!   `V[:, :m_eff]` に対し `psi_new = ‖ψ‖ · V · c` を `gemv_col_major` 1 回で
+//!   組む (BLAS ON では `zgemv`, OFF では axpy 相当の自前ループ). 内部 c
+//!   は `psi_norm` 抜きの pure な行列要素として保持し, 終端で `psi_norm` を
+//!   coeff 側に畳み込む.
 //!
 //! Phase 1 では本関数を Python に公開しない (`pub(crate)`). M2 / CFM4:2 が
 //! 上位で wrap した形で公開する (`docs/design/05-3-propagator.md` §5.3). 着地直後は内部
@@ -37,6 +47,67 @@ use crate::blas::{axpy, dot_conj, gemv_col_major, nrm2, scal_real};
 use crate::matvec::apply_h_kryanneal;
 use crate::tridiag::tridiag_eigh;
 
+/// β_k が numerical breakdown とみなされる閾値 (machine eps スケール).
+/// `v_{k+1} = w / β_k` の division by zero を回避するための sanity check.
+/// 物理的には「Krylov 部分空間が flat になり次の方向が存在しない」状況に対応し,
+/// この時点で誤差は厳密に 0 となるので即打切してよい. 旧仕様の `β_k < tol`
+/// 打切 (`tol = 1e-12` 等) とは概念的に別物 (`tol` は「許容誤差」, こちらは
+/// 「数値的破綻」).
+const NUMERICAL_BREAKDOWN_TOL: f64 = 1e-14;
+
+/// 三重対角 T (size `n`, `n >= 1`) の固有分解を行い `c = exp(-i dt T) e_0` の
+/// 末尾成分の絶対値 `|c_{n-1}|` を返す.
+///
+/// issue #98 の a posteriori 早期打切判定で per-iter に呼ばれるヘルパ.
+/// `‖ψ‖ = 1` の Lanczos 内部規約で動作 (= pure な行列要素を返す).
+///
+/// # 引数
+/// * `alpha`: `[α_0, ..., α_{n-1}]` の対角.
+/// * `beta_sub`: `[β_0, ..., β_{n-2}]` の off-diagonal (長さ `n - 1`).
+///   `n == 1` のときは空スライス.
+/// * `dt`: 時刻刻み幅 (real).
+///
+/// # 計算量
+/// 三重対角固有分解 O(n²), c_last 計算 O(n²). per-iter で `n = k+1` (k は
+/// loop index) なので, m まで累積で O(m³/3). baseline O(m·dim·(N+m)) の
+/// 0.1% 未満.
+fn tridiag_c_last_abs(alpha: &[f64], beta_sub: &[f64], dt: f64) -> PyResult<f64> {
+    let n = alpha.len();
+    assert!(n >= 1, "alpha must be non-empty");
+    assert_eq!(
+        beta_sub.len() + 1,
+        n,
+        "beta_sub.len() must be alpha.len() - 1"
+    );
+
+    if n == 1 {
+        // T = [α_0]. 固有値 α_0, 固有ベクトル [1]. c = exp(-i dt α_0).
+        // |c_{0}| = 1. 三重対角固有分解を呼ぶ必要がない.
+        return Ok(1.0);
+    }
+
+    // d_buf に α_0..α_{n-1}, e_buf に β_0..β_{n-2} (+ sentinel).
+    let mut d_buf = alpha.to_vec();
+    let mut e_buf = vec![0.0_f64; n];
+    e_buf[..n - 1].copy_from_slice(beta_sub);
+    let mut q_buf = vec![0.0_f64; n * n];
+    tridiag_eigh(&mut d_buf, &mut e_buf, &mut q_buf)
+        .map_err(|e| PyRuntimeError::new_err(format!("tridiag_eigh failed: {e}")))?;
+
+    // c_{n-1} = Σ_j Q[j, n-1] · exp(-i dt λ_j) · Q[j, 0]
+    // tridiag_eigh の規約: Q row-major で row j が λ_j に対応する固有ベクトル.
+    let last_idx = n - 1;
+    let mut acc = Complex64::new(0.0, 0.0);
+    for j in 0..n {
+        let lambda_j = d_buf[j];
+        let phase = Complex64::new(0.0, -dt * lambda_j).exp();
+        let q_j_last = q_buf[j * n + last_idx];
+        let q_j_0 = q_buf[j * n];
+        acc += Complex64::new(q_j_last, 0.0) * phase * Complex64::new(q_j_0, 0.0);
+    }
+    Ok(acc.norm())
+}
+
 /// `psi_new = exp(-i dt H) ψ` を m 次元 Lanczos + 三重対角固有分解で近似.
 ///
 /// # 引数
@@ -46,11 +117,23 @@ use crate::tridiag::tridiag_eigh;
 /// * `psi`: 入力状態. `dim = psi.len()`.
 /// * `dt`: 時刻刻み幅 (real).
 /// * `m`: Krylov 部分空間次元 (典型値 24). `m ≥ 1` を要求.
-/// * `tol`: Lanczos の β 打切り閾値. `β_k < tol` で `m_eff = k+1` として
-///   早期終了する.
+/// * `krylov_tol`: **Krylov 近似の許容誤差** (issue #98 で意味再定義). 各 iter
+///   `k` で Hochbruck-Lubich 1997 の a posteriori 推定子
+///   `est = β_k · |c_last| · |dt| / (k+1)` (`‖ψ‖ = 1` の Lanczos 内部規約)
+///   を計算し, `est < krylov_tol` で `m_eff = k+1` として早期終了する.
+///   旧仕様の β 単体閾値ではない. なお `β_k < 1e-14` (machine eps
+///   スケール) のときは numerical breakdown として即打切する separate な
+///   sanity check も持つ.
 ///
 /// # 戻り値
-/// * `Ok(psi_new)`: 長さ `dim` の新状態.
+/// * `Ok((psi_new, m_eff, beta_m, c_m_abs))`: 4-tuple. `psi_new` は長さ `dim`
+///   の新状態. `m_eff` は実 Krylov 部分空間次元. 末尾 2 要素は a posteriori
+///   誤差推定 (Saad 1992 / Hochbruck-Lubich 1997):
+///   `err_lanczos ≈ β_m · |c_m| · ‖ψ‖ · |dt| / m_eff`.
+///   adaptive Richardson driver が Lanczos 誤差を Magnus 誤差から分離するため
+///   に使う. β_m は build 完了時の最終 off-diagonal, |c_m| は
+///   exp(-i dt T_m) e_0 の m 番目成分の絶対値 (`‖ψ‖` は含めない literature
+///   標準規約).
 /// * `Err`: 三重対角固有分解が収束しなかった場合 (`PyRuntimeError`).
 ///
 /// `‖ψ‖ = 0` のときは零ベクトルを返す (matvec も呼ばない). 三重対角の
@@ -64,7 +147,7 @@ pub(crate) fn lanczos_propagate<F>(
     psi: &[Complex64],
     dt: f64,
     m: usize,
-    tol: f64,
+    krylov_tol: f64,
 ) -> PyResult<(Vec<Complex64>, usize, f64, f64)>
 where
     F: FnMut(&[Complex64], &mut [Complex64]),
@@ -158,8 +241,24 @@ where
         let beta_k = nrm2(&w);
         beta[k] = beta_k;
 
-        if beta_k < tol {
-            // 部分空間が flat. v_{k+1} 以降は構築せず Krylov を打ち切る.
+        // Numerical breakdown 即打切: β_k が machine eps スケールなら次の Lanczos
+        // vector を作るのに `1 / β_k` で blow-up するので即打切. この時点で
+        // 部分空間は完全 flat なので Krylov 誤差は厳密に 0.
+        if beta_k < NUMERICAL_BREAKDOWN_TOL {
+            m_eff = k + 1;
+            break;
+        }
+
+        // a posteriori 早期打切 (issue #98 C 案): Hochbruck-Lubich 1997 の
+        // Krylov 誤差上界
+        //   est = β_k · |c_last(T_{k+1})| · |dt| / (k+1)
+        // を `krylov_tol` (= **Krylov 近似の許容誤差**, 旧 β 単体閾値ではない)
+        // と比較. 切れたら m_eff = k+1 で打切る. ‖ψ‖ = 1 規約 (Lanczos 内部の
+        // 正規化空間) なので ‖ψ‖ ファクタは含めない. `c_last` は psi_norm 抜きの
+        // pure な行列要素として計算される (`tridiag_c_last_abs`).
+        let c_last_abs = tridiag_c_last_abs(&alpha[..=k], &beta[..k], dt)?;
+        let est = beta_k * c_last_abs * dt.abs() / ((k + 1) as f64);
+        if est < krylov_tol {
             m_eff = k + 1;
             break;
         }
@@ -173,7 +272,10 @@ where
     }
 
     // 三重対角 T (m_eff × m_eff) の固有分解.
-    // d_buf に α_0..α_{m_eff-1}, e_buf に β_0..β_{m_eff-2} (+ sentinel).
+    // a posteriori 早期打切 (loop 内 `tridiag_c_last_abs`) でも T_{m_eff} の
+    // 固有分解は per-iter に計算されているが, d_buf / q_buf を保存していない
+    // ため終端で再度計算する. overhead は O(m_eff²) で全体の 0.1% 未満なので
+    // 許容 (シンプルさ優先).
     let mut d_buf = alpha[..m_eff].to_vec();
     let mut e_buf = vec![0.0_f64; m_eff];
     let off_diag = m_eff.saturating_sub(1);
@@ -183,11 +285,12 @@ where
     tridiag_eigh(&mut d_buf, &mut e_buf, &mut q_buf)
         .map_err(|e| PyRuntimeError::new_err(format!("tridiag_eigh failed: {e}")))?;
 
-    // c_k = ‖ψ‖ · Σ_j Q[j, k] · exp(-i dt λ_j) · Q[j, 0].
+    // c_k = Σ_j Q[j, k] · exp(-i dt λ_j) · Q[j, 0]  (psi_norm 抜きの pure な行列要素).
     // tridiag_eigh の規約は T = Qᵀ diag(λ) Q, Q row-major で row j が
-    // λ_j に対応する単位固有ベクトル. exp(-i dt T) · (β_0 e_1) は
-    //   ψ_new = V · c, c = ‖ψ‖ · Qᵀ · diag(exp(-i dt λ)) · Q · e_1
-    // となり, e_1 によって Q · e_1 は Q の 0 列目 (= 各行の 0 番目要素).
+    // λ_j に対応する単位固有ベクトル. exp(-i dt T) · e_0 は
+    //   c = Qᵀ · diag(exp(-i dt λ)) · Q · e_0
+    // となり, Q · e_0 は Q の 0 列目 (= 各行の 0 番目要素).
+    // ‖ψ‖ は最終 ψ_new = V · (‖ψ‖ · c) の gemv 係数として畳み込む.
     let mut c = vec![Complex64::new(0.0, 0.0); m_eff];
     for k in 0..m_eff {
         let mut acc = Complex64::new(0.0, 0.0);
@@ -199,26 +302,29 @@ where
             let q_j_0 = q_buf[j * m_eff];
             acc += Complex64::new(q_j_k, 0.0) * phase * Complex64::new(q_j_0, 0.0);
         }
-        c[k] = acc * Complex64::new(psi_norm, 0.0);
+        c[k] = acc;
     }
 
-    // ψ_new = V[:, :m_eff] · c. column-major で V の先頭 dim·m_eff 要素が
-    // ちょうど V[:, :m_eff] になる.
+    // a posteriori 推定子用に c の末尾成分 (psi_norm 抜き = literature 標準規約)
+    // を保存. これは Hochbruck-Lubich 1997 eq. 5.4-5.5 の `|c_m|` そのもの.
+    let c_m_abs = c[m_eff - 1].norm();
+
+    // ψ_new = ‖ψ‖ · V[:, :m_eff] · c. c に psi_norm を畳み込んでから gemv.
+    for c_k in c.iter_mut() {
+        *c_k *= Complex64::new(psi_norm, 0.0);
+    }
     let mut psi_new = vec![Complex64::new(0.0, 0.0); dim];
     gemv_col_major(&v_mat[..dim * m_eff], dim, m_eff, &c, &mut psi_new);
 
-    // a posteriori 誤差推定子の出力 (issue #93 Phase 7):
+    // a posteriori 誤差推定子の出力 (issue #93 Phase 7 / issue #98):
     // - β_m: build 完了時の最終 off-diagonal (= 次の Krylov 方向への漏れ強度).
-    //   早期打切時は β_{m_eff-1} < tol を満たした最終 β.
+    //   早期打切時は a posteriori 判定 (`est < krylov_tol`) または numerical
+    //   breakdown (`β_k < NUMERICAL_BREAKDOWN_TOL`) を満たした最終 β.
     //   非打切時は loop 末尾 (k = m-1) で計算された β_{m-1}.
-    // - |c_m|: c = exp(-i dt T_m) e_0 の m 番目 (= 末尾) 成分の絶対値.
-    //   **‖ψ‖ は含めない** (literature 標準, Hochbruck-Lubich 1997 eq. 5.4-5.5).
-    //   現状 c[k] には psi_norm を乗じた値が入っているので, ‖ψ‖ で割って
-    //   pure な行列要素 |⟨e_m, exp(-i dt T_m) e_0⟩| を返す.
-    //   a posteriori 推定式は呼出側で
-    //   `err_lanczos ≈ β_m · |c_m| · ‖ψ‖ · dt / m_eff` の形で組み立てる.
+    // - |c_m|: psi_norm 抜きの pure な行列要素 `|⟨e_m, exp(-i dt T_m) e_0⟩|`
+    //   (`c_m_abs` として上で計算済み). a posteriori 推定式は呼出側で
+    //   `err_lanczos ≈ β_m · |c_m| · ‖ψ‖ · |dt| / m_eff` の形で組み立てる.
     let beta_m = beta[m_eff - 1];
-    let c_m_abs = c[m_eff - 1].norm() / psi_norm;
 
     Ok((psi_new, m_eff, beta_m, c_m_abs))
 }
@@ -484,7 +590,11 @@ mod tests {
             expected[k] = phase * psi[k];
         }
         let rel = relative_error(&result, &expected);
-        assert!(rel < 1e-13, "diag H rel = {}", rel);
+        // issue #98 (Phase 8): a posteriori 早期打切で m_eff が m=16 より縮むので
+        // 旧仕様 (β 単体閾値, m_eff = m まで build) の `1e-13` 精度は得られない.
+        // 新仕様は krylov_tol=1e-12 を Krylov 誤差上界として保証するので,
+        // rel < 1e-12 (= krylov_tol 同等) で十分.
+        assert!(rel < 1e-12, "diag H rel = {} (krylov_tol=1e-12)", rel);
         // β_m / |c_m| は非負実数.
         assert!(beta_m >= 0.0, "β_m = {} must be >= 0", beta_m);
         assert!(c_m_abs >= 0.0, "|c_m| = {} must be >= 0", c_m_abs);

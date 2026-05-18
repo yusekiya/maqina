@@ -252,18 +252,77 @@ _SUZUKI4_MID_OFFSETS: tuple[float, float, float, float, float] = (
 )
 
 
+# β_k が numerical breakdown とみなされる閾値 (machine eps スケール).
+# ``v_{k+1} = w / β_k`` の division by zero を回避する sanity check. 旧仕様の
+# ``β_k < krylov_tol`` 打切とは概念的に別物 (``krylov_tol`` は「許容誤差」,
+# こちらは「数値的破綻」). Rust 側 ``src/krylov.rs::NUMERICAL_BREAKDOWN_TOL``
+# と一致.
+_LANCZOS_NUMERICAL_BREAKDOWN_TOL: float = 1e-14
+
+
+def _tridiag_c_last_abs(alpha: np.ndarray, beta_sub: np.ndarray, dt: float) -> float:
+    """三重対角 T (size ``n``, ``n >= 1``) の固有分解を行い ``|c_{n-1}|`` を返す.
+
+    issue #98 (Phase 8) の a posteriori 早期打切判定で per-iter に呼ばれる
+    ヘルパ. Rust 側 ``src/krylov.rs::tridiag_c_last_abs`` と完全に同一ロジック
+    (``rel < 1e-13`` 一致). ``‖ψ‖ = 1`` の Lanczos 内部規約で動作 (= pure な
+    行列要素を返す).
+
+    Parameters
+    ----------
+    alpha
+        shape ``(n,)`` float64 の対角 ``[α_0, ..., α_{n-1}]``. ``n >= 1``.
+    beta_sub
+        shape ``(n - 1,)`` float64 の off-diagonal ``[β_0, ..., β_{n-2}]``.
+        ``n == 1`` のときは shape ``(0,)``.
+    dt
+        時刻刻み幅 (real).
+
+    Returns
+    -------
+    float
+        ``|c_{n-1}| = |Σ_j Q[j, n-1] · exp(-i dt λ_j) · Q[j, 0]|``. Hochbruck-
+        Lubich 1997 eq. 5.4-5.5 の ``|c_m|`` そのもの.
+    """
+    n = int(alpha.shape[0])
+    if beta_sub.shape[0] + 1 != n:
+        raise ValueError(
+            f"beta_sub.shape[0] + 1 must equal alpha.shape[0], "
+            f"got {beta_sub.shape[0]} and {n}"
+        )
+    if n == 1:
+        # T = [α_0]. 固有値 α_0, 固有ベクトル [1]. c = exp(-i dt α_0). |c_0| = 1.
+        return 1.0
+
+    # numpy.linalg.eigh は q の列が固有ベクトル → q[i, j] = j 番目固有ベクトル
+    # の i 成分. 三重対角規約 (Q row-major で row j が λ_j に対応) と転置の関係:
+    # Q (Rust) = q.T (numpy). c_{n-1} = Σ_j Q[j, n-1] · phase · Q[j, 0]
+    #         = Σ_j q[n-1, j] · phase · q[0, j] (numpy 慣習で逆引き).
+    t_dense = np.zeros((n, n), dtype=np.float64)
+    for i in range(n):
+        t_dense[i, i] = alpha[i]
+    for i in range(n - 1):
+        t_dense[i, i + 1] = beta_sub[i]
+        t_dense[i + 1, i] = beta_sub[i]
+    lam, q = np.linalg.eigh(t_dense)
+
+    phases = np.exp(-1j * dt * lam)
+    c_last = np.sum(q[n - 1, :] * phases * q[0, :])
+    return float(abs(c_last))
+
+
 def _python_lanczos_propagate(
     matvec: Callable[[np.ndarray], np.ndarray],
     psi: np.ndarray,
     dt: float,
     m: int,
-    tol: float,
+    krylov_tol: float,
 ) -> tuple[np.ndarray, int, float, float]:
     """``exp(-i dt H) ψ`` の Lanczos + 三重対角固有分解による近似 (Python リファレンス).
 
     Rust 側 ``lanczos_propagate`` と同一アルゴリズム (Park-Light 1986,
-    full re-orthogonalization 付き) を pure NumPy で実装する.
-    ``rel < 1e-13`` で一致するのが契約 (``tests/test_krylov.py``).
+    full re-orthogonalization 付き, issue #98 の a posteriori 早期打切) を pure
+    NumPy で実装する. ``rel < 1e-13`` で一致するのが契約 (``tests/test_krylov.py``).
 
     Parameters
     ----------
@@ -275,28 +334,32 @@ def _python_lanczos_propagate(
         時刻刻み幅 (real).
     m
         Krylov 部分空間次元 (典型値 24, ``m >= 1`` を要求).
-    tol
-        Lanczos の β 打切り閾値. ``β_k < tol`` で ``m_eff = k+1`` として
-        早期終了.
+    krylov_tol
+        **Krylov 近似の許容誤差** (issue #98 で意味再定義). 各 iter ``k`` で
+        Hochbruck-Lubich 1997 の a posteriori 推定子
+        ``est = β_k · |c_last| · |dt| / (k+1)`` (``‖ψ‖ = 1`` の Lanczos 内部規約)
+        を計算し, ``est < krylov_tol`` で ``m_eff = k+1`` として早期終了する.
+        旧仕様の β 単体閾値ではない. なお ``β_k < 1e-14`` (machine eps スケール)
+        のときは numerical breakdown として即打切する別の sanity check も持つ.
 
     Returns
     -------
     psi_new : np.ndarray
         shape ``(dim,)`` complex128 の新状態 ``ψ_new``.
     m_eff : int
-        実際に構築された Krylov 部分空間次元 (``β_k < tol`` 早期終了の
-        効力). ``m_eff <= m``. issue #52 A で adaptive Richardson driver の
-        ``QuantumResult.m_eff_stats`` 集計に使う. ``dim == 0`` または
-        ``‖ψ‖ == 0`` の縮退ケースでは ``m_eff = 0`` を返す
-        (Krylov 構築なし).
+        実際に構築された Krylov 部分空間次元 (a posteriori 早期打切 / numerical
+        breakdown の効力). ``m_eff <= m``. issue #52 A で adaptive Richardson
+        driver の ``QuantumResult.m_eff_stats`` 集計に使う. ``dim == 0`` または
+        ``‖ψ‖ == 0`` の縮退ケースでは ``m_eff = 0`` を返す (Krylov 構築なし).
     beta_m : float
         Lanczos build 完了時の最終 off-diagonal ``β_{m_eff-1}``.
         次の Krylov 方向への漏れ強度に対応し, a posteriori 誤差推定
-        ``err_lanczos ≈ β_m · |c_m| · ‖ψ‖ · dt / m_eff`` (Saad 1992 /
-        Hochbruck-Lubich 1997 + 高次補正) の主因子. issue #93 (Phase 7).
+        ``err_lanczos ≈ β_m · |c_m| · ‖ψ‖ · |dt| / m_eff`` (Hochbruck-Lubich
+        1997 + 高次補正) の主因子. issue #93 (Phase 7).
         ``m_eff == 0`` の縮退ケースでは ``0.0``.
     c_m_abs : float
         ``c = exp(-i dt T_m) e_0`` の最終 (m-1 番目) 成分の絶対値.
+        ``‖ψ‖`` を含まない pure な行列要素 (literature 標準規約).
         β_m と並んで a posteriori 推定子に使う. issue #93 (Phase 7).
         ``m_eff == 0`` の縮退ケースでは ``0.0``.
 
@@ -322,6 +385,7 @@ def _python_lanczos_propagate(
 
     v_mat[:, 0] = psi / psi_norm
     m_eff = m
+    dt_abs = abs(dt)
 
     for k in range(m):
         # w = H · v_k
@@ -345,7 +409,19 @@ def _python_lanczos_propagate(
         beta_k = float(np.linalg.norm(w))
         beta[k] = beta_k
 
-        if beta_k < tol:
+        # Numerical breakdown 即打切: β_k が machine eps スケールなら次の Lanczos
+        # vector を `1 / β_k` で作るのが破綻するので即打切. Krylov 誤差 = 0.
+        if beta_k < _LANCZOS_NUMERICAL_BREAKDOWN_TOL:
+            m_eff = k + 1
+            break
+
+        # a posteriori 早期打切 (issue #98 C 案): Hochbruck-Lubich 1997 の
+        # Krylov 誤差上界 ``est = β_k · |c_last(T_{k+1})| · |dt| / (k+1)`` を
+        # ``krylov_tol`` (= **Krylov 近似の許容誤差**) と比較. ``‖ψ‖ = 1`` 規約
+        # (Lanczos 内部の正規化空間) なので ‖ψ‖ ファクタは含めない.
+        c_last_abs = _tridiag_c_last_abs(alpha[: k + 1], beta[:k], dt)
+        est = beta_k * c_last_abs * dt_abs / (k + 1)
+        if est < krylov_tol:
             m_eff = k + 1
             break
 
@@ -353,6 +429,9 @@ def _python_lanczos_propagate(
             v_mat[:, k + 1] = w / beta_k
 
     # 三重対角 T (m_eff × m_eff) の固有分解
+    # a posteriori 早期打切 (loop 内 `_tridiag_c_last_abs`) でも T_{m_eff} の
+    # 固有分解は per-iter に計算されているが d_buf / q_buf を保存していないため
+    # 終端で再度計算する (overhead は O(m_eff²) で全体の 0.1% 未満).
     # scipy.linalg.eigh_tridiagonal が無くても numpy.linalg.eigh で十分
     # (m_eff ≤ 24 程度なので dense でも数 μs).
     if m_eff == 1:
@@ -367,24 +446,27 @@ def _python_lanczos_propagate(
             t_dense[i + 1, i] = beta[i]
         lam, q = np.linalg.eigh(t_dense)
 
-    # c = ‖ψ‖ · Q · diag(exp(-i dt λ)) · Qᵀ · e_0
-    # numpy.linalg.eigh は q の列が固有ベクトル → Q[i, j] = j 番目固有ベクトル
-    # の i 成分. 三重対角規約 (q の行 j が λ_j に対応) と転置の関係:
-    # Q^T (numpy) ↔ Q (Rust). e_0 を Q (= q.T) に掛けると q[0, :] = q.T の
-    # 0 列目に相当する. ここでは numpy 慣習で q[i, j] = j 番目固有ベクトル
-    # の i 番目成分とし, e_0 にあたる成分は q[0, j].
+    # c = Q · diag(exp(-i dt λ)) · Qᵀ · e_0  (psi_norm 抜きの pure な行列要素).
+    # numpy.linalg.eigh は q の列が固有ベクトル → Q (Rust) = q.T (numpy).
+    # 最終 ψ_new = ‖ψ‖ · V · c で物理スケール復元.
     phases = np.exp(-1j * dt * lam)
-    coeff = psi_norm * (q @ (phases * q[0, :]))
+    c = q @ (phases * q[0, :])
+
+    # a posteriori 推定子用に c の末尾成分 (psi_norm 抜き = literature 標準規約)
+    # を保存. これは Hochbruck-Lubich 1997 eq. 5.4-5.5 の `|c_m|` そのもの.
+    c_m_abs = float(abs(c[m_eff - 1]))
+
+    # ψ_new = ‖ψ‖ · V · c. coeff に psi_norm を畳み込んでから gemv.
+    coeff = psi_norm * c
     psi_new = v_mat[:, :m_eff] @ coeff
-    # a posteriori 誤差推定子の出力 (issue #93 Phase 7):
+
+    # a posteriori 誤差推定子の出力 (issue #93 Phase 7 / issue #98):
     # - β_m: build 完了時の最終 off-diagonal (= 次の Krylov 方向への漏れ強度).
-    # - |c_m|: c = exp(-i dt T_m) e_0 の m 番目 (= 末尾) 成分の絶対値.
-    # ‖ψ‖ は coeff にすでに含めてあるので, ここでは抜き出して factor として戻す
-    # (a posteriori 式は β_m × |c_m| × ‖ψ‖ × dt / m_eff の形で使うため,
-    # coeff[m_eff-1] そのままだと ‖ψ‖ が二重計上される). c_m は psi_norm を
-    # 含まない方の正規化を返す.
+    # - |c_m|: psi_norm 抜きの pure な行列要素 (literature 標準, Hochbruck-Lubich
+    #   1997 eq. 5.4-5.5).
+    # a posteriori 推定式は呼出側で
+    # ``err_lanczos ≈ β_m · |c_m| · ‖ψ‖ · |dt| / m_eff`` の形で組み立てる.
     beta_m = float(beta[m_eff - 1])
-    c_m_abs = float(abs(coeff[m_eff - 1])) / psi_norm
     return psi_new, m_eff, beta_m, c_m_abs
 
 
