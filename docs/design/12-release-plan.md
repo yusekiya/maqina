@@ -391,5 +391,23 @@ Phase 7 bench (Linux AMD EPYC 7713P, 2026-05-18) で TFIM Lanczos の中間 β_j
 - **#96 krylov_tol aggressive 検証**: Phase 8 で `krylov_tol` 意味再定義に
   伴い旧 issue の課題感は薄れる. 必要なら新規 axis として整理.
 
+### Phase 8 follow-up: iter-0 primitive matvec memoization (#100)
+
+#97 close 議論で「Richardson 6 Lanczos call / step は精度損失なし削減不可」と
+確定したが, full_step stage 1 と half_1 stage 1 は **同じ入口 ψ から始まる**
+ため iter 0 で使う primitive matvec (`H_drv · ψ` / `H_p_diag · ψ`) が共通.
+これを `cfm4_step_with_richardson_estimate` 入口で 1 度だけ計算して両 Lanczos
+call で再利用する直交最適化を Phase 8 follow-up として導入 (#100).
+
+- 削減量見積もり: ~3% 純削減 (cache 計算 1 合成 matvec 相当の overhead を
+  引いた純減). bench acceptance は「速くなれば accept」.
+- 実装: `apply_h_drv` / `apply_h_p_diag` primitive を `src/matvec.rs` に追加,
+  `cfm4_step` に crate-internal `iter0_cache: Option<...>` 引数を追加,
+  closure 内 first-call 分岐で iter 0 だけ cache 線形結合. Lanczos API 不変.
+  既存 `apply_h_kryanneal` の cache-blocked 形は維持 (hot path 触らない).
+- 数値同等性: cache あり/なしで `rel < 2e-15` (machine epsilon 数倍).
+- 詳細: `docs/design/05-3-propagator.md` "iter-0 primitive matvec memoization",
+  `docs/design/05-1-matvec.md` §5.1.1.x.
+
 ---
 

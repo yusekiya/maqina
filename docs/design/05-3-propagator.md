@@ -75,6 +75,50 @@ M2 embedded 版より 2 オーダ高精度なので smooth schedule では許容
 オプション `extrapolate=True` で Richardson 外挿:
 `ψ_acc = (16 · ψ_h2 - ψ_full) / 15` (実効 6 次精度)。
 
+##### iter-0 primitive matvec memoization (Phase 8 follow-up / issue #100)
+
+Richardson estimator の **full_step stage 1** と **half_1 stage 1** の 2 つの
+Lanczos call は **同じ入口 ψ から始まる**。各 stage 1 Hamiltonian は
+
+```
+A_full1   = α_full1   · H_drv + β_full1   · H_p_diag      (中点 t + c1·dt)
+A_half1_1 = α_half1_1 · H_drv + β_half1_1 · H_p_diag      (中点 t + c1·dt/2)
+```
+
+で **異なる** が, **iter 0 で使う primitive matvec `H_drv · ψ` と `H_p_diag · ψ`
+は完全に同一**。これを `cfm4_step_with_richardson_estimate` の入口で 1 度だけ
+計算 (`apply_h_drv` / `apply_h_p_diag`, §5.1.x primitive) して両 Lanczos call
+に渡せば, 2 個の primitive matvec / Richardson step を削減できる。
+
+実装:
+
+- `src/matvec.rs::apply_h_drv` / `apply_h_p_diag`: cache 計算専用の primitive
+  matvec 関数。既存 `apply_h_kryanneal` の cache-blocked 形 (diag + 全 i
+  bit-flip pass を 1 chunk closure 内で完走) は維持し, 本 primitive は
+  Richardson 入口で 1 step 1 回だけ呼ばれる。
+- `src/cfm4.rs::cfm4_step` のシグネチャに `iter0_cache: Option<(&[Complex64],
+  &[Complex64])>` 引数を追加 (crate-internal API)。Lanczos に渡す matvec
+  closure 内で `first_call` フラグを持たせ, iter 0 のときだけ cache を線形結合:
+  ```
+  y = (c_drv_1 · cache_drv + c_diag_1 · cache_diag) / ‖ψ‖
+  ```
+  iter 1 以降は v_k が分岐するので従来通り `apply_h_kryanneal` 経路。
+  Lanczos 内部 API は不変 (matvec closure を 1 個受けるだけ)。
+- full_step stage 1 / half_1 stage 1 に `iter0_cache = Some(...)` を渡し,
+  half_2 (入口は `psi_mid` で異なる) と stage 2 (入口は各 stage 1 出口で異なる)
+  には `None`。
+
+削減量見積もり: 2 primitive / 32 合成 matvec (`6 Lanczos × m_eff ≈ 5.33`,
+Phase 8 後) = **~3-6%**。cache 計算自体が ~1 合成 matvec のコストを足すので
+純削減は **~3% (1/32)** 程度。**bench acceptance は「速くなれば accept」**
+(改善量問わず)。
+
+数値同等性: cache 経路と非 cache 経路では演算順序が異なるため bit-identical
+ではない。Lanczos m_eff ステージ全体で `rel < 2e-15` (machine epsilon の
+数倍) で一致することを Rust 単体テスト
+(`cfm4_step_iter0_cache_matches_no_cache_machine_eps` /
+`cfm4_richardson_estimate_iter0_cache_matches_no_cache_chain`) で契約する。
+
 #### Trotter (Strang 2 次 / Suzuki 4 次) — `trotter_step`
 
 横磁場 driver の `[X_i, X_j] = 0` を活用し、`exp(-i dt H_drv)` を

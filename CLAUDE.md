@@ -477,6 +477,34 @@ krylov_tol` が `‖ψ‖ = 1` 規約と意味的に整合し, `c_m_abs` (return
 - `src/krylov.rs::tridiag_c_last_abs` / `python/kryanneal/krylov.py::_tridiag_c_last_abs`
   (per-iter ヘルパ; Rust ↔ Python ref `rel < 1e-13` 一致).
 
+## Phase 8 follow-up (issue #100): Richardson iter-0 matvec memoization
+
+Phase 8 で per-Lanczos call の m_eff 圧縮が達成された後の小規模直交最適化.
+`cfm4_step_with_richardson_estimate` の **full_step stage 1** と **half_1
+stage 1** は同じ入口 ψ から始まるため iter 0 で使う primitive matvec
+(`H_drv · ψ` / `H_p_diag · ψ`) が共通. これを入口で 1 度だけ計算し両 Lanczos
+call で再利用することで **2 個の primitive matvec / Richardson step** を削減
+(削減量見積もり ~3% 純減; bench acceptance は「速くなれば accept」).
+
+実装ポイント:
+
+- `src/matvec.rs::apply_h_drv` / `apply_h_p_diag`: cache 計算専用 primitive.
+  既存 `apply_h_kryanneal` の cache-blocked 形は **維持** (hot path 触らない).
+  primitive は Richardson 入口で 1 step 1 回のみ呼ばれるので SIMD 非適用,
+  rayon は MIN_RAYON_DIM 閾値で本体と同じ dispatch.
+- `src/cfm4.rs::cfm4_step` のシグネチャに crate-internal `iter0_cache:
+  Option<(&[Complex64], &[Complex64])>` 引数を追加. Lanczos に渡す matvec
+  closure 内で `first_call` フラグを持たせ iter 0 のときだけ cache 線形結合
+  `y = (c_drv_1 · cache_drv + c_diag_1 · cache_diag) / ‖ψ‖` に差し替える.
+  Lanczos API (`lanczos_propagate`) 自体は不変.
+- Public Python API のシグネチャは不変. crate-internal の `cfm4_step` 引数追加
+  のみで, Python wrap (`cfm4_step_py`) は `iter0_cache = None` を渡して従来通り.
+
+数値同等性: cache あり/なしで `rel < 2e-15` (machine epsilon の数倍).
+詳細は `docs/design/05-1-matvec.md` §5.1.1.x / `docs/design/05-3-propagator.md`
+"iter-0 primitive matvec memoization" / `docs/design/12-release-plan.md`
+Phase 8 follow-up.
+
 ## 設計判断の出典 (cv_ising 流用箇所)
 
 - CFM4:2 係数: `cv_ising/rust/src/cfm4.rs` の `a_high = 1/4 + √3/6` 等
