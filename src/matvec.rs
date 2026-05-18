@@ -841,6 +841,160 @@ fn apply_h_kryanneal_rayon(
         });
 }
 
+/// `y = H_drv · v` を計算する primitive matvec (bit-flip pass のみ).
+///
+/// `H_drv = -Σ_i h_x[i] · X_i` の作用を上書きで計算する:
+///
+/// ```text
+/// y[k] = -Σ_i h_x[i] · v[k ^ (1 << i)]
+/// ```
+///
+/// # 用途
+///
+/// issue #100 (Phase 8 follow-up) の Richardson estimator iter-0 cache 計算
+/// 専用. `cfm4_step_with_richardson_estimate` の入口で 1 度だけ呼ばれ,
+/// 計算結果は full_step stage 1 と half_1 stage 1 の Lanczos iter 0 で再利用
+/// される (= 同じ入口 ψ から始まる 2 つの Lanczos call の最初の matvec が
+/// `(c_drv · H_drv + c_diag · H_p_diag) · ψ` の線形結合に分解されることを
+/// 利用する).
+///
+/// # `apply_h_kryanneal` との関係
+///
+/// 既存の合成 matvec `apply_h_kryanneal` は **cache-blocked 形** (rayon path
+/// で `y_chunk` を L1 resident に保ったまま diag pass + 全 i bit-flip pass を
+/// 完走) で書かれている. 本 primitive を Lanczos hot path で呼ぶと cache
+/// blocked 形が壊れる (diag/bit-flip で y を 2 周 stream, barrier 2 個) ので
+/// regression する. **本 primitive は cache 計算用 (1 step 1 回) に独立に
+/// 存在し, hot path には使わない**.
+///
+/// # Panics
+/// - `v.len() != 1 << n`
+/// - `y.len() != 1 << n`
+/// - `h_x.len() != n`
+pub(crate) fn apply_h_drv(v: &[Complex64], y: &mut [Complex64], h_x: &[f64], n: usize) {
+    let dim = 1usize << n;
+    assert_eq!(v.len(), dim, "v must have length 2^n");
+    assert_eq!(y.len(), dim, "y must have length 2^n");
+    assert_eq!(h_x.len(), n, "h_x must have length n");
+
+    #[cfg(feature = "rayon")]
+    {
+        if dim < MIN_RAYON_DIM {
+            apply_h_drv_serial(v, y, h_x, n);
+        } else {
+            apply_h_drv_rayon(v, y, h_x, n);
+        }
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        apply_h_drv_serial(v, y, h_x, n);
+    }
+}
+
+fn apply_h_drv_serial(v: &[Complex64], y: &mut [Complex64], h_x: &[f64], n: usize) {
+    let dim = 1usize << n;
+    // 0 初期化 (additive accumulation の入り口).
+    for slot in y.iter_mut() {
+        *slot = Complex64::new(0.0, 0.0);
+    }
+    for (i, &h_x_i) in h_x.iter().enumerate() {
+        let coeff = -h_x_i;
+        if coeff == 0.0 {
+            continue;
+        }
+        let mask = 1usize << i;
+        for k in 0..dim {
+            y[k] += Complex64::new(coeff, 0.0) * v[k ^ mask];
+        }
+    }
+}
+
+#[cfg(feature = "rayon")]
+fn apply_h_drv_rayon(v: &[Complex64], y: &mut [Complex64], h_x: &[f64], n: usize) {
+    let dim = 1usize << n;
+    let nth = rayon::current_num_threads().max(1);
+    let chunk_size = (dim / (nth * 4)).clamp(RAYON_CHUNK_MIN, RAYON_CHUNK_MAX);
+
+    y.par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(idx, y_chunk)| {
+            let base = idx * chunk_size;
+            let chunk_len = y_chunk.len();
+            // 0 初期化.
+            for slot in y_chunk.iter_mut() {
+                *slot = Complex64::new(0.0, 0.0);
+            }
+            for (i, &h_x_i) in h_x.iter().enumerate() {
+                let coeff = -h_x_i;
+                if coeff == 0.0 {
+                    continue;
+                }
+                let mask = 1usize << i;
+                // chunk_len は基本 SIMD_BLOCK_MAX (=8) の倍数ではない可能性が
+                // あるため (本 primitive は cache 用なので chunk alignment を
+                // 厳密に管理しない), SIMD dispatch せず scalar inner loop で
+                // 統一する. cache 計算は 1 step 1 回なので overhead は無視できる.
+                let _ = chunk_len;
+                for (li, y_k) in y_chunk.iter_mut().enumerate() {
+                    let k = base + li;
+                    *y_k += Complex64::new(coeff, 0.0) * v[k ^ mask];
+                }
+            }
+        });
+}
+
+/// `y[k] = h_p_diag[k] · v[k]` を計算する primitive matvec (対角 H_problem 適用).
+///
+/// # 用途
+///
+/// [`apply_h_drv`] と同じく issue #100 の Richardson iter-0 cache 計算専用.
+/// hot path には使わない (cache-blocked 形を壊すため).
+///
+/// # Panics
+/// - `v.len() != y.len()`
+/// - `v.len() != h_p_diag.len()`
+pub(crate) fn apply_h_p_diag(v: &[Complex64], y: &mut [Complex64], h_p_diag: &[f64]) {
+    let dim = v.len();
+    assert_eq!(y.len(), dim, "y must have same length as v");
+    assert_eq!(h_p_diag.len(), dim, "h_p_diag must have same length as v");
+
+    #[cfg(feature = "rayon")]
+    {
+        if dim < MIN_RAYON_DIM {
+            apply_h_p_diag_serial(v, y, h_p_diag);
+        } else {
+            apply_h_p_diag_rayon(v, y, h_p_diag);
+        }
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        apply_h_p_diag_serial(v, y, h_p_diag);
+    }
+}
+
+fn apply_h_p_diag_serial(v: &[Complex64], y: &mut [Complex64], h_p_diag: &[f64]) {
+    for k in 0..v.len() {
+        y[k] = Complex64::new(h_p_diag[k], 0.0) * v[k];
+    }
+}
+
+#[cfg(feature = "rayon")]
+fn apply_h_p_diag_rayon(v: &[Complex64], y: &mut [Complex64], h_p_diag: &[f64]) {
+    let dim = v.len();
+    let nth = rayon::current_num_threads().max(1);
+    let chunk_size = (dim / (nth * 4)).clamp(RAYON_CHUNK_MIN, RAYON_CHUNK_MAX);
+
+    y.par_chunks_mut(chunk_size)
+        .enumerate()
+        .for_each(|(idx, y_chunk)| {
+            let base = idx * chunk_size;
+            for (li, y_k) in y_chunk.iter_mut().enumerate() {
+                let k = base + li;
+                *y_k = Complex64::new(h_p_diag[k], 0.0) * v[k];
+            }
+        });
+}
+
 /// `psi` を axis `i` で 2 元化したペア `(psi[k], psi[k | mask])` に 2×2
 /// ユニタリ `u` を **in-place** 適用する Phase 2 primitive.
 ///
@@ -2703,6 +2857,93 @@ mod tests {
                     "i={}, k={}: axis vs fused diff = {}",
                     i,
                     k,
+                    diff,
+                );
+            }
+        }
+    }
+
+    // ===== iter-0 cache primitive (issue #100) のテスト =====
+
+    /// `apply_h_drv(ψ) + b·apply_h_p_diag(ψ)` の線形結合が
+    /// `apply_h_kryanneal(ψ, a, b)` と数値一致することを確認.
+    ///
+    /// 演算順序が異なる (合成 vs 2 primitive + axpy) ため bit-identical では
+    /// ないが, IEEE 754 の積/和精度から `rel < 1e-13` で一致するはず.
+    #[test]
+    fn primitive_linear_combination_matches_apply_h_kryanneal() {
+        let mut rng = Xor64::new(0x_dead_c0de_b00b_1010);
+        for n in 4..=8 {
+            let dim = 1usize << n;
+            let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+            let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+            let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+            let a_t = rng.signed();
+            let b_t = rng.signed();
+
+            // expected: fused apply_h_kryanneal.
+            let mut y_expected = vec![Complex64::new(0.0, 0.0); dim];
+            apply_h_kryanneal(&v, &mut y_expected, &h_x, &h_p_diag, a_t, b_t, n);
+
+            // actual: primitive 2 個の線形結合.
+            let mut cache_drv = vec![Complex64::new(0.0, 0.0); dim];
+            let mut cache_diag = vec![Complex64::new(0.0, 0.0); dim];
+            apply_h_drv(&v, &mut cache_drv, &h_x, n);
+            apply_h_p_diag(&v, &mut cache_diag, &h_p_diag);
+            let y_actual: Vec<Complex64> = (0..dim)
+                .map(|k| {
+                    Complex64::new(a_t, 0.0) * cache_drv[k]
+                        + Complex64::new(b_t, 0.0) * cache_diag[k]
+                })
+                .collect();
+
+            let mut max_diff_sq = 0.0_f64;
+            let mut ref_sq = 0.0_f64;
+            for k in 0..dim {
+                let d = y_actual[k] - y_expected[k];
+                max_diff_sq += d.norm_sqr();
+                ref_sq += y_expected[k].norm_sqr();
+            }
+            let rel = max_diff_sq.sqrt() / ref_sq.sqrt().max(1.0);
+            assert!(rel < 1e-13, "n={}: rel = {}", n, rel);
+        }
+    }
+
+    /// h_x = 0 のときの `apply_h_drv` が全要素 0 を返すことを確認.
+    #[test]
+    fn apply_h_drv_zero_h_x_yields_zero() {
+        let n = 6;
+        let dim = 1usize << n;
+        let h_x = vec![0.0_f64; n];
+        let mut rng = Xor64::new(7);
+        let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+        let mut y = vec![Complex64::new(1.0, 1.0); dim]; // 非ゼロ初期値で上書き確認.
+        apply_h_drv(&v, &mut y, &h_x, n);
+        for (k, slot) in y.iter().enumerate() {
+            assert_eq!(*slot, Complex64::new(0.0, 0.0), "k={}", k);
+        }
+    }
+
+    /// `apply_h_p_diag` が `y[k] = h_p_diag[k] · v[k]` を返すことを確認.
+    #[test]
+    fn apply_h_p_diag_exact_diagonal() {
+        let mut rng = Xor64::new(11);
+        for n in 4..=8 {
+            let dim = 1usize << n;
+            let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+            let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+            let mut y = vec![Complex64::new(0.0, 0.0); dim];
+            apply_h_p_diag(&v, &mut y, &h_p_diag);
+            for k in 0..dim {
+                let expected = Complex64::new(h_p_diag[k], 0.0) * v[k];
+                let diff = (y[k] - expected).norm();
+                assert!(
+                    diff < 1e-14,
+                    "n={}, k={}: y={} expected={} diff={}",
+                    n,
+                    k,
+                    y[k],
+                    expected,
                     diff,
                 );
             }

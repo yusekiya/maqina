@@ -4,7 +4,8 @@ Rust 側に持つ低レベル配列演算プリミティブは 2 種類:
 
 | プリミティブ | 用途 | 導入 phase | 動作モード |
 |---|---|---|---|
-| `apply_h_kryanneal` | Lanczos / CFM4:2 (Magnus 系) の matvec | Phase 1 | additive: `y += c·H·v` 系 |
+| `apply_h_kryanneal` | Lanczos / CFM4:2 (Magnus 系) の合成 matvec | Phase 1 | overwrite: `y = a·H_drv·v + b·H_p_diag·v` (cache-blocked) |
+| `apply_h_drv` / `apply_h_p_diag` | Richardson estimator の iter-0 cache 計算専用 primitive | Phase 8 follow-up (#100) | overwrite: 単独 H_drv / H_p_diag の作用 |
 | `apply_single_mode_axis_i` | Trotter 系の 2×2 ユニタリ適用 | Phase 2 | in-place rotation |
 
 両者とも bit-flip 構造 (`(psi[k], psi[k ^ (1<<i)])` のペア処理) を共有するが、
@@ -89,6 +90,39 @@ fn apply_h(
   `apply_*_rayon_determinism_8thread_100iter`) は `*_rayon` を直接呼んで
   rayon path の正当性を検証し続ける。`MIN_RAYON_DIM` の値は const なので
   再評価には release rebuild が必要。
+
+##### 5.1.1.x iter-0 cache 用 primitive — `apply_h_drv` / `apply_h_p_diag` (Phase 8 follow-up / issue #100)
+
+Richardson estimator (`cfm4_step_with_richardson_estimate`) の **full_step
+stage 1** と **half_1 stage 1** の 2 つの Lanczos call は同じ入口 ψ から
+始まる。iter 0 で使う primitive matvec `H_drv · ψ` / `H_p_diag · ψ` は 2 つの
+stage の Hamiltonian (係数違い) で共通なので, **入口で 1 度だけ計算して
+両 Lanczos call で再利用** すれば 2 個の primitive matvec / Richardson step を
+削減できる (削減量 ~3-6%, 純削減 ~3%; 詳細は `docs/design/05-3-propagator.md`
+"iter-0 primitive matvec memoization")。
+
+実装方針:
+
+- **既存 `apply_h_kryanneal` の cache-blocked 形は維持** (Lanczos hot path は
+  従来通り 1 chunk closure 内で diag pass + 全 i bit-flip pass を完走)。
+- `apply_h_drv(v, y, h_x, n)` と `apply_h_p_diag(v, y, h_p_diag)` を独立な
+  primitive として追加。それぞれ `y[k] = (H_drv · v)[k] = -Σ_i h_x[i] ·
+  v[k ^ (1<<i)]` と `y[k] = h_p_diag[k] · v[k]` を上書きで計算する。
+- **これらの primitive は Lanczos hot path には使わない**: Richardson 入口で
+  1 step 1 回だけ呼ばれる前提なので cache-blocked にせず素直な scalar /
+  rayon 経路で書く。SIMD 特化は省略 (cache 計算は wall time 影響無視可)。
+- rayon 経路は `dim >= MIN_RAYON_DIM` で `par_chunks_mut`。閾値は本体と同じ。
+- `cfm4_step` のシグネチャに `iter0_cache: Option<(&[Complex64],
+  &[Complex64])>` (crate-internal) を追加し, stage 1 の matvec closure 内で
+  `first_call` フラグを持たせて iter 0 のときだけ cache 線形結合
+  `y = (c_drv_1 · cache_drv + c_diag_1 · cache_diag) / ‖ψ‖` に差し替える。
+  Lanczos API (`lanczos_propagate`) 自体は不変。
+
+数値同等性: cache 経路と非 cache 経路は演算順序が異なるため bit-identical
+ではないが, IEEE 754 の積/和精度から Lanczos m_eff ステージ全体で
+`rel < 2e-15` (machine epsilon の数倍) で一致する
+(Rust 単体テスト `cfm4_step_iter0_cache_matches_no_cache_machine_eps`,
+`cfm4_richardson_estimate_iter0_cache_matches_no_cache_chain`)。
 
 #### 5.1.2 `apply_single_mode_axis_i` (Phase 2)
 
