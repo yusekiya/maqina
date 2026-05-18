@@ -37,7 +37,14 @@
 | Phase 2 完了 | `0.2.0` |
 | ... | ... |
 | Phase 6 完了 | `0.6.0` |
-| Phase 6 後 | `docs/design/13-future-work.md` §13 Future work を再評価して `0.7.0+` のロードマップを引く |
+| Phase 7 完了 (Lanczos β_m exposure + Richardson 誤差源分離, #93) | `0.7.0` |
+| Phase 8 完了 (Lanczos a posteriori 早期打切, #98) | `0.8.0` |
+| Phase 8 後 | `docs/design/13-future-work.md` §13 Future work を再評価して `0.9.0+` のロードマップを引く |
+
+注: Phase 6 / 7 / 8 はそれぞれ完了時に `0.N.0` への bump を予定していたが,
+Phase 6 finalize (#66) で Phase 7 / 8 の変更も合わせて遡及的に版数化した
+(Phase 7 / 8 のマージ時点では `v0.5.0` のまま停止)。`CHANGELOG.md` には
+`0.6.0` / `0.7.0` / `0.8.0` を別セクションとして記録し履歴を保全する。
 
 bump 操作は **Phase の最後の child issue を解決する PR に同梱する**
 (別 release commit を作る運用も可だが, ヒストリ簡潔化のため同梱を

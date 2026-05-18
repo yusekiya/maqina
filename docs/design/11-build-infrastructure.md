@@ -74,7 +74,7 @@ Python 側 `kryanneal.show_config()` は上記を集約し pretty-print する:
 >>> kryanneal.show_config()
 kryanneal build configuration
 --------------------------------------------------
-  version       : 0.5.0
+  version       : 0.8.0
   target arch   : x86_64
   target OS     : linux
 

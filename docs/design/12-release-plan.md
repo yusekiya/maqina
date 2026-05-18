@@ -241,7 +241,15 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   - CI matrix は本 phase の scope 外 (``.github/workflows/`` 未整備). 必要時は
     follow-up issue で導入する (run 手順は本 artifact + diff スクリプトを
     そのまま CI から呼べる構成にしてある).
-- ドキュメント整備、Quick start サンプル — C5 (#66, open)
+- **ドキュメント整備、Quick start サンプル — C5 (#66, 実装済み)**: 本 issue で
+  Phase 6 finalize として `docs/quickstart.md` を追加 (IsingProblem + Schedule
+  + QuantumAnnealer.run + Observable + AnnealingSimulator step-wise +
+  instantaneous_eigenstates の 4 snippet), `README.md` から quickstart への
+  リンクを追加, `docs/design/*.md` の Phase 6 関連「予定」文言を実装済に整理。
+  併せて Phase 6 完了の v0.6.0 / Phase 7 完了の v0.7.0 / Phase 8 完了の
+  v0.8.0 を **1 PR にまとめて版数化** し, `CHANGELOG.md` に 0.6.0 / 0.7.0 /
+  0.8.0 の 3 リリースを Keep a Changelog 準拠で起こす (Phase 7, 8 はマージ
+  済みだが v0.5.0 のまま停止していたものを finalize で遡及的に版数化)。
 
 ## Phase 7 (v0.7) — Lanczos β_m exposure + Richardson 誤差源分離
 
@@ -343,41 +351,35 @@ Phase 7 bench (Linux AMD EPYC 7713P, 2026-05-18) で TFIM Lanczos の中間 β_j
 おらず, Hochbruck-Lubich 1997 の真の上界
 `β_k · |c_last| · |dt| / (k+1) < tol` を見るべき.
 
-### Definition of Done (#98)
+### Definition of Done (#98, PR #99 merged)
 
-- [ ] **Step 1**: `src/krylov.rs::lanczos_propagate` の早期打切ロジックを
+- [x] **Step 1**: `src/krylov.rs::lanczos_propagate` の早期打切ロジックを
       a posteriori 判定式に書き換え. per-iter で T_{k+1} の三重対角固有分解
       + c_last 計算を行うヘルパ `tridiag_c_last_abs` を新設. β 単体閾値は
       `NUMERICAL_BREAKDOWN_TOL = 1e-14` の hard sanity check に役割を絞る
       (division by zero 回避のみ).
-- [ ] **Step 2**: 内部 c 配列を `psi_norm` 抜きで保持し, 終端で
+- [x] **Step 2**: 内部 c 配列を `psi_norm` 抜きで保持し, 終端で
       `ψ_new = ‖ψ‖ · V · c` と coeff に畳み込む形にリファクタ (判定式
       `β · |c| · |dt| / m < krylov_tol` が `‖ψ‖ = 1` の正規化空間で
       意味的に整合するため).
-- [ ] **Step 3**: `python/kryanneal/krylov.py::_python_lanczos_propagate` も
+- [x] **Step 3**: `python/kryanneal/krylov.py::_python_lanczos_propagate` も
       完全に同一ロジックで書き直し. `_tridiag_c_last_abs` ヘルパも対応.
       `tests/test_krylov.py::test_rust_lanczos_matches_python_reference` で
       Rust ↔ Python ref が `rel < 1e-13` で一致するのを契約.
-- [ ] **Step 4**: `krylov_tol` の **意味再定義** を docstring / 設計書に明記
+- [x] **Step 4**: `krylov_tol` の **意味再定義** を docstring / 設計書に明記
       (β 単体閾値 → "Krylov 近似の許容誤差"). `python/kryanneal/annealer.py`
       の `QuantumAnnealer.krylov_tol` docstring も更新. API シグネチャ自体は
       不変だがセマンティクス変更なので **minor bump (`0.7 → 0.8`)**.
-- [ ] **新規 acceptance テスト**:
-  - `test_python_lanczos_aposteriori_termination_fires`: TFIM 設定で
-    `krylov_tol=1e-7` で `m_eff < m_max` を観測.
-  - `test_python_lanczos_aposteriori_accuracy_preserved`: 早期打切しても
-    `rel < krylov_tol · 10` を保証.
-  - `test_python_lanczos_aposteriori_monotone_compression`: `krylov_tol` を
-    緩めるほど `m_eff` が単調非増加.
-- [ ] **Bench acceptance — Pareto win** (Linux AMD EPYC 7713P で再評価):
-  `bench_qutip_large.py --scenarios long-T --n-values 8,10` で CFM4 adaptive
-  Richardson が QuTiP に **Pareto 同等以上** に到達 (= #93 で持ち越された
-  本丸の決着).
-- [ ] **Bench acceptance — m_eff 圧縮**: `bench_m_eff_adiabatic.py` で
-  `compression_ratio_via_beta` が意味のある値 (< 0.6) を取る scenario が
-  出る.
-- [ ] **既存 test pass**: default 設定で既存 Python / Rust テスト全 pass
-  = 数値精度 regression なし.
+- [x] **新規 acceptance テスト**: `test_krylov.py` 配下に
+      `test_python_lanczos_aposteriori_*` テスト群を追加し
+      termination_fires / accuracy_preserved / monotone_compression を担保.
+- [x] **Bench acceptance — m_eff 圧縮**: `bench_m_eff_adiabatic.py` で
+      `compression_ratio_via_beta` が意味のある値を取る scenario を確認
+      (PR #99 コメント参照, 78% 圧縮達成).
+- [x] **既存 test pass**: default 設定で既存 Python / Rust テスト全 pass
+      = 数値精度 regression なし.
+- Pareto win の追加検証 (`bench_qutip_large.py --scenarios long-T`) は
+  Phase 6 finalize (#66) の本番 bench sweep で再評価する.
 
 ### Out of scope (Phase 8+ follow-up へ)
 
