@@ -85,6 +85,70 @@ uv run python benchmarks/bench_per_step.py
 ディレクトリは `.gitignore` で除外済み. 計測結果を共有する場合は
 markdown を抜粋して PR / issue 本文に貼り付ける.
 
+## README figure pipeline (Fidelity vs runtime 散布図)
+
+README に埋め込む QuTiP vs kryanneal の Pareto 比較図
+(`docs/figures/<X.Y.Z>_pareto_<scenario>.png`) を生成する 4 step pipeline.
+
+**スクリプト**:
+
+| script | 役割 |
+|---|---|
+| `_readme_figure_helpers.py` | 共有 helper (QuTiP sparse Hamiltonian / `run_qutip` / `infidelity`) |
+| `build_readme_problem.py` | 問題定義 (`H_p_diag` / `h_x`) を `benchmarks/data/readme_problem_*.npz` に保存. non-stiff (SK random) / stiff (SK + 10% basis に penalty 100 加算) の 2 scenario |
+| `compute_readme_reference.py` | 参照解 ψ_ref を QuTiP で 1 度だけ計算して保存. **Adams 許容誤差 sweep で収束確認 + 同精度 BDF で解法独立性確認**. 結果は `benchmarks/data/readme_reference_*.npz` |
+| `bench_readme_figure.py` | 上記 2 npz を読み, kryanneal `cfm4_adaptive_richardson` の `atol` sweep + QuTiP `sesolve` (Adams) の `tol` sweep を回して各 cell の wall time + infidelity を CSV 出力 |
+| `plot_readme_figure.py` | CSV を読んで matplotlib で散布図を描画 (両軸 log). PNG を `docs/figures/` に出力 |
+
+**実行手順** (本番想定: N=18, T=10^4, scenario=non-stiff/stiff):
+
+```bash
+# 1) 問題ファイル生成 (各 scenario 1 回, fast)
+uv run python -m benchmarks.build_readme_problem --scenario non-stiff --n 18
+uv run python -m benchmarks.build_readme_problem --scenario stiff --n 18
+
+# 2) 参照解計算 (各 scenario 1 回, QuTiP Adams + BDF, heavy)
+uv run python -m benchmarks.compute_readme_reference \
+    --problem-file benchmarks/data/readme_problem_non-stiff_n18_seed20260518.npz \
+    --T 10000
+uv run python -m benchmarks.compute_readme_reference \
+    --problem-file benchmarks/data/readme_problem_stiff_n18_seed20260518.npz \
+    --T 10000
+
+# 3) bench sweep (各 scenario, kryanneal atol sweep + QuTiP tol sweep)
+uv run python -m benchmarks.bench_readme_figure \
+    --problem-file    benchmarks/data/readme_problem_non-stiff_n18_seed20260518.npz \
+    --reference-file  benchmarks/data/readme_reference_non-stiff_n18_T10000_seed20260518.npz
+uv run python -m benchmarks.bench_readme_figure \
+    --problem-file    benchmarks/data/readme_problem_stiff_n18_seed20260518.npz \
+    --reference-file  benchmarks/data/readme_reference_stiff_n18_T10000_seed20260518.npz
+
+# 4) 描画 (両 scenario の CSV を渡して 2 PNG を一括生成)
+uv run python -m benchmarks.plot_readme_figure \
+    --input-csv  benchmarks/results/readme-figure/bench_readme_non-stiff.csv \
+                 benchmarks/results/readme-figure/bench_readme_stiff.csv \
+    --output-dir docs/figures --version 0.8.0
+```
+
+**永続化**:
+
+- 問題 npz / 参照解 npz: `benchmarks/data/` (gitignore, 1 度だけ計算して
+  reuse). 同 seed / scenario / n / T で再現可能.
+- bench CSV: `benchmarks/results/readme-figure/` (gitignore).
+- PNG: `docs/figures/<version>_pareto_<scenario>.png` (**git track**,
+  README から `![](...)` で参照).
+
+**参照解の妥当性検証** (compute_readme_reference.py 内蔵):
+
+1. Adams (default ODE 法) を tol を粗 → 細に sweep し, 隣接 pair の
+   infidelity が `--convergence-threshold` (default 1e-13) 未満であることを
+   確認 (許容誤差を下げても解が動かない = 収束).
+2. 同じ最細 tol で BDF (stiff 向け ODE 法) を 1 回計算し, Adams 最高精度
+   との infidelity が同じ閾値未満であることを確認 (解法独立性).
+3. 両方 pass で **Adams 最高精度を参照解として採用**. fail の場合 WARNING
+   を出すが計算自体は続行 (ユーザーが tol を細かくするか threshold を緩める
+   か判断する).
+
 ## リリース bench artifact (`benchmarks/results/<X.Y.Z>/`)
 
 Phase 完了 bump 時の本番 bench sweep 結果は **`benchmarks/results/<X.Y.Z>/`**
