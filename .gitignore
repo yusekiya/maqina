@@ -22,8 +22,18 @@ python/kryanneal/_rust*.dylib
 # uv
 .venv/
 
-# benchmark 結果 (timestamped CSV / markdown)
-/benchmarks/results/
+# benchmark 結果
+# 原則 `benchmarks/results/<timestamped-dir>/` 配下の生 CSV / markdown は
+# gitignore. ただし version finalize 時は `benchmarks/results/<X.Y.Z>/`
+# (semver そのまま, prefix なし) に **markdown のみ** をコミットして履歴を
+# 残す (CSV は引き続き ignore). semver 形式 (`*.*.*`) のディレクトリのみ
+# track 対象とし, timestamped dir (`20260512-153531` 等) や ad-hoc dir
+# (`m_eff_loose_1` 等) は ignore のままに保つ. 詳細運用は
+# benchmarks/README.md と docs/conventions.md §2.3 を参照.
+/benchmarks/results/*
+!/benchmarks/results/*.*.*/
+/benchmarks/results/*.*.*/*
+!/benchmarks/results/*.*.*/*.md
 
 # tools/ 配下の検証スクリプト出力 (timestamped CSV / markdown)
 /tools/results/

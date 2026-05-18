@@ -60,8 +60,8 @@ fn apply_h(
   i=0 で stride 1、i=1 で stride 2、... と level-by-level に走査することで
   TLB / L2 ヒット率を上げる古典的テクニック (state-vector simulator の
   X-gate pass と同一)。
-- **Phase 6 C1 (issue #62, v0.6 で版数化予定) で rayon `par_chunks_mut`
-  経由の L2 並列化を導入済み**。`y` を chunk 分割し各 chunk closure 内で
+- **Phase 6 C1 (issue #62, Phase 6 完了の v0.6.0 で版数化済) で rayon
+  `par_chunks_mut` 経由の L2 並列化を導入済み**。`y` を chunk 分割し各 chunk closure 内で
   diag pass + 全 i bit-flip pass を **fuse** (cache-blocked 形)。`y_chunk`
   を L1 cache resident に保つことで後段 SIMD (C2) / cache block-fusion
   (C3) の足場とする。`feature = "rayon"` (default ON) で有効化, scalar

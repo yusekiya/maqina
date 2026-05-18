@@ -85,6 +85,22 @@ uv run python benchmarks/bench_per_step.py
 ディレクトリは `.gitignore` で除外済み. 計測結果を共有する場合は
 markdown を抜粋して PR / issue 本文に貼り付ける.
 
+## リリース bench artifact (`benchmarks/results/<X.Y.Z>/`)
+
+Phase 完了 bump 時の本番 bench sweep 結果は **`benchmarks/results/<X.Y.Z>/`**
+(例 `benchmarks/results/0.8.0/`) に永続化する. 詳細運用は
+[`docs/conventions.md`](../docs/conventions.md) §2.3 を一次資料とする. 要点:
+
+- ディレクトリ名は semver `X.Y.Z` そのまま (prefix なし, `v0.8.0` の形は
+  使わない).
+- **必置**: `SUMMARY.md` (当該 version 全体の解釈 / 累積改善ハイライト /
+  acceptance 判定).
+- **コミット対象**: SUMMARY.md + 生 bench の `bench_*.md`.
+- **除外**: 生 CSV (`.csv` は gitignore のまま, 必要なら bench 実行マシン上
+  の timestamped dir で参照).
+- `.gitignore` は `!/benchmarks/results/*/*.md` の except ルールで version
+  dir 配下の markdown のみ track する.
+
 ## 性能改善を主張するときの作法
 
 `CLAUDE.md` 同節を一次資料とする. 要点だけ:
