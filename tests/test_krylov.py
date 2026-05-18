@@ -83,8 +83,10 @@ def test_python_lanczos_matches_dense_propagator(n: int, seed: int) -> None:
 
     dim = 1 << n
     # issue #93 (Phase 7): _python_lanczos_propagate は (psi, m_eff, β_m, |c_m|) を返す.
+    # issue #98 (Phase 8): krylov_tol は **Krylov 近似の許容誤差** (a posteriori
+    # 判定式 β · |c_last| · |dt| / (k+1) < krylov_tol で早期打切).
     psi_lanczos, m_eff, beta_m, c_m_abs = _python_lanczos_propagate(
-        matvec, psi, dt, m=dim, tol=1e-14
+        matvec, psi, dt, m=dim, krylov_tol=1e-14
     )
     assert 1 <= m_eff <= dim
     # a posteriori diagnostic は非負実数.
@@ -114,17 +116,18 @@ def test_rust_lanczos_matches_python_reference(n: int, seed: int) -> None:
     h_x, h_p_diag, psi, a_t, b_t = _random_hermitian_setup(n, seed)
     dt = 0.31
     m = 24
-    tol = 1e-12
+    krylov_tol = 1e-12
 
     matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
     # issue #93 (Phase 7): Rust も Python ref も (psi, m_eff, β_m, |c_m|) を返す.
-    # m_eff / β_m / |c_m| すべて完全一致するのが新しい契約
-    # (BLAS feature on/off も同様, β_k 早期打切条件が決定論的なため).
+    # issue #98 (Phase 8): krylov_tol は **Krylov 近似の許容誤差** (a posteriori
+    # 判定式). m_eff / β_m / |c_m| すべて完全一致するのが新しい契約
+    # (BLAS feature on/off も同様, 早期打切条件が決定論的なため).
     psi_py, m_eff_py, beta_m_py, c_m_abs_py = _python_lanczos_propagate(
-        matvec, psi, dt, m, tol
+        matvec, psi, dt, m, krylov_tol
     )
     psi_rust, m_eff_rust, beta_m_rust, c_m_abs_rust = _rust_mod.lanczos_propagate_py(
-        psi, h_x, h_p_diag, a_t, b_t, dt, m, tol
+        psi, h_x, h_p_diag, a_t, b_t, dt, m, krylov_tol
     )
     assert m_eff_py == m_eff_rust, f"m_eff mismatch: py={m_eff_py}, rust={m_eff_rust}"
     # β_m / |c_m| も rel < 1e-13 で一致 (浮動小数の演算順序差を超えない).
@@ -170,7 +173,7 @@ def test_python_lanczos_preserves_norm() -> None:
     dt = 0.23
     matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
     psi_new, _m_eff, _beta_m, _c_m_abs = _python_lanczos_propagate(
-        matvec, psi, dt, m=24, tol=1e-12
+        matvec, psi, dt, m=24, krylov_tol=1e-12
     )
     rel = abs(np.linalg.norm(psi_new) - np.linalg.norm(psi)) / max(
         np.linalg.norm(psi), 1.0
@@ -179,29 +182,39 @@ def test_python_lanczos_preserves_norm() -> None:
 
 
 def test_python_lanczos_dt_zero_is_identity() -> None:
-    """``dt = 0`` のとき ``exp(0) · ψ = ψ`` の数値一致を確認する."""
+    """``dt = 0`` のとき ``exp(0) · ψ = ψ`` の数値一致を確認する.
+
+    issue #98 (Phase 8) で a posteriori 判定式は ``β · |c_last| · |dt| / (k+1)``
+    なので ``dt = 0`` では iter 0 の判定で必ず 0 < krylov_tol が成立し,
+    ``m_eff = 1`` で即打切される (Krylov 部分空間が 1 次元になる). このとき
+    T_1 = [α_0], c = exp(-i · 0 · α_0) = 1 となるため ``|c_m| = 1`` (Phase 7
+    時代の "dt=0 で c_m = 0" assertion は仕様変更で意味を失う).
+    """
     n = 4
     h_x, h_p_diag, psi, a_t, b_t = _random_hermitian_setup(n, seed=2026)
     matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
-    psi_new, _m_eff, beta_m, c_m_abs = _python_lanczos_propagate(
-        matvec, psi, 0.0, m=24, tol=1e-12
+    psi_new, m_eff, beta_m, c_m_abs = _python_lanczos_propagate(
+        matvec, psi, 0.0, m=24, krylov_tol=1e-12
     )
     rel = np.linalg.norm(psi_new - psi) / max(np.linalg.norm(psi), 1.0)
     assert rel < 1e-13, f"dt=0 identity violated: rel = {rel}"
-    # dt=0 では exp(0) = I なので c = e_0 → |c_m| = 0 for m >= 1.
-    assert c_m_abs < 1e-13, f"|c_m| at dt=0 should be ~0 but got {c_m_abs}"
-    # β_m は dt 非依存なので正の値.
+    # issue #98 (Phase 8): dt=0 では a posteriori 判定が iter 0 で 0 < krylov_tol
+    # を満たし即打切. m_eff = 1, c_m_abs = 1, β_m は β_0 (matvec の漏れ強度).
+    assert m_eff == 1, f"m_eff at dt=0 should be 1 (a posteriori 即打切), got {m_eff}"
+    assert abs(c_m_abs - 1.0) < 1e-13, f"|c_m| at dt=0 should be ~1 but got {c_m_abs}"
+    # β_m は dt 非依存なので非負.
     assert beta_m >= 0.0, f"β_m must be non-negative: {beta_m}"
 
 
 def test_python_lanczos_beta_m_zero_for_invariant_subspace() -> None:
-    """H が ψ_0 の不変部分空間に閉じている場合は β_k < tol で早期打切, β_m < tol.
+    """H が ψ_0 の不変部分空間に閉じている場合は早期打切, β_m が機械精度.
 
     具体的には, ψ = e_0 (計算基底の 0 番目) かつ H = h_x_0 · X_0 と
-    すると K_2(H, e_0) = span{e_0, X_0 e_0} = span{e_0, e_1} で閉じ, β_2 = 0.
+    すると K_2(H, e_0) = span{e_0, X_0 e_0} = span{e_0, e_1} で閉じ, β_2 ≈ 0.
 
-    issue #93 (Phase 7) Step 1a の acceptance: 早期打切が起こるケースで
-    β_m < tol が成り立つことを確認する.
+    issue #93 (Phase 7) で β_m exposure の acceptance, issue #98 (Phase 8) で
+    a posteriori 判定の前段に置かれた numerical breakdown (β < 1e-14) 即打切で
+    同じ挙動が得られることを確認する.
     """
     n = 3
     dim = 1 << n
@@ -211,15 +224,117 @@ def test_python_lanczos_beta_m_zero_for_invariant_subspace() -> None:
     psi = np.zeros(dim, dtype=np.complex128)
     psi[0] = 1.0  # e_0
     matvec = _make_python_matvec(h_x, h_p_diag, a_t=1.0, b_t=0.0)
-    tol = 1e-10
+    krylov_tol = 1e-10
     psi_new, m_eff, beta_m, c_m_abs = _python_lanczos_propagate(
-        matvec, psi, dt=0.3, m=8, tol=tol
+        matvec, psi, dt=0.3, m=8, krylov_tol=krylov_tol
     )
-    # K_2 で閉じるので m_eff <= 2 + 1 (β_2 < tol で 3 番目の iteration で打切).
-    # 厳密には m_eff = 2 (k=0,1 で β_2 < tol を検出して break).
+    # K_2 で閉じるので m_eff <= 3 (k=0,1 のどちらかで早期打切).
     assert m_eff <= 3, f"m_eff should be small for invariant subspace, got {m_eff}"
-    assert beta_m < tol, f"β_m={beta_m} must be < tol={tol} after early termination"
+    # numerical breakdown (1e-14) または a posteriori 判定で打切.
+    # β_m は前者では機械精度近辺, 後者では `est < krylov_tol` 達成時の値.
+    assert beta_m < krylov_tol, (
+        f"β_m={beta_m} must be < krylov_tol={krylov_tol} after early termination"
+    )
     assert c_m_abs >= 0.0, f"|c_m|={c_m_abs} must be non-negative"
+
+
+# ---------------------------------------------------------------------------
+# issue #98 (Phase 8): a posteriori 早期打切 acceptance テスト
+# ---------------------------------------------------------------------------
+
+
+def test_python_lanczos_aposteriori_termination_fires() -> None:
+    """``krylov_tol`` を緩めると a posteriori 判定で m_eff < m_max が観測される.
+
+    Phase 7 では中間 β_j が O(‖H‖) なので β 単体閾値では発火しなかったが,
+    Phase 8 では Hochbruck-Lubich 1997 上界
+    ``est = β_k · |c_last| · |dt| / (k+1)`` を見るので
+    |c_last| の幾何級数減衰 (~ 1e-4 / iter) で発火する.
+    """
+    # 典型的な TFIM 設定 (n=4 程度, dt=0.1) を再現. tools/diag_beta_j_dump.py
+    # 由来の経験値で krylov_tol=1e-7 → m_eff ≈ 5-6 を期待.
+    n = 4
+    h_x, h_p_diag, psi, a_t, b_t = _random_hermitian_setup(n, seed=98_01)
+    dt = 0.1
+    m_max = 24
+    matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
+
+    # 緩い tol: 早期打切が確実に発火する範囲.
+    _psi_loose, m_eff_loose, _bm_loose, _cm_loose = _python_lanczos_propagate(
+        matvec, psi, dt, m=m_max, krylov_tol=1e-7
+    )
+    # 厳しい tol: m_max まで build される (or numerical breakdown 寸前まで).
+    _psi_tight, m_eff_tight, _bm_tight, _cm_tight = _python_lanczos_propagate(
+        matvec, psi, dt, m=m_max, krylov_tol=1e-14
+    )
+
+    # 緩いほど m_eff が小さくなる (a posteriori 判定が機能している証拠).
+    assert m_eff_loose < m_eff_tight, (
+        f"a posteriori 判定が発火していない: "
+        f"loose={m_eff_loose}, tight={m_eff_tight} (loose >= tight)"
+    )
+    # 緩い tol では m_max よりかなり小さい次元で打切される.
+    assert m_eff_loose < m_max, (
+        f"a posteriori 早期打切で m_eff < m_max が期待される: "
+        f"m_eff_loose={m_eff_loose}, m_max={m_max}"
+    )
+
+
+def test_python_lanczos_aposteriori_accuracy_preserved() -> None:
+    """早期打切しても ``rel < krylov_tol · 10`` 程度の精度は保たれる.
+
+    a posteriori 判定式は誤差上界なので, 打切した時点の ``est < krylov_tol``
+    は実際の誤差 ``rel`` の上界を意味する. 安全マージン 1 桁を見て
+    ``rel < krylov_tol · 10`` を契約とする.
+    """
+    n = 4
+    h_x, h_p_diag, psi, a_t, b_t = _random_hermitian_setup(n, seed=98_02)
+    dt = 0.1
+    matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
+
+    # 複数の krylov_tol レベルで rel と m_eff の対応を確認.
+    u_full = _dense_exp_minus_i_dt_h(h_x, h_p_diag, a_t, b_t, dt)
+    psi_expected = u_full @ psi
+    ref_norm = max(np.linalg.norm(psi_expected), 1.0)
+
+    for krylov_tol in (1e-4, 1e-6, 1e-8, 1e-10):
+        psi_new, m_eff, _bm, _cm = _python_lanczos_propagate(
+            matvec, psi, dt, m=24, krylov_tol=krylov_tol
+        )
+        rel = np.linalg.norm(psi_new - psi_expected) / ref_norm
+        # 1 桁の安全マージンで上界を保証.
+        assert rel < krylov_tol * 10, (
+            f"krylov_tol={krylov_tol}: rel={rel:.3e} exceeds krylov_tol*10="
+            f"{krylov_tol * 10:.3e} (m_eff={m_eff})"
+        )
+
+
+def test_python_lanczos_aposteriori_monotone_compression() -> None:
+    """``krylov_tol`` を緩めるほど m_eff が単調に縮む.
+
+    a posteriori 判定式 ``β · |c_last| · |dt| / (k+1) < krylov_tol`` は
+    `krylov_tol` について単調なので, ある同じ (matvec, ψ, dt, m_max) で
+    krylov_tol を大きくすれば m_eff は decrease (or 同じ) を保つ.
+    """
+    n = 4
+    h_x, h_p_diag, psi, a_t, b_t = _random_hermitian_setup(n, seed=98_03)
+    dt = 0.1
+    matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
+
+    tols = [1e-12, 1e-10, 1e-8, 1e-6, 1e-4, 1e-2]
+    m_effs: list[int] = []
+    for krylov_tol in tols:
+        _psi, m_eff, _bm, _cm = _python_lanczos_propagate(
+            matvec, psi, dt, m=24, krylov_tol=krylov_tol
+        )
+        m_effs.append(m_eff)
+
+    # 単調非増加.
+    for i in range(1, len(tols)):
+        assert m_effs[i] <= m_effs[i - 1], (
+            f"monotonic compression violated: tol={tols[i - 1]} m_eff={m_effs[i - 1]}, "
+            f"tol={tols[i]} m_eff={m_effs[i]}"
+        )
 
 
 @pytest.mark.skipif(not _HAS_RUST, reason="kryanneal._rust extension not built")

@@ -65,8 +65,14 @@ class AnnealingSimulator:
         ``trotter`` / ``trotter_suzuki4`` 経路では無視される (Lanczos
         非使用).
     krylov_tol
-        Lanczos の β 打切り閾値. ``None`` (default) のとき経路ごとに
-        自動解決する (QuantumAnnealer と同じポリシー):
+        **Krylov 近似の許容誤差** (issue #98 / Phase 8 で意味再定義). 各
+        Lanczos iter で a posteriori 推定子
+        ``β · |c_last| · |dt| / m < krylov_tol`` を判定して部分空間を切る.
+        旧仕様の β 単体閾値ではない. 詳細は ``QuantumAnnealer.krylov_tol``
+        の docstring 参照.
+
+        ``None`` (default) のとき経路ごとに自動解決する (QuantumAnnealer と
+        同じポリシー):
 
         * adaptive 経路: ``effective = tol_step · 1e-3`` (``tol_step``
           は ``atol`` で決まる; default ``atol=1e-8`` → ``1e-11``).

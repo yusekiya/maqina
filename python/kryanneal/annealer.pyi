@@ -102,7 +102,12 @@ class QuantumAnnealer:
         Lanczos / Krylov 部分空間次元の既定値 (``run`` 内で使用).
         ``m >= 1``. 既定 ``24``.
     krylov_tol
-        Lanczos の β 打切り閾値 (``β_k < tol`` で部分空間を切る).
+        **Krylov 近似の許容誤差** (issue #98 / Phase 8 で意味再定義). 各
+        Lanczos iter ``k`` で Hochbruck-Lubich 1997 の a posteriori 推定子
+        ``est = β_k · |c_last| · |dt| / (k+1)`` を計算し,
+        ``est < krylov_tol`` で部分空間を切る (``‖ψ‖ = 1`` の Lanczos 内部
+        規約). 旧仕様 (``β_k < krylov_tol`` の β 単体閾値) ではない.
+
         ``None`` (既定) のとき経路ごとに自動解決する (issue #54):
 
         * ``cfm4_adaptive_richardson`` (adaptive Richardson):
@@ -112,17 +117,17 @@ class QuantumAnnealer:
         * 固定 dt 経路 (``m2`` / ``cfm4``): ``atol`` を取らないため
           ``1e-12`` フォールバック (``_KRYLOV_TOL_FIXED_DEFAULT``).
 
-        float を明示するとどの経路でも一律に上書きする (旧 ``1e-12``
-        固定 default を再現したい場合は明示的に ``krylov_tol=1e-12``
-        を渡す).
+        float を明示するとどの経路でも一律に上書きする.
 
-        **設計方針**: default (atol 連動 = 1e-11) は accuracy 優先で,
-        Lanczos β_k 早期打切は実用問題サイズでは発火しない (= 旧
-        ``1e-12`` 固定 default とほぼ同等の robust 挙動). 早期打切に
-        よる高速化が欲しい場合は user が opt-in で発動する:
-        ``atol`` を緩める (例 ``atol=1e-5`` → effective ``1e-8``) か,
-        ``krylov_tol`` を明示的に緩める (例 ``krylov_tol=1e-6``).
-        詳細は ``docs/design/05-3-propagator.md`` §5.3 follow-up 節 E 参照.
+        **設計方針 (Phase 8)**: a posteriori 判定式 ``β · |c| · |dt| / m``
+        は TFIM 等の実用問題サイズでも ``|c|`` の幾何級数減衰により早期打切
+        が実際に発火する (Phase 7 までの β 単体閾値では発火しなかった).
+        default (atol 連動 = 1e-11) で **m_eff < m_max が自然に起こる**
+        設定となり, Pareto win に直結する. 旧 ``1e-12`` 固定挙動 (= m_eff
+        = m_max 固定) を再現したいときは ``krylov_tol=1e-16`` 等の極小値を
+        渡す (推奨されない).
+
+        詳細は ``docs/design/05-2-lanczos.md`` の "a posteriori 早期打切" 節を参照.
 
     Raises
     ------
