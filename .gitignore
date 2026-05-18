@@ -38,10 +38,20 @@ python/kryanneal/_rust*.dylib
 # tools/ 配下の検証スクリプト出力 (timestamped CSV / markdown)
 /tools/results/
 
-# README figure pipeline の事前計算 artifact (問題 H_p_diag / 参照解 psi_ref).
-# 計算可能なので git に乗せない (再生成は build_readme_problem.py +
-# compute_readme_reference.py で行う).
-/benchmarks/data/
+# README figure pipeline の artifact (詳細は benchmarks/README.md
+# "Workflow (ローカル ↔ Linux 共有)" 節).
+#  - 問題 / 参照解 npz: 数学的に固定で kryanneal version に依存しないため
+#    `benchmarks/data/` **直下** に置き version 横断で reuse する.
+#    ファイル名 `problem_*.npz` / `reference_*.npz` のみ track.
+#  - bench CSV: kryanneal version 固有の wall time なので
+#    `benchmarks/data/<X.Y.Z>/` (semver dir) 配下に置き track.
+#  - timestamp dir や ad-hoc 名 (`tmp_test` 等) はすべて ignore のまま.
+/benchmarks/data/*
+!/benchmarks/data/problem_*.npz
+!/benchmarks/data/reference_*.npz
+!/benchmarks/data/*.*.*/
+/benchmarks/data/*.*.*/*
+!/benchmarks/data/*.*.*/bench_*.csv
 
 # BLAS 数値一致 artifact (test_blas_consistency.py が `blas_on.npz` /
 # `blas_off.npz` を書き込む). 詳細は同テストの docstring 参照.

@@ -38,9 +38,7 @@ def ensure_qutip() -> None:
         )
 
 
-def build_qutip_hamiltonian(
-    h_x: np.ndarray, h_p_diag: np.ndarray, T: float
-) -> list:
+def build_qutip_hamiltonian(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) -> list:
     """``[[H_drv, A(t)], [H_p, B(t)]]`` の QuTiP sparse 表現を構築する.
 
     kryanneal の LSB-first ``σ_i = 1 - 2·b_i`` 規約と QuTiP の MSB-first

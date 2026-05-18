@@ -1,6 +1,6 @@
 """README figure 用の TFIM 問題ファイルを生成する.
 
-``benchmarks/data/readme_problem_<scenario>_n<N>_seed<seed>.npz`` に対角ベクトル
+``benchmarks/data/problem_<scenario>_n<N>_seed<seed>.npz`` に対角ベクトル
 ``H_p_diag`` と横磁場 ``h_x`` を書き出す. 同 seed / scenario / n で再現可能.
 **1 度生成すれば bench / 参照解計算で reuse** できる.
 
@@ -114,9 +114,7 @@ def build(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--scenario", choices=["non-stiff", "stiff"], required=True
-    )
+    parser.add_argument("--scenario", choices=["non-stiff", "stiff"], required=True)
     parser.add_argument("--n", type=int, default=18)
     parser.add_argument("--seed", type=int, default=20260518)
     parser.add_argument("--penalty-fraction", type=float, default=0.10)
@@ -125,14 +123,14 @@ def main() -> None:
         "--output",
         type=Path,
         default=None,
-        help="npz 出力先 (default: benchmarks/data/readme_problem_<...>.npz)",
+        help="npz 出力先 (default: benchmarks/data/problem_<...>.npz)",
     )
     args = parser.parse_args()
 
     if args.output is None:
         args.output = (
             Path("benchmarks/data")
-            / f"readme_problem_{args.scenario}_n{args.n}_seed{args.seed}.npz"
+            / f"problem_{args.scenario}_n{args.n}_seed{args.seed}.npz"
         )
 
     build(

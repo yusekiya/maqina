@@ -25,6 +25,7 @@ from pathlib import Path
 
 # matplotlib の Agg backend を明示 (headless サーバー / CI 用)
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -189,7 +190,9 @@ def main() -> None:
         scenario_rows = [r for r in rows if r["scenario"] == scenario]
         n = int(scenario_rows[0]["n"])
         T = float(scenario_rows[0]["T"])
-        out = _plot_scenario(scenario_rows, scenario, args.version, n, T, args.output_dir)
+        out = _plot_scenario(
+            scenario_rows, scenario, args.version, n, T, args.output_dir
+        )
         written.append(out)
         print(f"[done] wrote {out}", flush=True)
 

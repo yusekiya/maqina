@@ -11,7 +11,7 @@
 
 ## 出力 CSV
 
-``<output_dir>/bench_readme_<scenario>.csv``:
+``<output_dir>/bench_<scenario>.csv``:
 
 ```
 scenario,n,T,seed,solver,knob_name,knob_value,wall_sec,infidelity,n_steps_eff
@@ -180,7 +180,7 @@ def run_bench(
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / f"bench_readme_{scenario}.csv"
+    csv_path = output_dir / f"bench_{scenario}.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
@@ -232,8 +232,9 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("benchmarks/results/readme-figure"),
-        help="CSV 出力先",
+        default=Path("benchmarks/data"),
+        help="CSV 出力先 (default: benchmarks/data/). 本番は "
+        "benchmarks/data/<X.Y.Z>/ を明示指定する想定",
     )
     args = parser.parse_args()
 

@@ -113,8 +113,7 @@ def compute_reference(
         )
 
     converged = (
-        len(adams_pairwise_inf) > 0
-        and adams_pairwise_inf[-1] < convergence_threshold
+        len(adams_pairwise_inf) > 0 and adams_pairwise_inf[-1] < convergence_threshold
     )
     psi_adams_finest = adams_psis[-1]
 
@@ -208,7 +207,7 @@ def main() -> None:
         "--output",
         type=Path,
         default=None,
-        help="npz 出力先 (default: benchmarks/data/readme_reference_<...>.npz)",
+        help="npz 出力先 (default: benchmarks/data/reference_<...>.npz)",
     )
     args = parser.parse_args()
 
@@ -219,7 +218,7 @@ def main() -> None:
         seed = int(data["seed"])
         args.output = (
             Path("benchmarks/data")
-            / f"readme_reference_{scenario}_n{n}_T{args.T:.0f}_seed{seed}.npz"
+            / f"reference_{scenario}_n{n}_T{args.T:.0f}_seed{seed}.npz"
         )
 
     compute_reference(

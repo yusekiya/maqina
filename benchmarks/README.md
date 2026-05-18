@@ -100,43 +100,75 @@ README に埋め込む QuTiP vs kryanneal の Pareto 比較図
 | `bench_readme_figure.py` | 上記 2 npz を読み, kryanneal `cfm4_adaptive_richardson` の `atol` sweep + QuTiP `sesolve` (Adams) の `tol` sweep を回して各 cell の wall time + infidelity を CSV 出力 |
 | `plot_readme_figure.py` | CSV を読んで matplotlib で散布図を描画 (両軸 log). PNG を `docs/figures/` に出力 |
 
-**実行手順** (本番想定: N=18, T=10^4, scenario=non-stiff/stiff):
+**Workflow (ローカル ↔ Linux 共有)**: ローカル (macOS) で問題 / 参照解 /
+描画を, Linux サーバーで bench だけを実行し PR branch 経由でデータを
+共有する.
+
+**永続化先**:
+
+| 種別 | path | バージョン依存 | git |
+|---|---|---|---|
+| 問題 npz | `benchmarks/data/problem_<scenario>_n<N>_seed<seed>.npz` | × (kryanneal version 横断で reuse) | **track** |
+| 参照解 npz | `benchmarks/data/reference_<scenario>_n<N>_T<T>_seed<seed>.npz` | × (同上) | **track** |
+| bench CSV | `benchmarks/data/<X.Y.Z>/bench_<scenario>.csv` | ○ (wall time が version 固有) | **track** |
+| PNG | `docs/figures/<X.Y.Z>_pareto_<scenario>.png` | ○ (CSV から派生, README から `![](...)` で参照) | **track** |
+| ad-hoc / timestamp dir | `benchmarks/data/<not-semver>/` 等 | — | ignore |
+
+`.gitignore` rule: `benchmarks/data/` 直下の `problem_*.npz` /
+`reference_*.npz` を root で except, semver dir (`[0-9]*.[0-9]*.[0-9]*/`) 配下の
+`bench_*.csv` を except, それ以外はすべて ignore.
+
+**手順** (本番想定: N=18, T=10^4, kryanneal version 0.8.0):
 
 ```bash
-# 1) 問題ファイル生成 (各 scenario 1 回, fast)
+# === ローカル (macOS) ===
+# 1) 問題ファイル生成 (fast, 完全に決定的, version 横断で reuse 可)
 uv run python -m benchmarks.build_readme_problem --scenario non-stiff --n 18
 uv run python -m benchmarks.build_readme_problem --scenario stiff --n 18
 
-# 2) 参照解計算 (各 scenario 1 回, QuTiP Adams + BDF, heavy)
+# 2) 参照解計算 (1 度だけ実行, QuTiP Adams 収束 sweep + BDF 独立性検証)
 uv run python -m benchmarks.compute_readme_reference \
-    --problem-file benchmarks/data/readme_problem_non-stiff_n18_seed20260518.npz \
-    --T 10000
+    --problem-file benchmarks/data/problem_non-stiff_n18_seed20260518.npz --T 10000
 uv run python -m benchmarks.compute_readme_reference \
-    --problem-file benchmarks/data/readme_problem_stiff_n18_seed20260518.npz \
-    --T 10000
+    --problem-file benchmarks/data/problem_stiff_n18_seed20260518.npz --T 10000
 
-# 3) bench sweep (各 scenario, kryanneal atol sweep + QuTiP tol sweep)
-uv run python -m benchmarks.bench_readme_figure \
-    --problem-file    benchmarks/data/readme_problem_non-stiff_n18_seed20260518.npz \
-    --reference-file  benchmarks/data/readme_reference_non-stiff_n18_T10000_seed20260518.npz
-uv run python -m benchmarks.bench_readme_figure \
-    --problem-file    benchmarks/data/readme_problem_stiff_n18_seed20260518.npz \
-    --reference-file  benchmarks/data/readme_reference_stiff_n18_T10000_seed20260518.npz
+# 問題 + 参照解 npz を PR branch に commit して Linux に共有
+git add benchmarks/data/problem_*.npz benchmarks/data/reference_*.npz
+git commit -m "bench(data): add README figure problem + reference npz"
+git push
 
-# 4) 描画 (両 scenario の CSV を渡して 2 PNG を一括生成)
+# === Linux サーバー ===
+gh pr checkout <PR#>
+uv sync && uv run maturin develop --uv --release
+
+# 3) bench sweep (kryanneal cfm4_adaptive_richardson atol + QuTiP sesolve tol)
+uv run python -m benchmarks.bench_readme_figure \
+    --problem-file   benchmarks/data/problem_non-stiff_n18_seed20260518.npz \
+    --reference-file benchmarks/data/reference_non-stiff_n18_T10000_seed20260518.npz \
+    --output-dir     benchmarks/data/0.8.0/
+uv run python -m benchmarks.bench_readme_figure \
+    --problem-file   benchmarks/data/problem_stiff_n18_seed20260518.npz \
+    --reference-file benchmarks/data/reference_stiff_n18_T10000_seed20260518.npz \
+    --output-dir     benchmarks/data/0.8.0/
+
+# CSV を PR branch に commit してローカルに共有
+git add benchmarks/data/0.8.0/bench_*.csv
+git commit -m "bench(data): add 0.8.0 bench CSV from Linux server"
+git push
+
+# === ローカル (再度) ===
+git pull
+
+# 4) 描画
 uv run python -m benchmarks.plot_readme_figure \
-    --input-csv  benchmarks/results/readme-figure/bench_readme_non-stiff.csv \
-                 benchmarks/results/readme-figure/bench_readme_stiff.csv \
+    --input-csv  benchmarks/data/0.8.0/bench_non-stiff.csv \
+                 benchmarks/data/0.8.0/bench_stiff.csv \
     --output-dir docs/figures --version 0.8.0
+
+git add docs/figures/0.8.0_pareto_*.png
+git commit -m "docs(figures): add 0.8.0 fidelity-vs-runtime PNG"
+git push
 ```
-
-**永続化**:
-
-- 問題 npz / 参照解 npz: `benchmarks/data/` (gitignore, 1 度だけ計算して
-  reuse). 同 seed / scenario / n / T で再現可能.
-- bench CSV: `benchmarks/results/readme-figure/` (gitignore).
-- PNG: `docs/figures/<version>_pareto_<scenario>.png` (**git track**,
-  README から `![](...)` で参照).
 
 **参照解の妥当性検証** (compute_readme_reference.py 内蔵):
 
