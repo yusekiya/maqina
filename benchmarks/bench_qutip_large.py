@@ -88,6 +88,7 @@ import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 
@@ -272,7 +273,7 @@ def _run_kryanneal_fixed_dt(
     sched: Schedule,
     psi0: np.ndarray,
     T: float,
-    method: str,
+    method: Literal["m2", "trotter", "cfm4"],
     n_steps: int,
 ) -> tuple[float, np.ndarray]:
     """kryanneal 固定 dt 経路 (m2 / trotter / cfm4) を ``n_steps`` 回走らせる."""
@@ -282,7 +283,7 @@ def _run_kryanneal_fixed_dt(
         psi0,
         0.0,
         T,
-        method=method,  # type: ignore[arg-type]
+        method=method,
         n_steps=n_steps,
     )
     elapsed = time.perf_counter() - t_start
@@ -313,6 +314,7 @@ def _run_kryanneal_adaptive(
         atol=atol,
     )
     elapsed = time.perf_counter() - t_start
+    assert res.n_steps_actual is not None  # cfm4_adaptive_richardson は必ず populated
     return elapsed, np.ascontiguousarray(res.psi_final), int(res.n_steps_actual)
 
 
