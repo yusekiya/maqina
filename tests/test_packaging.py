@@ -66,3 +66,53 @@ def test_available_blas_threads_returns_positive_int() -> None:
     n = available_blas_threads()
     assert isinstance(n, int)
     assert n >= 1
+
+
+def test_target_feature_flags_are_bool() -> None:
+    """``_rust.__has_avx2__`` 等の ``target_feature`` ベース flag が bool として
+    参照できる (issue #103). 値そのものは build 時の ``target-cpu`` 設定および
+    target arch に依存するので, 本テストでは **型のみ** を確認する.
+
+    ``target-cpu=native`` の効きの実値確認は ``kryanneal.show_config()`` の
+    手動実行で行う方針.
+    """
+    _rust = pytest.importorskip("kryanneal._rust")
+
+    for name in (
+        "__has_avx2__",
+        "__has_fma__",
+        "__has_avx512f__",
+        "__has_neon__",
+    ):
+        assert hasattr(_rust, name), f"{name} should be exposed on _rust"
+        assert isinstance(getattr(_rust, name), bool)
+
+
+def test_target_arch_and_os_are_str() -> None:
+    """``_rust.__target_arch__`` / ``__target_os__`` が空でない str として参照できる.
+
+    値は ``std::env::consts::ARCH`` / ``OS`` 由来 ("x86_64" / "aarch64" /
+    "linux" / "macos" 等). 値そのものは host に依存するので assert しない.
+    """
+    _rust = pytest.importorskip("kryanneal._rust")
+
+    for name in ("__target_arch__", "__target_os__"):
+        assert hasattr(_rust, name), f"{name} should be exposed on _rust"
+        val = getattr(_rust, name)
+        assert isinstance(val, str)
+        assert len(val) > 0
+
+
+def test_show_config_runs(capsys: pytest.CaptureFixture[str]) -> None:
+    """``kryanneal.show_config()`` が呼び出し可能で構成情報を stdout に出力する.
+
+    Rust 拡張が無い debug 環境でも fallback として ``unavailable`` 表示で
+    動作するように設計しているため, ``importorskip`` は不要.
+    """
+    import kryanneal
+
+    kryanneal.show_config()
+    captured = capsys.readouterr()
+    assert "kryanneal build configuration" in captured.out
+    assert "cargo features" in captured.out
+    assert "target_features" in captured.out
