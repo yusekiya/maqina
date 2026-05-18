@@ -67,6 +67,12 @@ CLI 例::
     # custom dynamic range の scenario を inline 定義
     uv run python benchmarks/bench_qutip_large.py \\
         --add-scenario "wide-range:T=1,h_p=100,h_x=1"
+
+    # Phase 7 (#93) acceptance: krylov_tol を緩めても Pareto 劣化しないこと
+    # を long-T で検証. 'auto' は ``tol_step * 1e-3`` 自動結合 (= 既定相当).
+    uv run python benchmarks/bench_qutip_large.py \\
+        --scenarios long-T --n-values 8,10 \\
+        --krylov-tols auto,1e-8,1e-6
 """
 
 from __future__ import annotations
@@ -170,6 +176,13 @@ _DEFAULT_TROTTER_DTS: list[float] = [0.001, 0.003, 0.01, 0.03, 0.1]
 _DEFAULT_CFM4_DTS: list[float] = [0.005, 0.02, 0.05, 0.2, 0.5]
 _DEFAULT_ADAPTIVE_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-11]
 _DEFAULT_QUTIP_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-12]
+
+# cfm4_adaptive_richardson の krylov_tol sweep 既定値. ``None`` は
+# QuantumAnnealer 内部の auto-coupling (= ``tol_step * 1e-3``) を意味する.
+# 既定では 1 値 (= None) のみで sweep 無し → 既存 bench 挙動と等価. Phase 7
+# (#93) の "krylov_tol 緩和の安全性" を検証する際は CLI ``--krylov-tols
+# auto,1e-8,1e-6`` 等を渡して atol × krylov_tol のクロス sweep を有効化する.
+_DEFAULT_KRYLOV_TOLS: list[float | None] = [None]
 
 # 各 method の dt 下限. fixed-dt 経路は ``n_steps = round(T/dt)`` なので
 # long-T (T=1e4) と組合せると 1 cell が分単位の wall time になる. dt 下限を
@@ -282,12 +295,15 @@ def _run_kryanneal_adaptive(
     psi0: np.ndarray,
     T: float,
     atol: float,
+    krylov_tol: float | None,
 ) -> tuple[float, np.ndarray, int]:
     """kryanneal ``cfm4_adaptive_richardson`` 経路を ``atol`` 指定で走らせる.
 
     PI controller が実際に踏んだ step 数を ``n_steps_actual`` として返す.
+    ``krylov_tol = None`` のとき ``QuantumAnnealer`` の auto-coupling
+    (``tol_step * 1e-3``) が効き, 数値を渡すと explicit override される.
     """
-    ann = QuantumAnnealer(prob, sched)
+    ann = QuantumAnnealer(prob, sched, krylov_tol=krylov_tol)
     t_start = time.perf_counter()
     res = ann.run(
         psi0,
@@ -336,6 +352,11 @@ class _CellRecord:
 
     fidelity は後段 (reference 確定後) に計算するため, この段階では
     ``psi_final`` と ``wall_sec`` と ``n_steps_effective`` を保持する.
+
+    ``knob2_name`` / ``knob2_value`` は cfm4_adaptive_richardson の
+    ``krylov_tol`` のような **副次的な sweep 軸** を表す optional 拡張 (Phase 7
+    / #93). 単軸 sweep cell では ``knob2_name = None``. ``knob2_value = None``
+    かつ ``knob2_name != None`` は "auto" (自動結合) を表す sentinel.
     """
 
     __slots__ = (
@@ -344,6 +365,8 @@ class _CellRecord:
         "solver",
         "knob_name",
         "knob_value",
+        "knob2_name",
+        "knob2_value",
         "n_steps_effective",
         "wall_sec",
         "psi_final",
@@ -359,12 +382,16 @@ class _CellRecord:
         n_steps_effective: int | None,
         wall_sec: float,
         psi_final: np.ndarray,
+        knob2_name: str | None = None,
+        knob2_value: float | None = None,
     ) -> None:
         self.scenario = scenario
         self.n = n
         self.solver = solver
         self.knob_name = knob_name
         self.knob_value = knob_value
+        self.knob2_name = knob2_name
+        self.knob2_value = knob2_value
         self.n_steps_effective = n_steps_effective
         self.wall_sec = wall_sec
         self.psi_final = psi_final
@@ -375,16 +402,34 @@ def _fidelity(psi_a: np.ndarray, psi_b: np.ndarray) -> float:
     return float(np.abs(np.vdot(psi_a, psi_b)) ** 2)
 
 
-def _format_knob_value(knob_name: str, value: float) -> str:
+def _format_knob_value(knob_name: str, value: float | None) -> str:
     """sweep つまみ値の human-readable 文字列化.
 
-    ``n_steps`` は整数, それ以外 (``dt`` / ``tol`` / ``atol``) は科学表記.
+    ``n_steps`` は整数, それ以外 (``dt`` / ``tol`` / ``atol`` / ``kry``) は
+    科学表記. ``kry`` で ``value is None`` のとき "auto"
+    (= ``tol_step * 1e-3`` 自動結合 sentinel; Phase 7 / #93).
     """
+    if value is None:
+        return "auto"
     if knob_name == "n_steps":
         return str(int(value))
     if knob_name == "dt":
         return f"{value:.3g}"
     return f"{value:.1e}"
+
+
+def _format_combined_knob(record: "_CellRecord") -> str:
+    """primary + optional secondary knob を 1 つの文字列に."""
+    primary = (
+        f"{record.knob_name}={_format_knob_value(record.knob_name, record.knob_value)}"
+    )
+    if record.knob2_name is None:
+        return primary
+    secondary = (
+        f"{record.knob2_name}="
+        f"{_format_knob_value(record.knob2_name, record.knob2_value)}"
+    )
+    return f"{primary}, {secondary}"
 
 
 @dataclass
@@ -422,6 +467,7 @@ def _sweep_one_scenario_n(
     trotter_dt_min: float,
     cfm4_dt_min: float,
     adaptive_atols: list[float],
+    krylov_tols: list[float | None],
     qutip_tols: list[float],
     ref_tol: float,
     ref_validate: bool,
@@ -550,25 +596,45 @@ def _sweep_one_scenario_n(
             )
 
     if "cfm4_adaptive_richardson" in solvers:
+        # Phase 7 (#93): krylov_tols sweep. 既定 ([None]) では knob2 を伏せ
+        # (CSV/MD で空欄), 明示 sweep (len > 1 か 1 値だが非 None) のときに
+        # secondary knob "kry" を MD/CSV に出す.
+        emit_kry_knob = (len(krylov_tols) > 1) or (
+            len(krylov_tols) == 1 and krylov_tols[0] is not None
+        )
+        kry_repr = ["auto" if k is None else f"{k:.1e}" for k in krylov_tols]
         print(
-            f"  cfm4_adaptive_richardson sweep atols={adaptive_atols} ...", flush=True
+            f"  cfm4_adaptive_richardson sweep atols={adaptive_atols} × "
+            f"krylov_tols={kry_repr} ...",
+            flush=True,
         )
         for atol in adaptive_atols:
-            wall, psi, n_steps_actual = _run_kryanneal_adaptive(
-                prob, sched, psi0, T, atol
-            )
-            records.append(
-                _CellRecord(
-                    scenario=scenario.name,
-                    n=n,
-                    solver="cfm4_adaptive_richardson",
-                    knob_name="atol",
-                    knob_value=atol,
-                    n_steps_effective=n_steps_actual,
-                    wall_sec=wall,
-                    psi_final=psi,
+            for kry_tol in krylov_tols:
+                wall, psi, n_steps_actual = _run_kryanneal_adaptive(
+                    prob, sched, psi0, T, atol, kry_tol
                 )
-            )
+                if emit_kry_knob:
+                    knob2_name: str | None = "kry"
+                    knob2_value: float | None = (
+                        float(kry_tol) if kry_tol is not None else None
+                    )
+                else:
+                    knob2_name = None
+                    knob2_value = None
+                records.append(
+                    _CellRecord(
+                        scenario=scenario.name,
+                        n=n,
+                        solver="cfm4_adaptive_richardson",
+                        knob_name="atol",
+                        knob_value=atol,
+                        knob2_name=knob2_name,
+                        knob2_value=knob2_value,
+                        n_steps_effective=n_steps_actual,
+                        wall_sec=wall,
+                        psi_final=psi,
+                    )
+                )
 
     return records, ref_record, validation
 
@@ -659,6 +725,8 @@ def _write_csv(
         "solver",
         "knob_name",
         "knob_value",
+        "knob2_name",
+        "knob2_value",
         "n_steps_effective",
         "wall_sec",
         "infidelity",
@@ -678,6 +746,8 @@ def _write_csv(
                     "solver": ref.solver,
                     "knob_name": ref.knob_name,
                     "knob_value": f"{ref.knob_value:.6e}",
+                    "knob2_name": "",
+                    "knob2_value": "",
                     "n_steps_effective": (
                         "" if ref.n_steps_effective is None else ref.n_steps_effective
                     ),
@@ -697,6 +767,14 @@ def _write_csv(
             paretos = pareto_per_key[key]
             for r, infid, pareto in zip(recs, infids, paretos, strict=True):
                 log10_infid = f"{np.log10(infid):.6f}" if infid > 0.0 else "nan"
+                if r.knob2_name is None:
+                    knob2_name_str = ""
+                    knob2_value_str = ""
+                else:
+                    knob2_name_str = r.knob2_name
+                    knob2_value_str = (
+                        "auto" if r.knob2_value is None else f"{r.knob2_value:.6e}"
+                    )
                 writer.writerow(
                     {
                         "scenario": r.scenario,
@@ -704,6 +782,8 @@ def _write_csv(
                         "solver": r.solver,
                         "knob_name": r.knob_name,
                         "knob_value": f"{r.knob_value:.6e}",
+                        "knob2_name": knob2_name_str,
+                        "knob2_value": knob2_value_str,
                         "n_steps_effective": (
                             "" if r.n_steps_effective is None else r.n_steps_effective
                         ),
@@ -764,6 +844,11 @@ def _write_md(
         f"- **cfm4 dt sweep**: `{args.cfm4_dts}` (dt_min={args.cfm4_dt_min:g})"
     )
     lines.append(f"- **cfm4_adaptive_richardson atol sweep**: `{args.adaptive_tols}`")
+    kry_repr_list = ["auto" if k is None else f"{k:.1e}" for k in args.krylov_tols]
+    lines.append(
+        f"- **cfm4_adaptive_richardson krylov_tol sweep**: `{kry_repr_list}` "
+        "(`auto` = `tol_step * 1e-3` 自動結合; Phase 7 / #93)"
+    )
     lines.append(f"- **qutip tol sweep**: `{args.qutip_tols}`")
     lines.append("")
 
@@ -811,7 +896,7 @@ def _write_md(
             r = records[i]
             infid = infids[i]
             pareto_mark = "✓" if pareto[i] else ""
-            knob_str = f"{r.knob_name}={_format_knob_value(r.knob_name, r.knob_value)}"
+            knob_str = _format_combined_knob(r)
             n_steps_str = (
                 str(r.n_steps_effective) if r.n_steps_effective is not None else "-"
             )
@@ -845,14 +930,17 @@ def _write_md(
                 if r.solver == "cfm4_adaptive_richardson"
             ]
             if kry_adaptive_cells:
-                # atol 最小 cell (= 最 tightest).
-                tightest = min(kry_adaptive_cells, key=lambda x: x[0].knob_value)
+                # infid 最小 cell (= 最も accurate) を pick. krylov_tols sweep が
+                # 入った場合, 単に atol で min を取ると意味のない代表点を選ぶ
+                # 恐れがあるため "accuracy で代表" を採用 (Phase 7 #93).
+                tightest = min(kry_adaptive_cells, key=lambda x: x[1])
                 r_tight, infid_tight = tightest
                 # state L2 差は √(1-fid) で近似 (1-fid 小さいので 1 次近似で十分).
                 psi_diff_est = float(np.sqrt(max(infid_tight, 0.0)))
+                tight_knob_str = _format_combined_knob(r_tight)
                 lines.append(
                     f"**Cross-check**: kryanneal cfm4_adaptive_richardson at "
-                    f"atol={r_tight.knob_value:.1e} (independent algorithm family) "
+                    f"{tight_knob_str} (independent algorithm family) "
                     f"reproduces reference with 1-fid="
                     f"{('<1e-16' if infid_tight == 0.0 else f'{infid_tight:.3e}')} "
                     f"(≈ |Δψ|_2 ≤ {psi_diff_est:.2e}). "
@@ -888,6 +976,29 @@ def _parse_float_list(text: str) -> list[float]:
     if not parts:
         raise argparse.ArgumentTypeError("expected at least one float")
     return [float(p) for p in parts]
+
+
+def _parse_krylov_tol_list(text: str) -> list[float | None]:
+    """``"auto,1e-8,1e-6"`` を ``[None, 1e-8, 1e-6]`` に parse する.
+
+    ``auto`` キーワードは ``QuantumAnnealer`` 内部の自動結合 (= ``tol_step *
+    1e-3``) を表し ``None`` に変換される. それ以外は ``float`` として読む.
+    """
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError("expected at least one value")
+    out: list[float | None] = []
+    for p in parts:
+        if p.lower() == "auto":
+            out.append(None)
+        else:
+            try:
+                out.append(float(p))
+            except ValueError as exc:
+                raise argparse.ArgumentTypeError(
+                    f"krylov_tol must be 'auto' or a float, got {p!r}"
+                ) from exc
+    return out
 
 
 def _parse_solver_list(text: str) -> list[str]:
@@ -1080,6 +1191,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--krylov-tols",
+        type=_parse_krylov_tol_list,
+        default=list(_DEFAULT_KRYLOV_TOLS),
+        help=(
+            "cfm4_adaptive_richardson の krylov_tol sweep. comma-separated; "
+            "'auto' で QuantumAnnealer の自動結合 (= tol_step * 1e-3) を選ぶ. "
+            f"default: {['auto' if k is None else f'{k:.1e}' for k in _DEFAULT_KRYLOV_TOLS]}. "
+            "Phase 7 (#93) 評価例: --krylov-tols auto,1e-8,1e-6 で atol × "
+            "krylov_tol のクロス sweep."
+        ),
+    )
+    parser.add_argument(
         "--qutip-tols",
         type=_parse_float_list,
         default=list(_DEFAULT_QUTIP_TOLS),
@@ -1192,6 +1315,7 @@ def main(argv: list[str] | None = None) -> int:
                 trotter_dt_min=args.trotter_dt_min,
                 cfm4_dt_min=args.cfm4_dt_min,
                 adaptive_atols=args.adaptive_tols,
+                krylov_tols=args.krylov_tols,
                 qutip_tols=args.qutip_tols,
                 ref_tol=args.ref_tol,
                 ref_validate=args.ref_validate,

@@ -116,12 +116,18 @@ def _run_adaptive(
     dt_max = max(min(10.0 * dt0, 4.0 * m_max / max(norm_h, 1e-30)), dt0)
 
     t_start = time.perf_counter()
+    # issue #93 (Phase 7): driver は 10-tuple. β_m / err_lanczos / err_magnus /
+    # n_krylov_insufficient を Step 2 (#93) bench で出すために受け取る.
     (
         psi_final,
         t_history,
         dt_history,
         n_rejects,
         m_eff_history,
+        beta_m_history,
+        err_lanczos_history,
+        err_magnus_history,
+        n_krylov_insufficient,
         _snapshot,
     ) = evolve_schedule_adaptive_richardson(
         h_x=prob.h_x,
@@ -141,7 +147,17 @@ def _run_adaptive(
     )
     wall = time.perf_counter() - t_start
     _ = psi_final
-    return wall, t_history, dt_history, m_eff_history, int(n_rejects)
+    return (
+        wall,
+        t_history,
+        dt_history,
+        m_eff_history,
+        int(n_rejects),
+        beta_m_history,
+        err_lanczos_history,
+        err_magnus_history,
+        int(n_krylov_insufficient),
+    )
 
 
 def _per_time_bin_stats(
@@ -228,6 +244,61 @@ def _summary_stats(m_eff_history: np.ndarray, m_max: int) -> dict[str, float]:
             np.median(m_eff_history) / _LANCZOS_CALLS_PER_STEP
         ),
         "compression_ratio": mean / upper_bound,
+    }
+
+
+def _beta_m_stats(
+    beta_m_history: np.ndarray,
+    err_lanczos_history: np.ndarray,
+    err_magnus_history: np.ndarray,
+    tol_step: float,
+) -> dict[str, float]:
+    """β_m / err_lanczos / err_magnus history の概要 stats (issue #93 Step 2).
+
+    ``beta_m_history`` は driver 内部で保存された代表 β_m_eff =
+    err_lanczos_total / dt (raw β_m そのものではなく aggregated 値). raw β_m
+    のような直接的な Krylov 漏れ強度ではなく, "Lanczos 誤差を dt で割った
+    単位時間あたりの誤差率" として解釈する.
+    """
+    if beta_m_history.size == 0:
+        return {
+            "beta_m_mean": float("nan"),
+            "beta_m_median": float("nan"),
+            "beta_m_min": float("nan"),
+            "beta_m_max": float("nan"),
+            "beta_m_p10": float("nan"),
+            "beta_m_p90": float("nan"),
+            "err_lanczos_median": float("nan"),
+            "err_lanczos_max": float("nan"),
+            "err_magnus_median": float("nan"),
+            "err_magnus_max": float("nan"),
+            "frac_lanczos_dominated": float("nan"),
+        }
+    # err_lanczos > err_magnus の step 割合 = Lanczos 誤差が支配的な step.
+    # default krylov_tol ではほぼ 0 (Lanczos 充分), 緩い krylov_tol で増加する.
+    err_total = err_lanczos_history + err_magnus_history
+    nonzero = err_total > 0.0
+    if nonzero.any():
+        frac_lanczos_dominated = float(
+            np.sum(err_lanczos_history[nonzero] > err_magnus_history[nonzero])
+        ) / float(nonzero.sum())
+    else:
+        frac_lanczos_dominated = 0.0
+    # Lanczos 不足 (err_lanczos > tol_step) の比率も同時に記録 (driver の
+    # n_krylov_insufficient と等価指標, MD per-cell で表示).
+    _ = tol_step  # 互換用シグネチャに残すが本式では未使用 (driver 側でカウント).
+    return {
+        "beta_m_mean": float(np.mean(beta_m_history)),
+        "beta_m_median": float(np.median(beta_m_history)),
+        "beta_m_min": float(np.min(beta_m_history)),
+        "beta_m_max": float(np.max(beta_m_history)),
+        "beta_m_p10": float(np.percentile(beta_m_history, 10)),
+        "beta_m_p90": float(np.percentile(beta_m_history, 90)),
+        "err_lanczos_median": float(np.median(err_lanczos_history)),
+        "err_lanczos_max": float(np.max(err_lanczos_history)),
+        "err_magnus_median": float(np.median(err_magnus_history)),
+        "err_magnus_max": float(np.max(err_magnus_history)),
+        "frac_lanczos_dominated": frac_lanczos_dominated,
     }
 
 
@@ -356,6 +427,7 @@ def _build_machine_info(args: argparse.Namespace) -> dict[str, str]:
 
 
 def _write_csv(records: list[dict], out_path: Path) -> None:
+    # issue #93 (Phase 7): β_m_eff / err_lanczos_total / err_magnus を列追加.
     fieldnames = [
         "n",
         "T",
@@ -366,6 +438,9 @@ def _write_csv(records: list[dict], out_path: Path) -> None:
         "dt",
         "m_eff_sum",
         "m_eff_per_lanczos",
+        "beta_m_eff",
+        "err_lanczos_total",
+        "err_magnus",
     ]
     with out_path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -439,6 +514,34 @@ def _write_md(
         )
     lines.append("")
 
+    # issue #93 (Phase 7) Step 2: β_m / err_lanczos / err_magnus 分布の表.
+    lines.append("## Summary: β_m / err_lanczos / err_magnus (issue #93 Step 2)")
+    lines.append("")
+    lines.append(
+        "β_m_eff = err_lanczos_total / dt は driver 内部での代表 β_m 値. "
+        "err_lanczos_total は 6 Lanczos call の Saad/Hochbruck-Lubich 推定子 "
+        "(`β_m · |c_m| · ‖ψ‖ · dt / m_eff`) の triangle inequality 和. "
+        "err_magnus = max(0, err - err_lanczos_total) が PI controller の "
+        "Magnus 駆動量. n_krylov_insufficient は err_lanczos_total > atol を "
+        "検出した step 数 (Krylov 不足の診断指標)."
+    )
+    lines.append("")
+    lines.append(
+        "| n | T | atol | m_max | β_m_median | β_m_p90 | "
+        "err_lanczos (median) | err_lanczos (max) | "
+        "err_magnus (median) | n_krylov_insufficient |"
+    )
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    for c in cell_results:
+        b = c["beta_stats"]
+        lines.append(
+            f"| {c['n']} | {c['T']:g} | {c['atol']:.1e} | {c['m_max']} | "
+            f"{b['beta_m_median']:.3e} | {b['beta_m_p90']:.3e} | "
+            f"{b['err_lanczos_median']:.3e} | {b['err_lanczos_max']:.3e} | "
+            f"{b['err_magnus_median']:.3e} | {c['n_krylov_insufficient']} |"
+        )
+    lines.append("")
+
     # per-cell 詳細 (per-time-bin histogram).
     for c in cell_results:
         s = c["summary"]
@@ -463,6 +566,29 @@ def _write_md(
         )
         lines.append(
             f"- **compression_ratio** (mean / 6·m_max): {s['compression_ratio']:.3f}"
+        )
+        # issue #93 (Phase 7) Step 2: β_m / err_lanczos / err_magnus 詳細.
+        b = c["beta_stats"]
+        lines.append(
+            f"- **β_m_eff stats**: mean={b['beta_m_mean']:.3e}, "
+            f"median={b['beta_m_median']:.3e}, min={b['beta_m_min']:.3e}, "
+            f"max={b['beta_m_max']:.3e}, P10={b['beta_m_p10']:.3e}, "
+            f"P90={b['beta_m_p90']:.3e}"
+        )
+        lines.append(
+            f"- **err_lanczos_total**: median={b['err_lanczos_median']:.3e}, "
+            f"max={b['err_lanczos_max']:.3e}; "
+            f"vs atol={c['atol']:.1e} → "
+            f"n_krylov_insufficient={c['n_krylov_insufficient']} / {s['n_steps']}"
+        )
+        lines.append(
+            f"- **err_magnus**: median={b['err_magnus_median']:.3e}, "
+            f"max={b['err_magnus_max']:.3e} (= PI controller の駆動量)"
+        )
+        lines.append(
+            f"- **frac steps with err_lanczos > err_magnus**: "
+            f"{b['frac_lanczos_dominated']:.3f} "
+            "(Lanczos 誤差支配的な step 割合; default 設定で ~0 が期待値)"
         )
         lines.append("")
 
@@ -524,25 +650,44 @@ def main(argv: list[str] | None = None) -> int:
                         flush=True,
                     )
                     prob, sched, psi0 = _make_random_problem(n, T, args.seed + n)
-                    wall, t_history, dt_history, m_eff_history, n_rejects = (
-                        _run_adaptive(
-                            prob,
-                            sched,
-                            psi0,
-                            T,
-                            atol,
-                            m_max,
-                            krylov_tol_factor=args.krylov_tol_factor,
-                        )
+                    # issue #93 (Phase 7): _run_adaptive は 9-tuple. β_m /
+                    # err_lanczos / err_magnus / n_krylov_insufficient を
+                    # 受け取り bench MD/CSV に出力する.
+                    (
+                        wall,
+                        t_history,
+                        dt_history,
+                        m_eff_history,
+                        n_rejects,
+                        beta_m_history,
+                        err_lanczos_history,
+                        err_magnus_history,
+                        n_krylov_insufficient,
+                    ) = _run_adaptive(
+                        prob,
+                        sched,
+                        psi0,
+                        T,
+                        atol,
+                        m_max,
+                        krylov_tol_factor=args.krylov_tol_factor,
                     )
                     summary = _summary_stats(m_eff_history, m_max)
+                    beta_stats = _beta_m_stats(
+                        beta_m_history,
+                        err_lanczos_history,
+                        err_magnus_history,
+                        tol_step=atol,
+                    )
                     time_bins = _per_time_bin_stats(
                         t_history, dt_history, m_eff_history, T, args.n_time_bins
                     )
                     print(
                         f"  n_steps={summary['n_steps']}, wall={wall:.3f}s, "
                         f"m_eff/Lanczos median={summary['m_eff_per_lanczos_median']:.2f} "
-                        f"(vs m_max={m_max}, ratio={summary['compression_ratio']:.3f})",
+                        f"(vs m_max={m_max}, ratio={summary['compression_ratio']:.3f}), "
+                        f"β_m median={beta_stats['beta_m_median']:.2e}, "
+                        f"n_krylov_insufficient={n_krylov_insufficient}",
                         flush=True,
                     )
                     cell_results.append(
@@ -553,17 +698,31 @@ def main(argv: list[str] | None = None) -> int:
                             "m_max": m_max,
                             "wall_sec": wall,
                             "n_rejects": n_rejects,
+                            "n_krylov_insufficient": int(n_krylov_insufficient),
                             "summary": summary,
+                            "beta_stats": beta_stats,
                             "time_bins": time_bins,
                         }
                     )
-                    # CSV per-step rows.
+                    # CSV per-step rows. issue #93 (Phase 7) で β_m /
+                    # err_lanczos / err_magnus も列追加.
                     for step_idx, (
                         t_end,
                         dt_step,
                         m_eff_sum,
+                        beta_m_step,
+                        err_lanczos_step,
+                        err_magnus_step,
                     ) in enumerate(
-                        zip(t_history[1:], dt_history, m_eff_history, strict=True)
+                        zip(
+                            t_history[1:],
+                            dt_history,
+                            m_eff_history,
+                            beta_m_history,
+                            err_lanczos_history,
+                            err_magnus_history,
+                            strict=True,
+                        )
                     ):
                         csv_records.append(
                             {
@@ -578,6 +737,9 @@ def main(argv: list[str] | None = None) -> int:
                                 "m_eff_per_lanczos": (
                                     f"{float(m_eff_sum) / _LANCZOS_CALLS_PER_STEP:.3f}"
                                 ),
+                                "beta_m_eff": f"{float(beta_m_step):.6e}",
+                                "err_lanczos_total": f"{float(err_lanczos_step):.6e}",
+                                "err_magnus": f"{float(err_magnus_step):.6e}",
                             }
                         )
 

@@ -243,5 +243,88 @@ Phase 1 の baseline と比較できることが本 phase の前提。
     そのまま CI から呼べる構成にしてある).
 - ドキュメント整備、Quick start サンプル — C5 (#66, open)
 
+## Phase 7 (v0.7) — Lanczos β_m exposure + Richardson 誤差源分離
+
+主題: adaptive CFM4 Richardson driver の Pareto 劣位 (issue #65 で観測) を,
+Lanczos 誤差 (Krylov 部分空間有限性に起因) と Magnus 誤差 (dt 切り捨てに
+起因) の **分離制御** で解消する.
+
+### 動機 (#65 → #93 への接続)
+
+Phase 6 C4 (#65) の `bench_qutip_large.py` で **long-T シナリオ** の CFM4
+adaptive Richardson が QuTiP に Pareto 劣位だった原因として, 以下が #65 PR
+コメント + `bench_m_eff_adiabatic.py` + `tools/verify_beta_m_estimator.py`
+の 3 段階で定量化された:
+
+1. default `krylov_tol = 1e-12` では β_k がこれを下回らず m_eff = m_max
+   固定 (Krylov 圧縮 0%).
+2. `krylov_tol` を緩めると Lanczos 部分空間は半減するが PI controller の
+   step reject 数が爆発 (wall time は逆に 7-8× 悪化).
+3. 根本原因: Richardson 推定子の `err = ‖ψ_full - ψ_half²‖` は Magnus 誤差と
+   Krylov 誤差を区別できず, PI controller が両方をまとめて dt 縮小で対処
+   して破綻する.
+
+`tools/verify_beta_m_estimator.py` (#93 prep, PR #94) で `err_lanczos ≈ β_m ·
+|c_m| · ‖ψ‖ · dt / m_eff` (Saad 1992 / Hochbruck-Lubich 1997 + 高次補正)
+が **5% 精度** で Lanczos 誤差を予測できることが 108 cell sweep で実証された.
+
+### Definition of Done (#93 Step 1-3)
+
+- [x] **Step 1a**: `src/krylov.rs::lanczos_propagate` の return tuple を
+      4 要素 `(psi, m_eff, β_m, |c_m|)` に拡張. Rust / Python ref とも
+      rel < 1e-13 で一致.
+- [x] **Step 1b**: `src/cfm4.rs::cfm4_step` /
+      `cfm4_step_with_richardson_estimate` が triangle inequality で
+      `err_lanczos_total` を集約して上位に伝播.
+- [x] **Step 1c + Step 3**: `evolve_schedule_adaptive_richardson` 内で
+      `err_magnus = max(0, err - err_lanczos_total)` を PI controller の駆動量に
+      切替え. `beta_m_history` / `err_lanczos_history` / `err_magnus_history`
+      / `n_krylov_insufficient` を return tuple に追加. `QuantumResult` に
+      `beta_m_stats` / `n_krylov_insufficient` フィールド追加.
+- [x] **Step 2**: `benchmarks/bench_m_eff_adiabatic.py` を β_m / err_lanczos
+      / err_magnus 軸で拡張. `bench_qutip_large.py` にも `--krylov-tols`
+      sweep を追加 (atol × krylov_tol クロス sweep) — PR #94 で同梱.
+- [x] **Bench acceptance — 安全性** (#93 perf 一部): Linux サーバー
+      (AMD EPYC 7713P, 2026-05-18 計測) で
+      `bench_qutip_large.py --scenarios long-T --n-values 8,10
+      --krylov-tols auto,1e-8,1e-6` を取り, **default 設定で step reject
+      数が増加しないこと** を確認. `auto` (=1e-10) / 1e-8 / 1e-6 で
+      `n_steps_eff` 差 0.01-0.02%, wall time 差 ±2% に収まり, PI
+      controller が relaxed krylov_tol 下でも安定動作 = Phase 7 の
+      safety net が機能していることを実証.
+- [ ] **Bench acceptance — Pareto 改善** (#93 perf もう片方): scope 外と
+      再認定. 同 bench で CFM4 adaptive Richardson が QuTiP に対し
+      **2.5-8× Pareto 劣位のまま** だった. TFIM Lanczos の中間 β_j 値
+      が O(‖H‖) で krylov_tol=1e-6 でも閾値を超えず, m_eff=m_max=24 固定
+      → Lanczos 圧縮そのものが発火しないことが bench で判明. Phase 7 は
+      **そのとき安全な infrastructure** を提供する役割で完了, **真の
+      Pareto win は構造的 overhead 削減を要する** ため follow-up へ.
+
+### Out of scope (Phase 7+ follow-up issue へ移管)
+
+- **#96 krylov_tol aggressive 検証**: bench で `krylov_tol=1e-2/1e-1`
+  級まで上げて初めて Lanczos 早期打切が発火するか, その際 err_lanczos
+  が Krylov 不足を診断するかを検証. Lanczos 圧縮側の axis.
+- **#97 Richardson 構造的 overhead 削減**: Pareto 劣位の本質は
+  Richardson 3 cfm4_step × 2 Lanczos = 6 Lanczos call / accepted step.
+  embedded estimator / time-reuse / adaptive Richardson 頻度低減 等の
+  構造改革候補を整理.
+- **#93 Step 4 (m_max 動的拡張)**: `err_lanczos > tol_step` 検出時に m_max を
+  動的拡張する expokit-style escalation. 本 Phase では diagnostic counter
+  `n_krylov_insufficient` を expose するに留め, 自動 escalation は別 issue.
+  Phase 7+ の #96 / #97 の知見と合わせて統合計画化予定.
+- **β_k stagnation 検出 (#93 末尾候補 1)**: 絶対閾値ではなく `β_k / β_{k-1}`
+  比率打切. physical floor (= adiabatic ε admixture) を当てにせず robust に
+  発火させる. #96 と統合可能.
+- **m_max schedule-aware 縮小 (#93 末尾候補 2)**: annealing 後段ほど ψ が
+  固有状態に近づく → step 進行に応じて `m_max: 24 → 16 → 12` と段階的に
+  下げる.
+- **schedule-aware deflation (#93 末尾候補 3)**: ψ が follow する瞬時 ground
+  state を Lanczos 前に deflate して残り部分空間で Krylov を構築.
+- **任意精度演算検証 (#93 末尾候補 4)**: mpmath で同じ計算を行い double
+  precision との差分を直接定量化.
+- **`tol_lanczos` 別パラメータ化**: 本 Phase では `tol_step` と同値運用.
+  実運用で必要性が判明したら別 issue.
+
 ---
 

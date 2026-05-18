@@ -104,7 +104,9 @@ def _format_diff(name: str, a: np.ndarray, b: np.ndarray) -> str:
     denom = np.maximum(np.abs(a), np.abs(b))
     # 0/0 を 0 に潰す (両方とも 0 のセルは rel diff が定義されないので NaN
     # ではなく 0 として扱う).
-    rel = np.where(denom > 0, abs_diff / np.maximum(denom, np.finfo(np.float64).tiny), 0.0)
+    rel = np.where(
+        denom > 0, abs_diff / np.maximum(denom, np.finfo(np.float64).tiny), 0.0
+    )
     max_rel = float(rel.max()) if rel.size else 0.0
     return f"  {name}: max_abs={max_abs:.3e}, max_rel={max_rel:.3e}, shape={a.shape}"
 
@@ -134,7 +136,7 @@ def diff_npz(
     if keys_a != keys_b:
         only_a = sorted(keys_a - keys_b)
         only_b = sorted(keys_b - keys_a)
-        print(f"error: artifact key sets differ:", file=sys.stderr)
+        print("error: artifact key sets differ:", file=sys.stderr)
         if only_a:
             print(f"  only in {path_a.name}: {only_a}", file=sys.stderr)
         if only_b:
@@ -151,8 +153,10 @@ def diff_npz(
 
     print(f"comparing {path_a} vs {path_b}")
     print(f"  rtol={rtol:.3e}, atol={atol:.3e}")
-    print(f"  has_blas: {path_a.name}={int(bundle_a['_meta_has_blas'][0])}, "
-          f"{path_b.name}={int(bundle_b['_meta_has_blas'][0])}")
+    print(
+        f"  has_blas: {path_a.name}={int(bundle_a['_meta_has_blas'][0])}, "
+        f"{path_b.name}={int(bundle_b['_meta_has_blas'][0])}"
+    )
 
     mismatches: list[str] = []
     matched: list[str] = []
@@ -162,14 +166,10 @@ def diff_npz(
         a = bundle_a[name]
         b = bundle_b[name]
         if a.shape != b.shape:
-            mismatches.append(
-                f"  {name}: shape mismatch {a.shape} vs {b.shape}"
-            )
+            mismatches.append(f"  {name}: shape mismatch {a.shape} vs {b.shape}")
             continue
         if a.dtype != b.dtype:
-            mismatches.append(
-                f"  {name}: dtype mismatch {a.dtype} vs {b.dtype}"
-            )
+            mismatches.append(f"  {name}: dtype mismatch {a.dtype} vs {b.dtype}")
             continue
         if not np.allclose(a, b, rtol=rtol, atol=atol):
             mismatches.append(_format_diff(name, a, b))

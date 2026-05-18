@@ -82,9 +82,14 @@ def test_python_lanczos_matches_dense_propagator(n: int, seed: int) -> None:
     matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
 
     dim = 1 << n
-    # issue #52 A: _python_lanczos_propagate は (psi, m_eff) を返す.
-    psi_lanczos, m_eff = _python_lanczos_propagate(matvec, psi, dt, m=dim, tol=1e-14)
+    # issue #93 (Phase 7): _python_lanczos_propagate は (psi, m_eff, β_m, |c_m|) を返す.
+    psi_lanczos, m_eff, beta_m, c_m_abs = _python_lanczos_propagate(
+        matvec, psi, dt, m=dim, tol=1e-14
+    )
     assert 1 <= m_eff <= dim
+    # a posteriori diagnostic は非負実数.
+    assert beta_m >= 0.0, f"β_m = {beta_m} must be >= 0"
+    assert c_m_abs >= 0.0, f"|c_m| = {c_m_abs} must be >= 0"
 
     u_full = _dense_exp_minus_i_dt_h(h_x, h_p_diag, a_t, b_t, dt)
     psi_expected = u_full @ psi
@@ -112,14 +117,23 @@ def test_rust_lanczos_matches_python_reference(n: int, seed: int) -> None:
     tol = 1e-12
 
     matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
-    # issue #52 A: Rust も Python ref も (psi, m_eff) を返す. m_eff も
-    # 完全一致するのが新しい契約 (BLAS feature on/off も同様, β_k 早期打切
-    # 条件が決定論的なため).
-    psi_py, m_eff_py = _python_lanczos_propagate(matvec, psi, dt, m, tol)
-    psi_rust, m_eff_rust = _rust_mod.lanczos_propagate_py(
+    # issue #93 (Phase 7): Rust も Python ref も (psi, m_eff, β_m, |c_m|) を返す.
+    # m_eff / β_m / |c_m| すべて完全一致するのが新しい契約
+    # (BLAS feature on/off も同様, β_k 早期打切条件が決定論的なため).
+    psi_py, m_eff_py, beta_m_py, c_m_abs_py = _python_lanczos_propagate(
+        matvec, psi, dt, m, tol
+    )
+    psi_rust, m_eff_rust, beta_m_rust, c_m_abs_rust = _rust_mod.lanczos_propagate_py(
         psi, h_x, h_p_diag, a_t, b_t, dt, m, tol
     )
     assert m_eff_py == m_eff_rust, f"m_eff mismatch: py={m_eff_py}, rust={m_eff_rust}"
+    # β_m / |c_m| も rel < 1e-13 で一致 (浮動小数の演算順序差を超えない).
+    assert abs(beta_m_py - beta_m_rust) <= 1e-13 * max(abs(beta_m_rust), 1.0), (
+        f"β_m mismatch: py={beta_m_py}, rust={beta_m_rust}"
+    )
+    assert abs(c_m_abs_py - c_m_abs_rust) <= 1e-13 * max(abs(c_m_abs_rust), 1.0), (
+        f"|c_m| mismatch: py={c_m_abs_py}, rust={c_m_abs_rust}"
+    )
 
     rel = np.linalg.norm(psi_py - psi_rust) / max(np.linalg.norm(psi_rust), 1.0)
     assert rel < 1e-13, f"n={n}, seed={seed}: rel = {rel}"
@@ -155,7 +169,9 @@ def test_python_lanczos_preserves_norm() -> None:
     h_x, h_p_diag, psi, a_t, b_t = _random_hermitian_setup(n, seed=2025)
     dt = 0.23
     matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
-    psi_new, _m_eff = _python_lanczos_propagate(matvec, psi, dt, m=24, tol=1e-12)
+    psi_new, _m_eff, _beta_m, _c_m_abs = _python_lanczos_propagate(
+        matvec, psi, dt, m=24, tol=1e-12
+    )
     rel = abs(np.linalg.norm(psi_new) - np.linalg.norm(psi)) / max(
         np.linalg.norm(psi), 1.0
     )
@@ -167,9 +183,43 @@ def test_python_lanczos_dt_zero_is_identity() -> None:
     n = 4
     h_x, h_p_diag, psi, a_t, b_t = _random_hermitian_setup(n, seed=2026)
     matvec = _make_python_matvec(h_x, h_p_diag, a_t, b_t)
-    psi_new, _m_eff = _python_lanczos_propagate(matvec, psi, 0.0, m=24, tol=1e-12)
+    psi_new, _m_eff, beta_m, c_m_abs = _python_lanczos_propagate(
+        matvec, psi, 0.0, m=24, tol=1e-12
+    )
     rel = np.linalg.norm(psi_new - psi) / max(np.linalg.norm(psi), 1.0)
     assert rel < 1e-13, f"dt=0 identity violated: rel = {rel}"
+    # dt=0 では exp(0) = I なので c = e_0 → |c_m| = 0 for m >= 1.
+    assert c_m_abs < 1e-13, f"|c_m| at dt=0 should be ~0 but got {c_m_abs}"
+    # β_m は dt 非依存なので正の値.
+    assert beta_m >= 0.0, f"β_m must be non-negative: {beta_m}"
+
+
+def test_python_lanczos_beta_m_zero_for_invariant_subspace() -> None:
+    """H が ψ_0 の不変部分空間に閉じている場合は β_k < tol で早期打切, β_m < tol.
+
+    具体的には, ψ = e_0 (計算基底の 0 番目) かつ H = h_x_0 · X_0 と
+    すると K_2(H, e_0) = span{e_0, X_0 e_0} = span{e_0, e_1} で閉じ, β_2 = 0.
+
+    issue #93 (Phase 7) Step 1a の acceptance: 早期打切が起こるケースで
+    β_m < tol が成り立つことを確認する.
+    """
+    n = 3
+    dim = 1 << n
+    # H = -X_0 のみ (h_x[0]=1, 他=0, h_p_diag=0). K_2 が閉じる.
+    h_x = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    h_p_diag = np.zeros(dim, dtype=np.float64)
+    psi = np.zeros(dim, dtype=np.complex128)
+    psi[0] = 1.0  # e_0
+    matvec = _make_python_matvec(h_x, h_p_diag, a_t=1.0, b_t=0.0)
+    tol = 1e-10
+    psi_new, m_eff, beta_m, c_m_abs = _python_lanczos_propagate(
+        matvec, psi, dt=0.3, m=8, tol=tol
+    )
+    # K_2 で閉じるので m_eff <= 2 + 1 (β_2 < tol で 3 番目の iteration で打切).
+    # 厳密には m_eff = 2 (k=0,1 で β_2 < tol を検出して break).
+    assert m_eff <= 3, f"m_eff should be small for invariant subspace, got {m_eff}"
+    assert beta_m < tol, f"β_m={beta_m} must be < tol={tol} after early termination"
+    assert c_m_abs >= 0.0, f"|c_m|={c_m_abs} must be non-negative"
 
 
 @pytest.mark.skipif(not _HAS_RUST, reason="kryanneal._rust extension not built")

@@ -333,7 +333,7 @@ def evolve_schedule_adaptive_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule:
     """
     ...
 
-def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, SnapshotData | None]:
+def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
     """CFM4:2 + step-doubling Richardson 推定子による adaptive dt ドライバ.
 
     PI controller (``docs/design/05-3-propagator.md`` §5.3) で local error を ``tol_step``
@@ -395,6 +395,24 @@ def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, s
         するため. β_k 早期打切により ``m_eff < m`` になる step では
         ``m_eff_sum`` が ``6m`` 未満になり, ``n_matvec`` 推定 (現状
         ``n_steps_actual · 6m``) より実コストは小さい.
+    beta_m_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の β_m 統計値.
+        ``cfm4_step_with_richardson_estimate`` 内部の 6 Lanczos 呼出のうち
+        ``err_lanczos_total`` 算出に使われた β_m 上界 (実装は
+        ``err_lanczos_total / (‖ψ_in‖·dt·sum(1/m_eff_i))`` 相当の代表値)
+        を保存する. issue #93 (Phase 7).
+    err_lanczos_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の
+        ``err_lanczos_total`` (Lanczos a posteriori 誤差上界の triangle
+        inequality 和; Hochbruck-Lubich + 高次補正). issue #93 (Phase 7).
+    err_magnus_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の
+        ``err_magnus = max(0, err - err_lanczos_total)`` (Magnus 起因の dt
+        誤差成分). PI controller の駆動量に使われた値. issue #93 (Phase 7).
+    n_krylov_insufficient : int
+        累積で ``err_lanczos_total > tol_step`` を検出した step 数 (accept
+        / reject 両方をカウント). Krylov 充分性の診断指標で, 大きい場合は
+        ``m`` を増やすことを検討すべき. issue #93 (Phase 7).
     snapshot : SnapshotData | None
         ``save_tlist=None`` のとき ``None``. 非 None のとき dict
         ``{"times": np.ndarray, "observables_history": dict[str, np.ndarray],

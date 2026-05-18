@@ -131,20 +131,30 @@ def test_adaptive_richardson_matches_qutip() -> None:
     sched = Schedule.linear(T=T)
     psi0 = uniform_superposition(n)
 
-    # issue #52 A + Phase 5 (issue #47): driver は 6-tuple
-    # (psi, t_hist, dt_hist, n_rejects, m_eff_hist, snapshot).
+    # issue #93 (Phase 7) + Phase 5 (issue #47): driver は 10-tuple
+    # (psi, t_hist, dt_hist, n_rejects, m_eff_hist, beta_m_hist,
+    #  err_lanczos_hist, err_magnus_hist, n_krylov_insufficient, snapshot).
     # snapshot は save_tlist=None で None.
-    psi_final, t_history, dt_history, n_rejects, m_eff_history, snapshot = (
-        evolve_schedule_adaptive_richardson(
-            h_x=prob.h_x,
-            h_p_diag=prob.H_p_diag,
-            schedule=sched,
-            psi0=psi0,
-            t0=0.0,
-            t1=T,
-            tol_step=1e-8,
-            dt0=0.1,
-        )
+    (
+        psi_final,
+        t_history,
+        dt_history,
+        n_rejects,
+        m_eff_history,
+        beta_m_history,
+        err_lanczos_history,
+        err_magnus_history,
+        n_krylov_insufficient,
+        snapshot,
+    ) = evolve_schedule_adaptive_richardson(
+        h_x=prob.h_x,
+        h_p_diag=prob.H_p_diag,
+        schedule=sched,
+        psi0=psi0,
+        t0=0.0,
+        t1=T,
+        tol_step=1e-8,
+        dt0=0.1,
     )
     assert snapshot is None
     psi_ref = _qutip_reference(prob.h_x, prob.H_p_diag, T)
@@ -160,6 +170,82 @@ def test_adaptive_richardson_matches_qutip() -> None:
     # m_eff_history は accept された step 数と同じ長さ, 各値は 6m 以下.
     assert m_eff_history.shape == dt_history.shape
     assert int(np.max(m_eff_history)) <= 6 * 24  # default m=24
+    # issue #93 (Phase 7): β_m / err_lanczos / err_magnus history も
+    # m_eff_history と同じ長さ. err_magnus + err_lanczos >= err / 2 程度の
+    # ふるまい (詳細 acceptance は別 test).
+    assert beta_m_history.shape == dt_history.shape
+    assert err_lanczos_history.shape == dt_history.shape
+    assert err_magnus_history.shape == dt_history.shape
+    # default krylov_tol=1e-12 では Lanczos 充分 → n_krylov_insufficient = 0.
+    assert n_krylov_insufficient == 0
+    # err_lanczos / err_magnus は非負.
+    assert bool(np.all(err_lanczos_history >= 0.0))
+    assert bool(np.all(err_magnus_history >= 0.0))
+    assert bool(np.all(beta_m_history >= 0.0))
+
+
+def test_adaptive_richardson_error_decomposition_consistency() -> None:
+    """issue #93 (Phase 7): err_lanczos と err_magnus の分解が triangle
+    inequality を満たし, 全体として正しく ``err`` を分解できていることを確認.
+
+    具体的には, accept された各 step で
+    ``err_magnus + err_lanczos >= err`` (triangle inequality の上界性)
+    と ``err_magnus = max(0, err - err_lanczos)`` の関係を確認する.
+
+    また default ``krylov_tol = 1e-12`` では Lanczos 充分なので
+    ``err_lanczos`` は ``tol_step`` を大きく下回り, PI controller の挙動が
+    Phase 6 以前 (``err = err_magnus`` での dt 制御) と数値的にほぼ一致する.
+    """
+    n = 3
+    T = 1.0
+    prob = _make_random_problem(n, seed=20260514)
+    sched = Schedule.linear(T=T)
+    psi0 = uniform_superposition(n)
+
+    (
+        _psi_final,
+        _t_history,
+        dt_history,
+        _n_rejects,
+        _m_eff_history,
+        _beta_m_history,
+        err_lanczos_history,
+        err_magnus_history,
+        n_krylov_insufficient,
+        _snapshot,
+    ) = evolve_schedule_adaptive_richardson(
+        h_x=prob.h_x,
+        h_p_diag=prob.H_p_diag,
+        schedule=sched,
+        psi0=psi0,
+        t0=0.0,
+        t1=T,
+        tol_step=1e-8,
+        krylov_tol=1e-12,  # default. Lanczos 充分を担保.
+        dt0=0.1,
+    )
+
+    # default 設定では n_krylov_insufficient = 0 が契約.
+    assert n_krylov_insufficient == 0, (
+        f"default krylov_tol=1e-12 で n_krylov_insufficient = "
+        f"{n_krylov_insufficient}; should be 0"
+    )
+
+    # err_lanczos_total << tol_step (= 1e-8) を満たすこと.
+    # Lanczos 充分性: 全 step で err_lanczos < tol_step.
+    assert bool(np.all(err_lanczos_history < 1e-8)), (
+        "default 設定で err_lanczos が tol_step を超える step がある: "
+        f"max(err_lanczos)={float(np.max(err_lanczos_history)):.3e}"
+    )
+
+    # err_magnus = max(0, err - err_lanczos) なので err_magnus >= 0.
+    # err = err_lanczos + err_magnus が triangle inequality 上界.
+    assert bool(np.all(err_magnus_history >= 0.0))
+    assert bool(np.all(err_lanczos_history >= 0.0))
+
+    # dt_history と各 history は同じ長さ.
+    assert err_lanczos_history.shape == dt_history.shape
+    assert err_magnus_history.shape == dt_history.shape
 
 
 def test_adaptive_pi_dt_grows_with_loose_tolerance() -> None:
@@ -178,7 +264,7 @@ def test_adaptive_pi_dt_grows_with_loose_tolerance() -> None:
     sched = Schedule(T=T, A=lambda s: 0.5, B=lambda s: 0.5)
     psi0 = uniform_superposition(n)
 
-    _, _, dt_history, _, _, _ = evolve_schedule_adaptive_richardson(
+    _, _, dt_history, _, _, _, _, _, _, _ = evolve_schedule_adaptive_richardson(
         h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
@@ -208,7 +294,7 @@ def test_adaptive_rejects_oversized_dt0() -> None:
     sched = Schedule.linear(T=T)
     psi0 = uniform_superposition(n)
 
-    _, _, _, n_rejects, _, _ = evolve_schedule_adaptive_richardson(
+    _, _, _, n_rejects, _, _, _, _, _, _ = evolve_schedule_adaptive_richardson(
         h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
@@ -458,7 +544,7 @@ def test_dt_max_none_facade_caps_dt_history() -> None:
     # cap を超えないこと, かつ PI が dt0=0.5 から伸びていることを driver
     # 直接呼出で dt_history を見て確認 (QuantumResult は dt_history を
     # 公開しないので driver layer に降りる).
-    _, _, dt_history, _, _, _ = evolve_schedule_adaptive_richardson(
+    _, _, dt_history, _, _, _, _, _, _, _ = evolve_schedule_adaptive_richardson(
         h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
@@ -748,20 +834,29 @@ def test_adaptive_richardson_save_tlist_records_states() -> None:
     save_tlist = np.array([0.0, 0.3, 0.7, 1.0], dtype=np.float64)
     obs = {"M_z": Observable.magnetization(n)}
 
-    psi_final, _t_hist, _dt_hist, _n_rej, _m_eff, snapshot = (
-        evolve_schedule_adaptive_richardson(
-            h_x=prob.h_x,
-            h_p_diag=prob.H_p_diag,
-            schedule=sched,
-            psi0=psi0,
-            t0=0.0,
-            t1=1.0,
-            tol_step=1e-8,
-            dt0=0.1,
-            observables=obs,
-            save_tlist=save_tlist,
-            store_states=True,
-        )
+    (
+        psi_final,
+        _t_hist,
+        _dt_hist,
+        _n_rej,
+        _m_eff,
+        _beta_m,
+        _err_lanczos,
+        _err_magnus,
+        _n_krylov_ins,
+        snapshot,
+    ) = evolve_schedule_adaptive_richardson(
+        h_x=prob.h_x,
+        h_p_diag=prob.H_p_diag,
+        schedule=sched,
+        psi0=psi0,
+        t0=0.0,
+        t1=1.0,
+        tol_step=1e-8,
+        dt0=0.1,
+        observables=obs,
+        save_tlist=save_tlist,
+        store_states=True,
     )
     assert snapshot is not None
     np.testing.assert_array_equal(snapshot["times"], save_tlist)

@@ -258,7 +258,7 @@ def _python_lanczos_propagate(
     dt: float,
     m: int,
     tol: float,
-) -> tuple[np.ndarray, int]:
+) -> tuple[np.ndarray, int, float, float]:
     """``exp(-i dt H) ψ`` の Lanczos + 三重対角固有分解による近似 (Python リファレンス).
 
     Rust 側 ``lanczos_propagate`` と同一アルゴリズム (Park-Light 1986,
@@ -289,6 +289,16 @@ def _python_lanczos_propagate(
         ``QuantumResult.m_eff_stats`` 集計に使う. ``dim == 0`` または
         ``‖ψ‖ == 0`` の縮退ケースでは ``m_eff = 0`` を返す
         (Krylov 構築なし).
+    beta_m : float
+        Lanczos build 完了時の最終 off-diagonal ``β_{m_eff-1}``.
+        次の Krylov 方向への漏れ強度に対応し, a posteriori 誤差推定
+        ``err_lanczos ≈ β_m · |c_m| · ‖ψ‖ · dt / m_eff`` (Saad 1992 /
+        Hochbruck-Lubich 1997 + 高次補正) の主因子. issue #93 (Phase 7).
+        ``m_eff == 0`` の縮退ケースでは ``0.0``.
+    c_m_abs : float
+        ``c = exp(-i dt T_m) e_0`` の最終 (m-1 番目) 成分の絶対値.
+        β_m と並んで a posteriori 推定子に使う. issue #93 (Phase 7).
+        ``m_eff == 0`` の縮退ケースでは ``0.0``.
 
     Raises
     ------
@@ -299,11 +309,11 @@ def _python_lanczos_propagate(
         raise ValueError(f"m must be >= 1, got {m!r}")
     dim = psi.shape[0]
     if dim == 0:
-        return psi.copy(), 0
+        return psi.copy(), 0, 0.0, 0.0
 
     psi_norm = float(np.linalg.norm(psi))
     if psi_norm == 0.0:
-        return np.zeros_like(psi), 0
+        return np.zeros_like(psi), 0, 0.0, 0.0
 
     # V: shape (dim, m), 各列が Lanczos vector v_0..v_{m-1}.
     v_mat = np.zeros((dim, m), dtype=np.complex128)
@@ -366,7 +376,16 @@ def _python_lanczos_propagate(
     phases = np.exp(-1j * dt * lam)
     coeff = psi_norm * (q @ (phases * q[0, :]))
     psi_new = v_mat[:, :m_eff] @ coeff
-    return psi_new, m_eff
+    # a posteriori 誤差推定子の出力 (issue #93 Phase 7):
+    # - β_m: build 完了時の最終 off-diagonal (= 次の Krylov 方向への漏れ強度).
+    # - |c_m|: c = exp(-i dt T_m) e_0 の m 番目 (= 末尾) 成分の絶対値.
+    # ‖ψ‖ は coeff にすでに含めてあるので, ここでは抜き出して factor として戻す
+    # (a posteriori 式は β_m × |c_m| × ‖ψ‖ × dt / m_eff の形で使うため,
+    # coeff[m_eff-1] そのままだと ‖ψ‖ が二重計上される). c_m は psi_norm を
+    # 含まない方の正規化を返す.
+    beta_m = float(beta[m_eff - 1])
+    c_m_abs = float(abs(coeff[m_eff - 1])) / psi_norm
+    return psi_new, m_eff, beta_m, c_m_abs
 
 
 def _python_m2_step(
@@ -408,9 +427,11 @@ def _python_m2_step(
         shape ``(2**n,)`` complex128 の新状態.
     """
     matvec = _make_python_matvec(h_x, h_p_diag, a_mid, b_mid)
-    # C1 (issue #52): _python_lanczos_propagate は (psi, m_eff) を返す.
-    # M2 経路は固定 dt で m_eff 露出不要のため discard.
-    psi_new, _m_eff = _python_lanczos_propagate(matvec, psi, dt, m, krylov_tol)
+    # issue #93 (Phase 7): _python_lanczos_propagate は (psi, m_eff, β_m, |c_m|).
+    # M2 経路は固定 dt で m_eff / β_m / |c_m| 露出不要のため discard.
+    psi_new, _m_eff, _beta_m, _c_m_abs = _python_lanczos_propagate(
+        matvec, psi, dt, m, krylov_tol
+    )
     return psi_new
 
 
@@ -1016,7 +1037,7 @@ def _python_cfm4_step(
     dt: float,
     m: int,
     krylov_tol: float,
-) -> tuple[np.ndarray, int]:
+) -> tuple[np.ndarray, int, float]:
     """CFM4:2 (Alvermann-Fehske 2011) 1 step の Python リファレンス実装.
 
     Rust 側 ``cfm4_step`` (``src/cfm4.rs``) と同一アルゴリズム:
@@ -1066,23 +1087,43 @@ def _python_cfm4_step(
         2 stage の Lanczos 部分空間次元 ``m_eff`` の合計 (issue #52 A).
         adaptive Richardson driver が per-step `m_eff_total` に集計する.
         ``m_eff_sum <= 2 · m`` を満たす.
+    err_lanczos_sum : float
+        2 stage の Lanczos a posteriori 誤差上界の triangle inequality 和.
+        ``err_lanczos = Σ_i (β_m_i · |c_m_i| · ‖ψ_in_i‖ · dt · 1/m_eff_i)``.
+        adaptive Richardson driver で Magnus 誤差と分離するために使う
+        (issue #93 Phase 7). ``m_eff_i == 0`` の退化 stage は 0 contribution.
     """
     # stage 1: B_1 = a_high · H_1 + a_low · H_2 を (c_drv_1, c_diag_1) に
     # 畳み込んで Lanczos 1 回.
+    # issue #93 (Phase 7): _python_lanczos_propagate は (psi, m_eff, β_m, |c_m|).
+    # β_m / |c_m| を triangle inequality で集約して err_lanczos_sum を作る.
+    # ‖ψ_in_2‖ ≈ ‖ψ_in_1‖ (Lanczos は unitary 近似) を使い 1 回だけ psi_norm を計算.
+    psi_norm = float(np.linalg.norm(psi))
     c_drv_1 = _CFM4_A_HIGH * a_s1 + _CFM4_A_LOW * a_s2
     c_diag_1 = _CFM4_A_HIGH * b_s1 + _CFM4_A_LOW * b_s2
     matvec_1 = _make_python_matvec(h_x, h_p_diag, c_drv_1, c_diag_1)
-    psi_mid, m_eff_stage1 = _python_lanczos_propagate(matvec_1, psi, dt, m, krylov_tol)
+    psi_mid, m_eff_stage1, beta_m_1, c_m_abs_1 = _python_lanczos_propagate(
+        matvec_1, psi, dt, m, krylov_tol
+    )
 
     # stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に
     # 畳み込んで Lanczos もう 1 回.
     c_drv_2 = _CFM4_A_LOW * a_s1 + _CFM4_A_HIGH * a_s2
     c_diag_2 = _CFM4_A_LOW * b_s1 + _CFM4_A_HIGH * b_s2
     matvec_2 = _make_python_matvec(h_x, h_p_diag, c_drv_2, c_diag_2)
-    psi_new, m_eff_stage2 = _python_lanczos_propagate(
+    psi_new, m_eff_stage2, beta_m_2, c_m_abs_2 = _python_lanczos_propagate(
         matvec_2, psi_mid, dt, m, krylov_tol
     )
-    return psi_new, m_eff_stage1 + m_eff_stage2
+
+    # triangle inequality で集約. 退化 stage (m_eff == 0) は 0 contribution.
+    err_lanczos_1 = (
+        beta_m_1 * c_m_abs_1 * psi_norm * dt / m_eff_stage1 if m_eff_stage1 > 0 else 0.0
+    )
+    err_lanczos_2 = (
+        beta_m_2 * c_m_abs_2 * psi_norm * dt / m_eff_stage2 if m_eff_stage2 > 0 else 0.0
+    )
+    err_lanczos_sum = err_lanczos_1 + err_lanczos_2
+    return psi_new, m_eff_stage1 + m_eff_stage2, err_lanczos_sum
 
 
 def evolve_schedule_cfm4(
@@ -1181,10 +1222,10 @@ def evolve_schedule_cfm4(
         a_s1, b_s1 = schedule.coeffs_at(t_s1)
         a_s2, b_s2 = schedule.coeffs_at(t_s2)
         if rust_mod is not None:
-            # C2 (issue #52): cfm4_step_py は (psi, m_eff_sum) を返す.
-            # 固定 dt cfm4 経路 (adaptive ではない) では m_eff 露出が不要なので
-            # discard する.
-            psi, _m_eff_sum = rust_mod.cfm4_step_py(
+            # issue #93 (Phase 7): cfm4_step_py は (psi, m_eff_sum, err_lanczos_sum).
+            # 固定 dt cfm4 経路 (adaptive ではない) では m_eff / err_lanczos の
+            # 露出が不要なので discard.
+            psi, _m_eff_sum, _err_lanczos_sum = rust_mod.cfm4_step_py(
                 psi,
                 h_x_arr,
                 h_p_diag_arr,
@@ -1197,7 +1238,10 @@ def evolve_schedule_cfm4(
                 krylov_tol,
             )
         else:
-            psi, _m_eff_sum = _python_cfm4_step(
+            # issue #93 (Phase 7): _python_cfm4_step は
+            # (psi, m_eff_sum, err_lanczos_sum). 固定 dt 経路 (evolve_schedule_cfm4)
+            # は adaptive ではないので err_lanczos / m_eff は discard.
+            psi, _m_eff_sum, _err_lanczos_sum = _python_cfm4_step(
                 psi,
                 h_x_arr,
                 h_p_diag_arr,
@@ -1282,10 +1326,10 @@ def _python_cfm4_step_with_m2_estimate(
         ``‖ψ_cfm4 - ψ_m2‖_2`` (real, non-negative). PI controller が
         accept/reject 判定に使う.
     """
-    # C2 (issue #52): _python_cfm4_step は (psi, m_eff_sum) を返す.
-    # M2 estimate 経路は adaptive M2 driver でのみ使われ adaptive Richardson
-    # driver (本 issue の主対象) では使わない. m_eff_sum は discard する.
-    psi_cfm4, _m_eff_sum = _python_cfm4_step(
+    # issue #93 (Phase 7): _python_cfm4_step は (psi, m_eff_sum, err_lanczos_sum)
+    # を返すが, M2 estimate 経路は adaptive M2 driver でのみ使われ adaptive
+    # Richardson driver (本 issue の主対象) では使わない. 末尾 2 要素 discard.
+    psi_cfm4, _m_eff_sum, _err_lanczos_sum = _python_cfm4_step(
         psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol
     )
     psi_m2 = _python_m2_step(psi, h_x, h_p_diag, a_mid, b_mid, dt, m, krylov_tol)
@@ -1313,7 +1357,7 @@ def _python_cfm4_step_with_richardson_estimate(
     m: int,
     krylov_tol: float,
     extrapolate: bool,
-) -> tuple[np.ndarray, float, int]:
+) -> tuple[np.ndarray, float, int, float]:
     """CFM4:2 + step-doubling Richardson 推定子の Python リファレンス実装.
 
     Rust 側 ``cfm4_step_with_richardson_estimate`` (``src/cfm4.rs``) と
@@ -1388,12 +1432,21 @@ def _python_cfm4_step_with_richardson_estimate(
         full + half×2 の 3 cfm4_step (= 6 Lanczos 呼出) の ``m_eff`` 合計
         (issue #52 A). adaptive Richardson driver が per-step
         ``m_eff_total`` に集計する. ``m_eff_sum <= 6 · m`` を満たす.
+    err_lanczos_total : float
+        3 × ``_python_cfm4_step`` の ``err_lanczos_sum`` を triangle
+        inequality で集約した Lanczos a posteriori 誤差上界の合計
+        (issue #93 Phase 7). adaptive Richardson driver で
+        ``err_magnus = max(0, err - err_lanczos_total)`` として PI controller
+        の Magnus 起因駆動量を取り出すために使う.
     """
     half_dt = 0.5 * float(dt)
 
-    # 1) full-step CFM4:2 (dt). C2 (issue #52): cfm4_step は (psi, m_eff_sum)
-    # を返す. 3 stage の m_eff を合計して戻り値 3-tuple の末尾に乗せる.
-    psi_full, m_eff_full = _python_cfm4_step(
+    # issue #93 (Phase 7): cfm4_step は (psi, m_eff_sum, err_lanczos_sum) を返す.
+    # 3 stage の err_lanczos_sum を triangle inequality で集約して
+    # err_lanczos_total を作る.
+
+    # 1) full-step CFM4:2 (dt).
+    psi_full, m_eff_full, err_lanczos_full = _python_cfm4_step(
         psi,
         h_x,
         h_p_diag,
@@ -1407,7 +1460,7 @@ def _python_cfm4_step_with_richardson_estimate(
     )
 
     # 2) 前半 half-step CFM4:2 (dt/2)
-    psi_mid, m_eff_h1 = _python_cfm4_step(
+    psi_mid, m_eff_h1, err_lanczos_h1 = _python_cfm4_step(
         psi,
         h_x,
         h_p_diag,
@@ -1421,7 +1474,7 @@ def _python_cfm4_step_with_richardson_estimate(
     )
 
     # 3) 後半 half-step CFM4:2 (dt/2), 前半の出口状態を入口に取る.
-    psi_h2, m_eff_h2 = _python_cfm4_step(
+    psi_h2, m_eff_h2, err_lanczos_h2 = _python_cfm4_step(
         psi_mid,
         h_x,
         h_p_diag,
@@ -1435,13 +1488,14 @@ def _python_cfm4_step_with_richardson_estimate(
     )
 
     err = float(np.linalg.norm(psi_full - psi_h2))
+    err_lanczos_total = err_lanczos_full + err_lanczos_h1 + err_lanczos_h2
 
     if extrapolate:
         # ψ_acc = (16 · ψ_h2 - ψ_full) / 15. Rust 側と同一順序で書き戻す.
         psi_new = (16.0 * psi_h2 - psi_full) / 15.0
     else:
         psi_new = psi_h2
-    return psi_new, err, m_eff_full + m_eff_h1 + m_eff_h2
+    return psi_new, err, m_eff_full + m_eff_h1 + m_eff_h2, err_lanczos_total
 
 
 def _adaptive_dispatch_m2_estimate(
@@ -1495,38 +1549,43 @@ def _adaptive_dispatch_richardson_estimate(
     m: int,
     krylov_tol: float,
     extrapolate: bool,
-) -> tuple[np.ndarray, float, int]:
+) -> tuple[np.ndarray, float, int, float]:
     """``rust_mod`` 可否に応じて Rust / Python の Richardson 推定子を呼ぶ.
 
-    C2 (issue #52): Rust / Python ref 双方が ``(psi_new, err, m_eff_sum)``
-    を返すよう拡張. m_eff_sum は full + half×2 の 3 cfm4_step (= 6 Lanczos
-    call) の m_eff 合計. adaptive Richardson driver
-    (``evolve_schedule_adaptive_richardson``) が per-step ``m_eff_total`` に
-    集計する.
+    issue #93 (Phase 7): Rust / Python ref 双方が
+    ``(psi_new, err, m_eff_sum, err_lanczos_total)`` を返すよう拡張.
+    末尾の ``err_lanczos_total`` は 3 × cfm4_step (= 6 Lanczos call) の
+    Lanczos a posteriori 誤差上界の triangle inequality 和.
+    adaptive Richardson driver
+    (``evolve_schedule_adaptive_richardson``) が
+    ``err_magnus = max(0, err - err_lanczos_total)`` で Magnus 起因駆動量を
+    取り出して PI controller に使う.
     """
     if rust_mod is not None:
-        psi_new, err, m_eff_sum = rust_mod.cfm4_step_with_richardson_estimate_py(
-            psi,
-            h_x,
-            h_p_diag,
-            a_s1_full,
-            b_s1_full,
-            a_s2_full,
-            b_s2_full,
-            a_s1_h1,
-            b_s1_h1,
-            a_s2_h1,
-            b_s2_h1,
-            a_s1_h2,
-            b_s1_h2,
-            a_s2_h2,
-            b_s2_h2,
-            dt,
-            m,
-            krylov_tol,
-            extrapolate,
+        psi_new, err, m_eff_sum, err_lanczos_total = (
+            rust_mod.cfm4_step_with_richardson_estimate_py(
+                psi,
+                h_x,
+                h_p_diag,
+                a_s1_full,
+                b_s1_full,
+                a_s2_full,
+                b_s2_full,
+                a_s1_h1,
+                b_s1_h1,
+                a_s2_h1,
+                b_s2_h1,
+                a_s1_h2,
+                b_s1_h2,
+                a_s2_h2,
+                b_s2_h2,
+                dt,
+                m,
+                krylov_tol,
+                extrapolate,
+            )
         )
-        return psi_new, float(err), int(m_eff_sum)
+        return psi_new, float(err), int(m_eff_sum), float(err_lanczos_total)
     return _python_cfm4_step_with_richardson_estimate(
         psi,
         h_x,
@@ -1794,7 +1853,18 @@ def evolve_schedule_adaptive_richardson(
     observables: "dict[str, Observable] | None" = None,
     save_tlist: np.ndarray | None = None,
     store_states: bool = False,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, SnapshotData | None]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    SnapshotData | None,
+]:
     """CFM4:2 + step-doubling Richardson 推定子による adaptive dt ドライバ.
 
     PI controller (``docs/design/05-3-propagator.md`` §5.3) で local error を ``tol_step``
@@ -1856,6 +1926,24 @@ def evolve_schedule_adaptive_richardson(
         するため. β_k 早期打切により ``m_eff < m`` になる step では
         ``m_eff_sum`` が ``6m`` 未満になり, ``n_matvec`` 推定 (現状
         ``n_steps_actual · 6m``) より実コストは小さい.
+    beta_m_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の β_m 統計値.
+        ``cfm4_step_with_richardson_estimate`` 内部の 6 Lanczos 呼出のうち
+        ``err_lanczos_total`` 算出に使われた β_m 上界 (実装は
+        ``err_lanczos_total / (‖ψ_in‖·dt·sum(1/m_eff_i))`` 相当の代表値)
+        を保存する. issue #93 (Phase 7).
+    err_lanczos_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の
+        ``err_lanczos_total`` (Lanczos a posteriori 誤差上界の triangle
+        inequality 和; Hochbruck-Lubich + 高次補正). issue #93 (Phase 7).
+    err_magnus_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の
+        ``err_magnus = max(0, err - err_lanczos_total)`` (Magnus 起因の dt
+        誤差成分). PI controller の駆動量に使われた値. issue #93 (Phase 7).
+    n_krylov_insufficient : int
+        累積で ``err_lanczos_total > tol_step`` を検出した step 数 (accept
+        / reject 両方をカウント). Krylov 充分性の診断指標で, 大きい場合は
+        ``m`` を増やすことを検討すべき. issue #93 (Phase 7).
     snapshot : SnapshotData | None
         ``save_tlist=None`` のとき ``None``. 非 None のとき dict
         ``{"times": np.ndarray, "observables_history": dict[str, np.ndarray],
@@ -1920,6 +2008,15 @@ def evolve_schedule_adaptive_richardson(
     # cumulative cost の観点では sunk だが本 history には含めない
     # (PI accept ステップ数とインデックスを揃える設計).
     m_eff_hist: list[int] = []
+    # issue #93 (Phase 7): Lanczos 誤差源分離のため accept された step の
+    # err_lanczos_total / err_magnus / β_m を保存する. β_m は本 driver では
+    # 6 Lanczos 呼出の代表値として "err_lanczos_total を逆算した実効 β_m"
+    # を保存 (個別 β_m は cfm4_step 層に閉じる; driver 層では aggregated
+    # err のみが意味を持つ).
+    beta_m_hist: list[float] = []
+    err_lanczos_hist: list[float] = []
+    err_magnus_hist: list[float] = []
+    n_krylov_insufficient = 0
     # 初期時刻 ``t0`` が ``save_tlist[0]`` と一致するなら先頭 snapshot を取る.
     if recorder is not None and save_targets is not None:
         recorder.record(t, psi)
@@ -1954,38 +2051,63 @@ def evolve_schedule_adaptive_richardson(
         a_s1_h2, b_s1_h2 = schedule.coeffs_at(t_s1_h2)
         a_s2_h2, b_s2_h2 = schedule.coeffs_at(t_s2_h2)
 
-        # C3 (issue #52): dispatcher は (psi_new, err, m_eff_sum) を返す.
-        # accept された step のみ m_eff_sum を m_eff_hist に積む.
-        psi_new, err, m_eff_sum = _adaptive_dispatch_richardson_estimate(
-            rust_mod,
-            psi,
-            h_x_arr,
-            h_p_diag_arr,
-            a_s1_full,
-            b_s1_full,
-            a_s2_full,
-            b_s2_full,
-            a_s1_h1,
-            b_s1_h1,
-            a_s2_h1,
-            b_s2_h1,
-            a_s1_h2,
-            b_s1_h2,
-            a_s2_h2,
-            b_s2_h2,
-            dt_try,
-            m,
-            krylov_tol,
-            richardson_extrapolate,
+        # issue #93 (Phase 7): dispatcher は
+        # (psi_new, err, m_eff_sum, err_lanczos_total) を返す. err_lanczos_total
+        # は Hochbruck-Lubich + 高次補正による Lanczos a posteriori 誤差上界の
+        # 6 Lanczos call 合計. err_magnus = max(0, err - err_lanczos_total) を
+        # PI controller の駆動量とし, dt 起因 (Magnus) と Krylov 起因の誤差を
+        # 分離する. err_lanczos_total > tol_step は Krylov 不足の診断信号
+        # (m_max を増やすべきサイン; m_max 自動 escalation は #93 Step 4).
+        psi_new, err, m_eff_sum, err_lanczos_total = (
+            _adaptive_dispatch_richardson_estimate(
+                rust_mod,
+                psi,
+                h_x_arr,
+                h_p_diag_arr,
+                a_s1_full,
+                b_s1_full,
+                a_s2_full,
+                b_s2_full,
+                a_s1_h1,
+                b_s1_h1,
+                a_s2_h1,
+                b_s2_h1,
+                a_s1_h2,
+                b_s1_h2,
+                a_s2_h2,
+                b_s2_h2,
+                dt_try,
+                m,
+                krylov_tol,
+                richardson_extrapolate,
+            )
         )
+        # err_magnus = max(0, err - err_lanczos_total). triangle inequality の
+        # 上界なので err_lanczos が err を超えるケースがあり, その場合は
+        # Lanczos 誤差が err 全体を説明している (= Magnus 誤差は実質 0).
+        err_magnus = max(0.0, err - err_lanczos_total)
+        if err_lanczos_total > tol_step:
+            n_krylov_insufficient += 1
 
-        accept = (err <= tol_step) or (dt_try <= dt_min)
+        # accept 判定は err_magnus ベース. err_lanczos が支配的な step では
+        # err > tol_step でも err_magnus <= tol_step なら accept する
+        # (dt を縮めても Krylov 誤差は減らない → 縮める意味がない).
+        accept = (err_magnus <= tol_step) or (dt_try <= dt_min)
         if accept:
             psi = psi_new
             t = t + dt_try
             t_hist.append(t)
             dt_hist.append(dt_try)
             m_eff_hist.append(int(m_eff_sum))
+            err_lanczos_hist.append(float(err_lanczos_total))
+            err_magnus_hist.append(float(err_magnus))
+            # 代表 β_m: err_lanczos_total を逆算した実効 β_m を保存
+            # (個別 β_m は cfm4_step 層で集約済み). ‖ψ‖ ≈ 1 (unitary),
+            # 6 Lanczos 平均 で逆算: β_m_eff ≈ err_lanczos_total / dt
+            # (|c_m| × 1/m_eff ~ 1/m_eff 規模で代表値. 詳細解析は bench 側).
+            beta_m_hist.append(
+                float(err_lanczos_total / dt_try) if dt_try > 0.0 else 0.0
+            )
             n_consecutive_rejects = 0
             # save_tlist 経路: target にピタリ到達したら snapshot を取り
             # next_save_idx を進める. ``clamped_to_target`` で意図的に
@@ -1998,9 +2120,13 @@ def evolve_schedule_adaptive_richardson(
                         and abs(t - float(save_targets[next_save_idx])) <= _MERGE_TOL
                     ):
                         next_save_idx += 1
+            # PI controller は err_magnus で dt を更新. err_lanczos 由来の
+            # 部分は dt 縮小では改善しないので除外して safe.
+            # err_magnus = 0 の場合は最大成長 (Krylov 充分 + Magnus 誤差なし).
+            err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
             dt = _pi_dt_next(
                 dt_try,
-                err,
+                err_for_pi,
                 tol_step=tol_step,
                 safety=safety,
                 growth_max=growth_max,
@@ -2014,8 +2140,10 @@ def evolve_schedule_adaptive_richardson(
             if n_consecutive_rejects > max_rejects:
                 raise RuntimeError(
                     f"adaptive driver: exceeded max_rejects={max_rejects} "
-                    f"consecutive rejects at t={t}, dt={dt_try}, err={err}; "
-                    f"consider relaxing tol_step or shrinking dt0."
+                    f"consecutive rejects at t={t}, dt={dt_try}, "
+                    f"err={err}, err_magnus={err_magnus}, "
+                    f"err_lanczos={err_lanczos_total}; "
+                    f"consider relaxing tol_step or increasing m."
                 )
             dt = max(dt_try * 0.5, dt_min)
 
@@ -2026,5 +2154,9 @@ def evolve_schedule_adaptive_richardson(
         np.asarray(dt_hist, dtype=np.float64),
         int(n_rejects),
         np.asarray(m_eff_hist, dtype=np.int64),
+        np.asarray(beta_m_hist, dtype=np.float64),
+        np.asarray(err_lanczos_hist, dtype=np.float64),
+        np.asarray(err_magnus_hist, dtype=np.float64),
+        int(n_krylov_insufficient),
         snapshot,
     )
