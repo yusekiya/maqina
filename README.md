@@ -68,7 +68,8 @@ kryanneal build configuration
 
 - **Quick start**: [`docs/quickstart.md`](docs/quickstart.md) — 最小例 /
   Observable 時系列計測 / step-wise simulator / 瞬時固有状態の 4 snippet で
-  主要 API を一通り使うチュートリアル.
+  主要 API を一通り使うチュートリアル. 並列ジョブ実行時のスレッド数制御
+  (multiprocessing / Slurm) の設定方法も含む.
 - 設計書 (一次資料): [`docs/design/INDEX.md`](docs/design/INDEX.md)
 - テスト実行手順: [`.claude/skills/test-runner/SKILL.md`](.claude/skills/test-runner/SKILL.md) (Claude Code skill, `/test-runner` で発火可能; `docs/testing.md` はポインタ)
 - ベンチマーク: [`docs/benchmarks.md`](docs/benchmarks.md) (Phase 1 では未整備)
