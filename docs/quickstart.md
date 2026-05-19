@@ -197,7 +197,82 @@ print(f"gap     = {gap:.6f}")
 `n <= 12` であれば `method="exact"` で dense ``H(t)`` の
 `numpy.linalg.eigh` 参照経路も使える (Lanczos 結果の検証用)。
 
-## 5. 並列ジョブ実行時のスレッド数制御
+## 5. 瞬時基底状態との fidelity で断熱性を確認
+
+量子アニーリングの解析では「瞬時 ``H(t)`` の基底状態 ``|gs(t)⟩`` と
+動力学で得られた状態 ``|ψ(t)⟩``」の重なり
+``F(t) = |⟨gs(t)|ψ(t)⟩|²`` が断熱性の主要な指標となる。初期状態を
+``H(0)`` の基底状態に取れば断熱定理から ``T → ∞`` 極限で ``F(t) ≡ 1`` が
+要請される。標準的な線形スケジュール (``A(0)=1``, ``B(0)=0``) では
+``H(0) = -Σ h_x_i X_i`` の基底状態が一様重ね合わせ
+``|+⟩^N = uniform_superposition(n)`` なので, この初期状態から始めれば
+``F(0) = 1`` がスタート値になる。短い ``T`` では非断熱遷移で ``F(t) < 1``,
+``T`` を大きくすると ``F(t) → 1`` に漸近することを以下で確認する。
+
+実装の要点:
+
+- ``save_tlist`` で観測時刻列を指定し ``store_states=True`` を渡すと
+  各時刻の ``ψ(t)`` が ``QuantumResult.states`` に保存される。
+- 同じ時刻列に対して ``instantaneous_eigenstates(prob, sched, t=t, k=1, ...)``
+  で瞬時基底状態を取得し ``|⟨gs(t)|ψ(t)⟩|²`` を計算する。基底状態には
+  大域位相 ``e^{iφ}`` の任意性があるが ``|⟨gs|ψ⟩|²`` は位相不変なので
+  問題にならない。
+
+```python
+import numpy as np
+from kryanneal import IsingProblem, Schedule, QuantumAnnealer
+from kryanneal.initial_states import uniform_superposition
+from kryanneal.eigenstates import instantaneous_eigenstates
+
+n = 6
+rng = np.random.default_rng(0)
+J = rng.normal(size=(n, n)) / np.sqrt(n)
+J = (J + J.T) / 2
+np.fill_diagonal(J, 0.0)
+x = np.arange(1 << n, dtype=np.int64)
+bits = ((x[:, None] >> np.arange(n)) & 1).astype(np.int64)
+sigma = 1 - 2 * bits
+H_p_diag = -np.einsum("ij,xi,xj->x", J, sigma, sigma) / 2
+
+prob = IsingProblem(n=n, H_p_diag=H_p_diag, h_x=np.ones(n))
+psi0 = uniform_superposition(n)             # H(0) の基底状態
+
+# 短 T (非断熱) と長 T (断熱極限に近い) を比較する.
+for T in (1.0, 100.0):
+    sched = Schedule.linear(T=T)
+    save_tlist = np.linspace(0.0, sched.T, 11)
+
+    ann = QuantumAnnealer(prob, sched)
+    result = ann.run(
+        psi0,
+        t0=0.0,
+        t1=sched.T,
+        method="cfm4_adaptive_richardson",
+        atol=1e-8,
+        save_tlist=save_tlist,
+        store_states=True,
+    )
+
+    print(f"T = {T}")
+    for t, psi_t in zip(result.times, result.states, strict=True):
+        # k=1 で瞬時基底状態を取得 (n <= 12 なので exact が手軽).
+        _, gs = instantaneous_eigenstates(
+            prob, sched, t=float(t), k=1, method="exact"
+        )
+        fidelity = float(np.abs(np.vdot(gs[:, 0], psi_t)) ** 2)
+        print(f"  t/T = {t / sched.T:4.2f}: F(t) = {fidelity:.6f}")
+```
+
+実行すると ``T = 1`` では終端 ``F(T)`` が ``1`` から有意に外れるのに対し,
+``T = 100`` では全時刻で ``F(t) ≈ 1`` を保つことが観察できる。これが
+「断熱極限で fidelity = 1」の数値的な確認になる。
+
+``n > 12`` で dense ``eigh`` が現実的でない領域では
+``method="lanczos"`` に切り替える (``k`` を増やせば
+``|⟨gs_j(t)|ψ(t)⟩|²`` で low-lying state への漏れも追跡できる; 詳細は
+[`docs/design/04-python-api.md`](design/04-python-api.md))。
+
+## 6. 並列ジョブ実行時のスレッド数制御
 
 複数の独立計算を並列に走らせる (例: ハイパーパラメータ sweep,
 パラメータごとの独立 trajectory, Slurm の job array) シナリオでは,
