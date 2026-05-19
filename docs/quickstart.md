@@ -197,6 +197,97 @@ print(f"gap     = {gap:.6f}")
 `n <= 12` であれば `method="exact"` で dense ``H(t)`` の
 `numpy.linalg.eigh` 参照経路も使える (Lanczos 結果の検証用)。
 
+## 5. 並列ジョブ実行時のスレッド数制御
+
+複数の独立計算を並列に走らせる (例: ハイパーパラメータ sweep,
+パラメータごとの独立 trajectory, Slurm の job array) シナリオでは,
+1 プロセスあたりのスレッド数を絞らないと **rayon と BLAS の 2 系統 ×
+ジョブ数** で総 OS thread が `cpu_count^2` 相当に膨れ context-switch で
+性能が崩れる。
+
+`kryanneal` の thread pool は **プロセス起動時の環境変数で確定し,
+以降縮小できない** (rayon の global pool / BLAS の thread pool いずれも
+最初の op で初期化される) ため, **`kryanneal` / `numpy` を import する
+前に環境変数を set する** のが唯一正規の制御手段。
+
+### 制御に使う環境変数
+
+| 環境変数 | 対象 |
+|---|---|
+| `RAYON_NUM_THREADS` | rayon global pool (default: 論理コア数, SMT/HT 込み) |
+| `OPENBLAS_NUM_THREADS` | Linux OpenBLAS pool |
+| `MKL_NUM_THREADS` | MKL 利用時 |
+| `VECLIB_MAXIMUM_THREADS` | macOS Apple Accelerate |
+| `OMP_NUM_THREADS` | 上記未設定時の OpenMP fallback |
+
+複数 BLAS pool (numpy bundled / scipy bundled / system) が同居しうるため,
+迷ったら **全部同じ値で揃える** のが安全。`kryanneal.set_blas_threads(n)`
+は import 後に動的に active BLAS thread 数を絞る補助関数だが,
+**pool size 自体は縮まない** (sleeping thread の stack / kernel resource
+は残る) ので per-process 隔離の主役にはならない。
+
+### パターン A: Python 内 multiprocessing (ProcessPoolExecutor + spawn)
+
+`initializer` で子プロセス内 (= `kryanneal` import 前) に env を set する。
+`fork` 文脈だと親で既に numpy / kryanneal を import 済みの場合に env が
+効かないため, `mp_context="spawn"` で起動する。
+
+```python
+import os
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor
+
+THREADS_PER_WORKER = 8
+
+def _init_worker():
+    # 子プロセスで kryanneal / numpy import より前に実行される.
+    os.environ["RAYON_NUM_THREADS"] = str(THREADS_PER_WORKER)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(THREADS_PER_WORKER)
+    os.environ["OMP_NUM_THREADS"] = str(THREADS_PER_WORKER)
+
+def worker(job):
+    import kryanneal  # この時点で初めて import (env が効く)
+    # ... 計算 ...
+    return result
+
+if __name__ == "__main__":
+    ctx = mp.get_context("spawn")  # fork でなく spawn
+    with ProcessPoolExecutor(
+        max_workers=8,
+        mp_context=ctx,
+        initializer=_init_worker,
+    ) as pool:
+        results = list(pool.map(worker, jobs))
+```
+
+数値計算系では SMT/HT は逆効果のことが多い (FPU 取り合い)。
+`max_workers × THREADS_PER_WORKER` が **物理コア数** を超えないように
+配分するのが基本ルール。
+
+### パターン B: shell から N ジョブ並走 (Slurm srun / GNU parallel など)
+
+env をジョブ起動時のコマンドライン側で set する。
+
+```bash
+# 8 ジョブを 8 thread/ジョブ で並走 (物理 64 コアを想定)
+for i in $(seq 1 8); do
+    RAYON_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 OMP_NUM_THREADS=8 \
+        uv run python my_job.py --idx "$i" &
+done
+wait
+```
+
+Slurm の `cpuset` / cgroup で 1 ジョブあたりの CPU 数が絞られていれば
+rayon `available_parallelism()` がそれを反映するので env 未設定でも
+妥当に動くことが多いが, BLAS pool は cgroup を honor しない実装もある
+ため明示推奨。
+
+### 関連
+
+- 詳細な背景・rayon / BLAS の挙動差: CLAUDE.md "Thread pool 運用 (rayon × BLAS)" 節
+- `kryanneal.set_blas_threads(n)` の用途と限界: docstring 参照
+  (import 後に動的に active BLAS thread 数を絞る補助; pool size は変えない)
+
 ## 次に読むもの
 
 - 公開 API リファレンス: [`python/kryanneal/*.pyi`](../python/kryanneal/)

@@ -113,10 +113,32 @@ def set_blas_threads(n: int) -> None:
     ``threadpoolctl.threadpool_limits`` 経由で BLAS API (``user_api='blas'``)
     を使う全 pool に API ベースで ``set_num_threads(n)`` を呼ぶ.
 
+    用途と限界
+    ----------
+    本関数は **既に確保された BLAS pool 内で active thread 数を制限する**
+    だけで, pool size 自体 (= プロセスが確保している OS thread 数) は
+    縮まらない. OpenBLAS / MKL 等の thread pool は **プロセス起動時** に
+    ``OPENBLAS_NUM_THREADS`` / ``MKL_NUM_THREADS`` などの環境変数で size が
+    確定し, 以降は ``set_num_threads(n)`` で active 数を絞っても残りの
+    thread は sleep 状態で stack / kernel resource を保持する.
+
+    そのため:
+
+    - **import 後に動的に active BLAS thread 数を絞りたい** シナリオ
+      (例: rayon 並列経路で ``set_blas_threads(1)`` に落として競合回避)
+      では本関数を使う.
+    - **per-process thread budget の隔離** が要件のシナリオ
+      (multiprocessing / Slurm job array で 1 プロセスあたりの thread 数を
+      物理的に制限したい) では, ``kryanneal`` / ``numpy`` を import する
+      **前** に環境変数 (``OPENBLAS_NUM_THREADS`` / ``MKL_NUM_THREADS`` /
+      ``VECLIB_MAXIMUM_THREADS`` / ``OMP_NUM_THREADS`` / ``RAYON_NUM_THREADS``)
+      を set すること. 詳細パターンは ``docs/quickstart.md`` 末尾節
+      "並列ジョブ実行時のスレッド数制御" 参照.
+
     Parameters
     ----------
     n
-        各 BLAS pool に設定するスレッド上限. 1 以上の整数.
+        各 BLAS pool に設定する active thread 数の上限. 1 以上の整数.
     """
     from threadpoolctl import threadpool_limits
 

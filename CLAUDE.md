@@ -232,15 +232,35 @@ thread pool が 2 系統並走するため運用ルール:
 
 - **rayon thread 数**: 環境変数 `RAYON_NUM_THREADS` で **プロセス起動時に**
   set する。rayon の global pool は最初の rayon op で構築され, その後は
-  変更不可。動的変更用の新規 API は持たない。
-- **BLAS thread 数**: Python 側 `kryanneal.set_blas_threads(n)` で動的に
-  変えられる (`threadpoolctl.threadpool_limits` 経由)。Lanczos / CFM4 内の
-  Level-1/2 BLAS が対象。
+  変更不可。動的に縮小する手段は無く, 環境変数が一次的な制御手段。
+  未設定時 default は `std::thread::available_parallelism()` (≒ 論理コア数,
+  SMT/HT 込み; Linux では `sched_getaffinity` / cgroup を尊重)。
+- **BLAS thread 数**: env で **pool size** を確定し, ランタイムで **active
+  thread 数** を補助的に調整する 2 段:
+  - **pool size** (= プロセスが確保する OS thread 数): 起動時 env で確定。
+    Linux OpenBLAS は `OPENBLAS_NUM_THREADS`, MKL は `MKL_NUM_THREADS`,
+    macOS Apple Accelerate は `VECLIB_MAXIMUM_THREADS`, fallback の
+    OpenMP 系は `OMP_NUM_THREADS`。複数 pool 同居時は全 env を揃える。
+  - **active thread 数** (= 並列 BLAS op で実際に使う thread): Python 側
+    `kryanneal.set_blas_threads(n)` で動的に変えられる
+    (`threadpoolctl.threadpool_limits` 経由)。**pool size 自体は縮まらない**
+    (sleeping thread の stack / kernel resource は残る) ので, per-process
+    thread budget の隔離が要件なら env 設定が必須。
 - **競合回避**: 両 pool が同時に `cpu_count` 個ずつ thread を張ると総スレッド
   数が `cpu_count^2` 相当となり context-switch で性能劣化する。**rayon 経路
   で並列化するときは `kryanneal.set_blas_threads(1)` に落として BLAS pool
   を 1 thread に固定する** ことを推奨。ベンチマークでも同様
   (`benchmarks/bench_parallel_scaling.py` は子モード冒頭でこれを強制)。
+- **並列ジョブ実行 (multiprocessing / Slurm job array 等)**: 1 プロセス
+  あたりの thread budget を絞るには **`kryanneal` / `numpy` を import する前**
+  に上記 env (`RAYON_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS`
+  / `VECLIB_MAXIMUM_THREADS` / `OMP_NUM_THREADS`) を一括 set する必要がある
+  (BLAS / rayon の pool size は最初の op で確定し以降縮小不可)。具体的な
+  multiprocessing パターン例は `docs/quickstart.md` 末尾節を参照。Slurm
+  などジョブスケジューラの `cpuset` / cgroup で絞られていれば rayon
+  `available_parallelism()` がそれを反映するので, env 未設定でも妥当に
+  動くことが多いが, BLAS pool は cgroup を honor しない実装もあるため
+  明示推奨。
 - **`--no-default-features` ビルド**: scalar 単スレッド経路に戻り rayon 依存
   なし。`RAYON_NUM_THREADS` は無視される。
 
