@@ -14,9 +14,6 @@ H_driver  = -Σ_i h_x_i X_i              (サイト依存横磁場, bit-flip)
 H_problem = Z 演算子のみで書かれた k-local 多項式 (Z 基底で対角)
 ```
 
-設計の参照プロジェクト: [`cv-ising-solver`](https://github.com/Shu-Tanaka-Group/cv-ising-solver)
-(同じ Krylov + CFM4:2 カーネルの連続変数版)。
-
 ## Getting started
 
 `IsingProblem` (TFIM の定義) と `Schedule.linear` (線形アニーリング

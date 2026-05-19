@@ -11,6 +11,10 @@ step-doubling Richardson 推定子を PI 制御に流す方式 (詳細 [§5.3](0
 (`pyo3` 経由) として実装する。状態 ψ ∈ ℂ^{2^N} は NumPy 配列として
 保持し、2^N × 2^N の dense / sparse 行列を一度も組み立てない。
 
+設計の参照プロジェクト (開発者向け): [`cv-ising-solver`](https://github.com/Shu-Tanaka-Group/cv-ising-solver)
+は同じ Krylov + CFM4:2 カーネルの連続変数版で, 本パッケージのカーネル設計・
+レイアウト・bench 慣習の流用元。
+
 本ファイルは `docs/design/` 配下の分割された設計書ファイル群の **検索インデックス**。
 かつての単一ファイル `docs/design.md` (v0.5 時点 2359 行) を issue #83 で章単位に
 分割した (内容は変更なし)。`§N.M` 番号は文中・コード内 docstring の参照と
