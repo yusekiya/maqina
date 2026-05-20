@@ -141,14 +141,17 @@ def _plot_scenario(
     # data と重ならない方向で安定する.
     ax.legend(loc="upper right", framealpha=0.95)
 
-    # version を figure 右下に footer 表示 (タイトル汚染を避ける)
+    # 右下 footer に thread 情報を開示 (透明性). kryanneal は rayon で全コア
+    # 並列, QuTiP の sparse 経路は scipy.sparse / qutip-data の制約上ほぼ
+    # シングルスレッド. 数値の絶対値はこの非対称性込みで読む.
     fig.text(
         0.99,
         0.01,
-        f"kryanneal v{version}",
+        f"kryanneal v{version}  |  kryanneal: rayon multi-thread, "
+        f"QuTiP: sparse (effectively single-thread)",
         ha="right",
         va="bottom",
-        fontsize=8,
+        fontsize=7,
         color="gray",
     )
 
