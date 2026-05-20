@@ -57,9 +57,14 @@ SOLVER_STYLE = {
     },
 }
 
+# 内部 scenario 名 (CLI / npz / CSV で使う legacy ID, 影響範囲が大きいので
+# そのまま) と, ユーザー向け表示タイトルの対応. 厳密には Schrödinger 方程式
+# は ODE 解析の意味で stiff にならないため (H が Hermitian = 全固有値が実,
+# 減衰モードがない), "stiff" ではなく **H_p の dynamic range の広さ** で
+# 表現する.
 SCENARIO_TITLE = {
-    "non-stiff": "non-stiff (SK random)",
-    "stiff": "stiff (SK + 10% basis × penalty=100)",
+    "non-stiff": "narrow dynamic range (SK random)",
+    "stiff": "wide dynamic range (SK + 10% basis × penalty=100)",
 }
 
 
