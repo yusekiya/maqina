@@ -73,3 +73,8 @@ python/kinema/_rust*.dylib
 
 # Claude Code local (per-machine) settings
 .claude/settings.local.json
+
+# README figure pipeline の long-running 計算 (run_compute_references.sh) の
+# 実行ログ / PID file. run-specific なので ignore. shell script 自体は track.
+/compute_references.log
+/compute_references.pid
