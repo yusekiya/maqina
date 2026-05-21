@@ -1,0 +1,15 @@
+Uninstalled 1 package in 1ms
+Installed 1 package in 3ms
+[config] BLAS threads = 1 (spin wait / rayon×BLAS 競合回避)
+[probe] loading benchmarks/data/problem_non-stiff_n18_seed20260518.npz
+[probe] scenario=non-stiff, n=18, T=10000, seed=20260518, |H_p_diag| range = [-9.43, 8.67]
+[probe] running cfm4_adaptive_richardson atol=1e-3 ... (start: 2026-05-21 14:46:35)
+
+=== probe done (wall = 1304.1s = 21.73 min) ===
+n_steps_actual: 1969
+m_eff_stats:    {'total': 227132, 'mean': 115.35398679532757, 'median': 112.0, 'min': 15, 'max': 144}
+
+[m_eff summary] mean=115.35398679532757, min=15, max=144
+  → Phase 8 #98 の long-T adiabatic で実証された 5.33 と比較. mean が 5-7 程度なら N=18 でも圧縮が効いている. 24 fully なら未発火.
+
+[psi_final] norm = 1.000000 (should be ~1.0), max |amplitude| = 0.707251

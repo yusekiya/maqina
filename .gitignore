@@ -69,3 +69,7 @@ python/kryanneal/_rust*.dylib
 # 実行ログ / PID file. run-specific なので ignore. shell script 自体は track.
 /compute_references.log
 /compute_references.pid
+
+# m_eff probe (probe_m_eff_n18.py) の PID file. probe script + log は track
+# (将来 issue #114 の Phase 9 改修や perf 解析で再現に valuable).
+/probe_m_eff_n18.pid
