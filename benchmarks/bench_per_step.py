@@ -6,7 +6,7 @@ Phase 1 の DoD (issue #1) と Phase 2 の DoD (issue #18), Phase 3 の DoD
 (issue #30) で「``bench_per_step.py`` で M2 / Trotter / Suzuki S_4 / CFM4:2
 の per-step 数値が記録され ``benchmarks/results/`` 配下に置かれている
 (クロスオーバ実測)」を満たすためのベンチエントリポイント.
-Phase 4 C3 (issue #39) で ``method="cfm4_adaptive_richardson"`` を追加.
+Phase 4 C3 (issue #39) で ``method="cfm4_adaptive_richardson_krylov"`` を追加.
 
 設計規約は ``docs/design/10-benchmarks.md`` §10, 実行手順は ``benchmarks/README.md``,
 全体規約は ``CLAUDE.md`` 「ベンチマーク」節を参照する.
@@ -17,7 +17,7 @@ Phase 4 C3 (issue #39) で ``method="cfm4_adaptive_richardson"`` を追加.
 * ``"trotter"``: Strang 2 次 Trotter (Phase 2 C3).
 * ``"trotter_suzuki4"``: Suzuki S_4 4 次 Trotter (Phase 2 C4).
 * ``"cfm4"``: CFM4:2 commutator-free Magnus + Lanczos (Phase 3 C2).
-* ``"cfm4_adaptive_richardson"``: CFM4:2 + step-doubling Richardson +
+* ``"cfm4_adaptive_richardson_krylov"``: CFM4:2 + step-doubling Richardson +
   PI controller (Phase 4 C3). 固定 dt 経路と違い ``--n-steps`` は
   「初期 dt 提案 (``dt_init = T / n_steps``)」と「per-step 列の見せ方
   (実 step は driver が決める)」の補助パラメータ扱い.
@@ -48,7 +48,7 @@ required ``n_steps`` のずれを別途見積もる必要がある.
   実値が入る (issue #52 B).
 * ``benchmarks/results/<YYYYMMDD-HHMMSS>/bench_per_step.md``: 集計表
   (per-method summary + cross-method 比較表 + adaptive driver detail) +
-  machine info. adaptive 経路 (``cfm4_adaptive_richardson`` 等) を含む
+  machine info. adaptive 経路 (``cfm4_adaptive_richardson_krylov`` 等) を含む
   実行では ``## Adaptive driver detail`` 節が追加され, PI controller が
   accept した実 step 数 ``n_steps_actual`` と高精度参照解との差
   ``final_err_vs_ref`` (adaptive driver の性能・精度評価に最も重要な
@@ -62,7 +62,7 @@ CLI 例::
     uv run python benchmarks/bench_per_step.py --n-values 4,8,12 --n-steps 50
     uv run python benchmarks/bench_per_step.py --methods m2,trotter
     # adaptive Richardson の smoke
-    uv run python benchmarks/bench_per_step.py --methods cfm4_adaptive_richardson --n-values 4
+    uv run python benchmarks/bench_per_step.py --methods cfm4_adaptive_richardson_krylov --n-values 4
     # BLAS thread を 1 に固定して machine-independent baseline を取る
     uv run python benchmarks/bench_per_step.py --blas-threads 1
 
@@ -103,18 +103,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "benchmarks" / "results"
 
 # サポートする method 一覧. ``QuantumAnnealer.run`` の Literal 型ヒントと
-# 揃える. Phase 4 C3 で ``cfm4_adaptive_richardson`` 追加.
+# 揃える. Phase 4 C3 で ``cfm4_adaptive_richardson_krylov`` 追加.
 _VALID_METHODS: tuple[str, ...] = (
     "m2",
     "trotter",
     "trotter_suzuki4",
     "cfm4",
-    "cfm4_adaptive_richardson",
+    "cfm4_adaptive_richardson_krylov",
 )
 
 # adaptive 経路の集合. n_steps を driver に渡さず, ``atol`` / ``dt_init``
 # を渡す経路を判別するための小ヘルパ.
-_ADAPTIVE_METHODS: frozenset[str] = frozenset({"cfm4_adaptive_richardson"})
+_ADAPTIVE_METHODS: frozenset[str] = frozenset({"cfm4_adaptive_richardson_krylov"})
 
 # adaptive 経路で final state を比較する参照解の生成パラメータ.
 # 同じ ``T`` / ``schedule`` で fixed CFM4:2 を多 step 走らせた終端 ψ を
@@ -189,7 +189,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=(
             "comma-separated sweep over Lanczos subspace dimension "
             "(default: 24). Trotter methods ignore m; m2 / cfm4 / "
-            "cfm4_adaptive_richardson use it. issue #52 B: 列形式により "
+            "cfm4_adaptive_richardson_krylov use it. issue #52 B: 列形式により "
             "m=16,24,32 等の cell 比較が 1 run で取れる."
         ),
     )
@@ -275,13 +275,13 @@ def time_method_run(
 
     * 固定 dt 経路 (``"m2"`` / ``"trotter"`` / ``"trotter_suzuki4"`` /
       ``"cfm4"``): ``n_steps`` をそのまま渡す.
-    * adaptive 経路 (``"cfm4_adaptive_richardson"``): ``atol = 1e-8``
+    * adaptive 経路 (``"cfm4_adaptive_richardson_krylov"``): ``atol = 1e-8``
       (driver 既定値と同) + ``dt_init = (t1 - t0) / n_steps`` を渡し,
       driver が実 step 数を決める.
 
     Trotter 系は Lanczos を呼ばないため ``m`` は無視されるが, デフォルト値で
     渡しても害は無いので統一的に渡す. ``"m2"`` / ``"cfm4"`` /
-    ``"cfm4_adaptive_richardson"`` 経路は ``m`` がそのまま Lanczos 部分空間
+    ``"cfm4_adaptive_richardson_krylov"`` 経路は ``m`` がそのまま Lanczos 部分空間
     次元として効く.
 
     Returns

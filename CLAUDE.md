@@ -340,7 +340,7 @@ i ∈ {0, 1, 2} を SIMD 特化 (`feature = "simd"`, default ON)。
 ## perf 計測用 binary (Phase 6 D follow-up, issue #79 / #82 / #90 / #113 / #120)
 
 `apply_h_kryanneal` / `trotter_step` / `apply_single_mode_axis_i` /
-`cfm4_adaptive_richardson` / `chebyshev_propagate` の真の bottleneck
+`cfm4_adaptive_richardson_krylov` / `chebyshev_propagate` の真の bottleneck
 (DRAM bound / L3 contention / barrier / chunk_size 戦略の差 / Lanczos vs GS の
 wall 比率, Lanczos vs Chebyshev のアルゴリズム軸 等のどれか) を Linux
 `perf stat` で hardware counter から特定するための pure-Rust 計測 binary を
@@ -353,6 +353,7 @@ wall 比率, Lanczos vs Chebyshev のアルゴリズム軸 等のどれか) を 
 | `src/bin/perf_apply_single_mode_axis_i.rs` | `apply_single_mode_axis_i` (Trotter per-axis 2×2 ユニタリ) | #90 で #71 fixup `578d050` (動的 chunk_size) 棄却を perf binary で再評価し dynamic を採用 (詳細は `docs/design/05-1-matvec.md` §5.1.4 末尾) |
 | `src/bin/perf_cfm4_richardson.rs` | `cfm4_step_with_richardson_estimate` (Richardson 1 step = 6 Lanczos call) | #113 で Phase 9+ scoping のため component 別 wall % を実測 breakdown. `full` / `single_lanczos` / `matvec_only` / `gram_schmidt` の 4 mode を持ち, "step → Lanczos call → matvec / GS" の各層を同一 PMU セットで比較する |
 | `src/bin/perf_chebyshev.rs` | `chebyshev_propagate` (時間独立 H, Chebyshev 3 項漸化) | #120 Phase A POC で Lanczos の V matrix cache stall を **アルゴリズム軸で bypass** する Chebyshev 経路の per-call wall を Linux で実測. `perf_cfm4_richardson 18 100 single_lanczos` (Lanczos baseline ~129 ms / IPC=0.78) と直接比較し, 判定 gate (≤ 50 ms で Phase B 進行 / 50-100 ms で設計再検討 / > 100 ms で中止) を判断する. 時間独立 frozen schedule `a_t = b_t = 0.5` で Lanczos baseline と input pattern を完全一致させる |
+| `src/bin/perf_cfm4_richardson_chebyshev.rs` | `cfm4_step_chebyshev_with_richardson_estimate` (Chebyshev variant Richardson 1 step) | #122 Phase B で Chebyshev を CFM4 Magnus + step-doubling Richardson に統合した後の per-step wall + K_used を Linux で実測 breakdown. 3 mode (`full` / `single_chebyshev` / `matvec_only`) を持ち, 既存 `perf_cfm4_richardson` の同名 mode (`full` / `single_lanczos` / `matvec_only`) と直接比較することで Chebyshev vs Lanczos の compute 効果差を IPC / L2 fill latency / Stalled cycles まで掘れる. `gram_schmidt` mode は Chebyshev では原理的に存在しない (3 項漸化が直交保証, re-orthogonalization 不要) |
 
 いずれも Python の `bench_*.py` が `*_py` (allocate-and-return) 経路の
 alloc/copy overhead で wall-time を歪めるのを回避し,
@@ -366,6 +367,7 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_trotter_step
 RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_apply_single_mode_axis_i
 RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_cfm4_richardson
 RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_chebyshev
+RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_cfm4_richardson_chebyshev
 ```
 
 対象関数は `pub fn` に上げ, `crate::bench_api` (`src/lib.rs`) で再 export
@@ -594,6 +596,52 @@ call で再利用することで **2 個の primitive matvec / Richardson step**
 詳細は `docs/design/05-1-matvec.md` §5.1.1.x / `docs/design/05-3-propagator.md`
 "iter-0 primitive matvec memoization" / `docs/design/12-release-plan.md`
 Phase 8 follow-up.
+
+## Phase B (issue #122): Chebyshev propagator を CFM4 adaptive Richardson 経路に統合
+
+Phase A (issue #120, PR #121) で時間独立 H 単体での `chebyshev_propagate` が
+per-call 29 ms / 4.45× Lanczos 高速 (Linux AMD EPYC 7713P) を達成したことを
+受け, 時間依存 H + CFM4 Magnus + step-doubling Richardson + PI controller 経路
+に統合した variant を公開 Python API レベルで露出する.
+
+### 公開 API 変更 (hard rename + 新 method 追加)
+
+- 既存 `method="cfm4_adaptive_richardson"` を
+  **`method="cfm4_adaptive_richardson_krylov"`** に hard rename
+  (alias なし; pre-1.0 なので破壊的変更 OK). `_krylov` / `_chebyshev` で
+  suffix 対称化.
+- 新 `method="cfm4_adaptive_richardson_chebyshev"` を追加. Chebyshev 経路は
+  Rust 拡張必須 (Python ref fallback 非提供).
+- Rust 関数名は rename せず (`cfm4_step` / `cfm4_step_with_richardson_estimate`
+  が Lanczos default, Chebyshev variant は `_chebyshev` suffix で対称).
+- `m_max` を Chebyshev method で渡すと `ValueError` (Krylov 部分空間次元の
+  概念なし; K_used は `chebyshev_tol` から動的決定).
+
+### 主要実装ポイント
+
+- `src/cfm4.rs::cfm4_step_chebyshev` / `cfm4_step_chebyshev_with_richardson_estimate`:
+  既存 Lanczos 版と完全同じ 2 stage + step-doubling Richardson 構造を保ち,
+  短時間プロパゲータだけが `chebyshev_propagate` に入れ替わる. per-stage で
+  Gershgorin による `(E_c, R)` 再計算 (closed-form O(N), wall % 無視可).
+- `evolve_schedule_adaptive_richardson_chebyshev` (Python driver): 既存
+  Lanczos driver と同じ 10-tuple shape / PI controller 構造. `err_magnus =
+  max(0, err - err_chebyshev_total)` で Magnus 起因駆動量を分離.
+- `QuantumResult` の K_used 統計は既存 `m_eff_stats` スロットを流用
+  (semantically 「per-step propagator 評価コスト統計」で同じ役割; method
+  literal で Lanczos / Chebyshev を判別).
+- iter-0 cache (Lanczos #100 の流用) は scope 外 (per-stage K_used ~20 個の
+  matvec のうち 1 個と削減比小).
+
+### 詳細
+
+- `docs/design/05-3-propagator.md` "CFM4:2 + Chebyshev variant" 節
+  (アルゴリズム / メモリ / cache 戦略).
+- `docs/design/12-release-plan.md` Phase B (Definition of Done / 判定 gate).
+- `tests/test_chebyshev.py` (QuTiP fidelity + Lanczos 一致 + annealer/simulator
+  smoke + m_max ValueError).
+- `tests/test_blas_consistency.py` 末尾 (Chebyshev direct call artifact dump;
+  adaptive driver の dt 履歴分岐を避けるため Rust step 関数を fixed schedule
+  係数で直接呼ぶ).
 
 ## 設計判断の出典 (cv_ising 流用箇所)
 

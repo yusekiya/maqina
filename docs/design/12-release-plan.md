@@ -51,7 +51,7 @@ U(dt) ≈ phase_p(dt/2) · (Π_i R_i(dt)) · phase_p(dt/2)
 - `cfm4_step_with_m2_estimate` (embedded M2 error)
 - `cfm4_step_with_richardson_estimate` (step-doubling Richardson)
 - Python 側 PI controller driver
-- `method="cfm4_adaptive_richardson"`
+- `method="cfm4_adaptive_richardson_krylov"`
 
 ### Phase 5: Simulator & Observables (~v0.5)
 
@@ -228,8 +228,8 @@ Phase 1 の baseline と比較できることが本 phase の前提。
     standalone script (numpy のみ依存). build profile (``_meta_has_blas``) が
     一致してたら「同 build を比較してる」と検出して即 fail.
   - **`tests/test_reference_qutip.py`**: n=12-14 で 4 method (m2 / trotter /
-    cfm4 / cfm4_adaptive_richardson) を QuTiP ``sesolve`` (atol=1e-12 = 収束
-    参照) と fidelity 比較. n=15-16 は cfm4_adaptive_richardson のみ
+    cfm4 / cfm4_adaptive_richardson_krylov) を QuTiP ``sesolve`` (atol=1e-12 = 収束
+    参照) と fidelity 比較. n=15-16 は cfm4_adaptive_richardson_krylov のみ
     (dense 2^n × 2^n がメモリに乗らないため sparse 経路 = ``sigmax`` tensor 和
     で構築). n>=14 は ``@pytest.mark.slow``. bit 規約変換 (kryanneal LSB-first
     vs QuTiP MSB-first) は X を tensor list 位置 ``n-1-i`` に挿入する形で吸収.
@@ -415,6 +415,106 @@ call で再利用する直交最適化を Phase 8 follow-up として導入 (#10
 - 数値同等性: cache あり/なしで `rel < 2e-15` (machine epsilon 数倍).
 - 詳細: `docs/design/05-3-propagator.md` "iter-0 primitive matvec memoization",
   `docs/design/05-1-matvec.md` §5.1.1.x.
+
+---
+
+## Phase B (#122) — Chebyshev propagator を CFM4 adaptive Richardson 経路に統合
+
+主題: Phase A (#120, PR #121) で時間独立 H 単体 per-call 29 ms / 4.45×
+Lanczos 高速を実測した Chebyshev 3 項漸化 propagator を **時間依存 H + CFM4
+Magnus + step-doubling Richardson + PI controller** 経路に統合し,
+**公開 Python API レベル** に新 method `cfm4_adaptive_richardson_chebyshev`
+として露出する.
+
+### 動機 (Phase A 判定 gate からの接続)
+
+Phase A bench (Linux AMD EPYC 7713P, 2026-05-22 頃) で `chebyshev_propagate`
+単体が **per-call 29 ms / K_used = 20** を達成. これは Lanczos baseline
+(`perf_cfm4_richardson 18 100 single_lanczos`, ~129 ms / m_eff=20) に対し
+**4.45×** で, 判定 gate `≤ 50 ms` を 22.5% で大幅クリア. matvec call 数は
+同じ (20 ≒ 20) なので speedup は **計算量削減ではなく cache 戦略 (V matrix
+spill 回避) + Gram-Schmidt 消滅** から来ている.
+
+### 公開 API 変更
+
+- **新 method `cfm4_adaptive_richardson_chebyshev`** を追加. 既存
+  `cfm4_adaptive_richardson` (Lanczos) は **`cfm4_adaptive_richardson_krylov`
+  に rename** して `_krylov` / `_chebyshev` で suffix 対称化 (後方互換 alias
+  なしの hard rename; pre-1.0 なので許容).
+- Rust 関数名 (`cfm4_step` / `cfm4_step_with_richardson_estimate`) は rename
+  せず Lanczos が default. Chebyshev variant は `cfm4_step_chebyshev` /
+  `cfm4_step_chebyshev_with_richardson_estimate` の suffix 命名.
+- `m_max` を Chebyshev method で渡すと `ValueError` (Chebyshev は K_used
+  動的決定で Krylov 部分空間次元概念なし).
+- `QuantumResult` の K_used 統計は既存 `m_eff_stats` スロットに格納 (用途は
+  per-step propagator 評価コスト統計で同一; method literal で Lanczos /
+  Chebyshev を区別).
+
+### 実装の要点
+
+- `src/cfm4.rs::cfm4_step_chebyshev`: 既存 `cfm4_step` (Lanczos) の variant.
+  CFM4:2 の 2 stage で per-stage Gershgorin による `(E_c, R)` 再計算 +
+  `chebyshev_propagate` 呼出. 線形結合係数 `(c_drv, c_diag)` は Lanczos 版と
+  完全同型.
+- `src/cfm4.rs::cfm4_step_chebyshev_with_richardson_estimate`: 既存
+  Lanczos 版と同じ step-doubling Richardson 構造 (full + half×2 = 6
+  chebyshev_propagate call / step). `err_chebyshev_total` を triangle
+  inequality で 3 軌道集約.
+- `python/kryanneal/krylov.py::evolve_schedule_adaptive_richardson_chebyshev`:
+  Lanczos 版 (`evolve_schedule_adaptive_richardson`) と同じ 10-tuple shape /
+  PI controller 構造を保ち, 短時間プロパゲータだけが入れ替わる. **Rust 拡張
+  必須** (Python ref fallback 非提供; Chebyshev は数値挙動 + 性能評価が
+  Rust 前提の POC).
+
+### Definition of Done (#122)
+
+- [x] **Rust step 関数**: `cfm4_step_chebyshev` /
+      `cfm4_step_chebyshev_with_richardson_estimate` + PyO3 wrap + `#[cfg(test)]`
+      5 テスト (time-indep / Lanczos 一致 / Richardson dt^5 スケール / dt=0
+      恒等 / half-chain bit-exact).
+- [x] **Python driver**: `evolve_schedule_adaptive_richardson_chebyshev` +
+      `QuantumAnnealer` / `AnnealingSimulator` への method 統合.
+- [x] **公開 API 命名**: `cfm4_adaptive_richardson` →
+      `cfm4_adaptive_richardson_krylov` hard rename (alias なし).
+- [x] **テスト**: `tests/test_chebyshev.py` (QuTiP fidelity > 1-1e-6 +
+      Lanczos 一致 rel < 1e-7 + annealer/simulator smoke + m_max ValueError).
+- [x] **BLAS on/off 数値一致**: `tests/test_blas_consistency.py` に
+      Chebyshev direct call (PI controller を介さない fixed schedule 係数で
+      `cfm4_step_chebyshev_*_py` を呼ぶ) artifact dump を追加.
+- [x] **Bench infra**: `benchmarks/bench_qutip_large.py` に
+      `cfm4_adaptive_richardson_chebyshev` solver を追加.
+- [x] **Perf binary**: `src/bin/perf_cfm4_richardson_chebyshev.rs` 新規.
+      既存 `perf_cfm4_richardson` の同名 mode と直接比較できる構造で
+      Linux perf stat の hardware counter で per-step wall / K_used / IPC を
+      breakdown.
+- [ ] **本番 perf bench** (Linux AMD EPYC 7713P): `bench_qutip_large.py
+      --scenarios long-T --solvers cfm4_adaptive_richardson_krylov,
+      cfm4_adaptive_richardson_chebyshev` で Pareto plot を取得し PR に添付.
+- [ ] **判定 gate 適用**:
+  - Pareto win (全 atol で Lanczos 上回り) → minor bump で merge,
+    default 切替の follow-up issue 起票.
+  - Pareto draw → 差分原因分析 (Gershgorin loose で K_used 過大なら Power
+    iter で R refine), 改善後再評価.
+  - Pareto loss → 中止 + 原因 archive. Phase A 4.45× を踏まえると考えにくい
+    保険シナリオ.
+- [ ] **docs/design/INDEX.md / 05-3-propagator.md / CLAUDE.md** 更新.
+- [ ] **Version bump**: `0.9.0 → 0.10.0` (公開 API 拡張で minor bump).
+
+### Out of scope (Phase B+ follow-up へ)
+
+- **f32 mixed precision**: Chebyshev は直交化不要なので f32 との相性が良い
+  (Phase 9C 候補). f64 で Pareto を勝ち取ってから検討.
+- **Power iteration で R refine**: Gershgorin loose で K_used 過大化した
+  場合の最適化. Pareto draw に該当した時のみ着手.
+- **Trotter 経路への Chebyshev**: Trotter 自体が短時間プロパゲータなので
+  Chebyshev で置換する意味なし (out of scope のまま).
+- **Default method 切替**: `cfm4_adaptive_richardson_krylov` →
+  `cfm4_adaptive_richardson_chebyshev` への default 切替は bench 結果 archive
+  後の **別 issue** で判断 (semantic 変更で minor bump が必要なため切り分け).
+- **iter-0 cache (Lanczos 経路の #100 流用)**: Chebyshev 経路で full_step /
+  half_1 の入口が同じ ψ なので原理的に同型の memoization が可能だが,
+  per-stage K_used ~ 20 個の matvec のうち 1 個と削減比小. Phase B では
+  scope 外, 必要なら follow-up.
 
 ---
 

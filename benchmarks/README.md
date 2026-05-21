@@ -15,7 +15,7 @@
 | `bench_blas_compare.py` | BLAS feature on/off の同一マシン比較 | Phase 6 予定 |
 | `bench_vs_qutip.py` | QuTiP `sesolve` との fidelity vs wall time | Phase 3 以降予定 |
 | `bench_qutip_large.py` | QuTiP `sesolve` vs kryanneal の **work-precision diagram** ベンチ. 複数 **scenario** (built-in: `standard` T=1 N=10,12 / `long-T` T=1e4 N=8,10 / `stiff` h_p_scale=10 N=10,12 / `large-N` T=1 N=12,14,16 / `stiff-long-T` opt-in N=6,8) を 1 invocation で sweep. 各 scenario は適切な N 範囲を内蔵 (long-T で N=12 にすると 1 cell 分単位なので絞る等). 各 solver は固有の精度つまみ (kryanneal m2/trotter/cfm4 = `dt`, adaptive = `atol`, QuTiP = `tol` で atol=rtol) を独自 sweep し共通 reference との infidelity + wall_sec を per-cell 1 回測定. MD/CSV は per-(scenario, n) で infidelity 昇順 + Pareto 最適 ✓ 付き. `--add-scenario "name:T=...,h_p=...,h_x=...,n=12;14"` でカスタム可. `--ref-validate` で QuTiP self-convergence + kryanneal cross-check による reference 妥当性検証 section を MD に追加 | Phase 6 C4 (issue #65) |
-| `bench_m_eff_adiabatic.py` | kryanneal `cfm4_adaptive_richardson` の **Krylov 部分空間実効次元 `m_eff` の T 依存性** 計測. QuTiP 比較ではなく adaptive driver の内部挙動分析専用. `evolve_schedule_adaptive_richardson` driver を直接呼び `m_eff_history` を取得し, per-(n, T, atol, m_max) の m_eff 分布 (mean/median/min/max/P10/P90/compression_ratio) + per-time-bin histogram を MD/CSV に出す. `--krylov-tol-factor` で β_k 早期打切閾値を調整可 (default 1e-3 = QuantumAnnealer default と一致, 1.0 等で発火しやすくなる) | Phase 6 C4 (issue #65) |
+| `bench_m_eff_adiabatic.py` | kryanneal `cfm4_adaptive_richardson_krylov` の **Krylov 部分空間実効次元 `m_eff` の T 依存性** 計測. QuTiP 比較ではなく adaptive driver の内部挙動分析専用. `evolve_schedule_adaptive_richardson` driver を直接呼び `m_eff_history` を取得し, per-(n, T, atol, m_max) の m_eff 分布 (mean/median/min/max/P10/P90/compression_ratio) + per-time-bin histogram を MD/CSV に出す. `--krylov-tol-factor` で β_k 早期打切閾値を調整可 (default 1e-3 = QuantumAnnealer default と一致, 1.0 等で発火しやすくなる) | Phase 6 C4 (issue #65) |
 
 ## 実行
 
@@ -27,13 +27,13 @@ uv run python benchmarks/bench_per_step.py
 
 - `--n-values N1,N2,...`: sweep するスピン数の列 (default `4,8,12,16`).
 - `--methods M1,M2,...`: 計測する propagator method の列
-  (`m2` / `trotter` / `trotter_suzuki4` / `cfm4` / `cfm4_adaptive_richardson`
+  (`m2` / `trotter` / `trotter_suzuki4` / `cfm4` / `cfm4_adaptive_richardson_krylov`
   から選ぶ, default 全て). adaptive 経路を含む場合は同 `n` で高精度
   参照解 (fixed CFM4:2 ・ 多 step) を 1 回計算してから per-method 計測を
   回す.
 - `--n-steps K`: 各 `(n, method)` で時間発展する step 数 (default 50).
 - `--m-values M1,M2,...`: Lanczos 部分空間次元の sweep 列 (default `24`).
-  `m2` / `cfm4` / `cfm4_adaptive_richardson` で使用. Trotter / Suzuki S_4
+  `m2` / `cfm4` / `cfm4_adaptive_richardson_krylov` で使用. Trotter / Suzuki S_4
   経路では Lanczos を呼ばないため無視される. issue #52 B で列形式に拡張
   され, `--m-values 16,24,32` で `m=16` / `m=24` / `m=32` の cell 比較を
   1 run で取れる. m sweep を入れた場合 Cross-method 表は出力されない
@@ -73,7 +73,7 @@ uv run python benchmarks/bench_per_step.py
   version / BLAS pool). cross-method 表は M2 を基準にした ratio
   (`m2 / trotter` 等) を併記するが, `--m-values` で m sweep を入れた場合
   は cell が重複するため出力されない (代わりに Summary 表で `m` 列付き).
-  adaptive 経路 (`cfm4_adaptive_richardson` 等) を含む実行ではさらに
+  adaptive 経路 (`cfm4_adaptive_richardson_krylov` 等) を含む実行ではさらに
   `## Adaptive driver detail` 節を追加し, PI controller が accept した
   実 step 数 `n_steps_actual` (median + min/max) と参照解との
   `final_err_vs_ref` (median), per-step Lanczos 部分空間次元
