@@ -51,7 +51,7 @@ from kryanneal.result import QuantumResult as QuantumResult, Trajectory as Traje
 from kryanneal.schedule import Schedule as Schedule
 from kryanneal.simulator import AnnealingSimulator as AnnealingSimulator
 from typing import Any
-__all__ = ['AnnealingSimulator', 'IsingProblem', 'Observable', 'QuantumAnnealer', 'QuantumResult', 'Schedule', 'Trajectory', 'available_blas_threads', 'instantaneous_eigenstates', 'set_blas_threads', 'show_config']
+__all__ = ['AnnealingSimulator', 'IsingProblem', 'Observable', 'QuantumAnnealer', 'QuantumResult', 'Schedule', 'Trajectory', 'available_blas_threads', 'instantaneous_eigenstates', 'set_blas_threads', 'set_blas_threads_auto', 'show_config']
 
 def set_blas_threads(n: int) -> None:
     """ロード済みの全 OpenBLAS pool のスレッド上限を ``n`` に統一する.
@@ -75,9 +75,12 @@ def set_blas_threads(n: int) -> None:
 
     そのため:
 
-    - **import 後に動的に active BLAS thread 数を絞りたい** シナリオ
-      (例: rayon 並列経路で ``set_blas_threads(1)`` に落として競合回避)
-      では本関数を使う.
+    - **import 後に動的に active BLAS thread 数を絞りたい** シナリオでは
+      本関数を使う. rayon 経路と併用する際の **推奨 default** は
+      :func:`set_blas_threads_auto` (issue #116 perf 実証で
+      ``OPENBLAS_NUM_THREADS=8`` 相当で 1.52× speedup). 明示的に 1
+      thread に絞りたい (= 完全に隔離したい) ときのみ
+      ``set_blas_threads(1)`` を直接呼ぶ.
     - **per-process thread budget の隔離** が要件のシナリオ
       (multiprocessing / Slurm job array で 1 プロセスあたりの thread 数を
       物理的に制限したい) では, ``kryanneal`` / ``numpy`` を import する
@@ -105,6 +108,30 @@ def available_blas_threads() -> int:
     -------
     int
         有効な BLAS スレッド予算. 最小 1.
+    """
+    ...
+
+def set_blas_threads_auto() -> int:
+    """:func:`_recommended_blas_threads` の値を適用し, 適用した値を返す.
+
+    内部で :func:`set_blas_threads` を呼んで全 BLAS pool の active thread
+    数を推奨値に統一する. issue #116 で確立した「rayon 経路でも
+    BLAS=1 ではなく ``process_cpu_count / 8`` 程度を使う」という
+    新方針の便利関数.
+
+    冪等. 同じ環境変数 / cpu 割当下では何度呼んでも同じ値を返す.
+
+    Examples
+    --------
+    >>> import kryanneal
+    >>> kryanneal.set_blas_threads_auto()   # 推奨 default を適用  # doctest: +SKIP
+    8
+    >>> kryanneal.set_blas_threads(1)       # 明示 override            # doctest: +SKIP
+
+    Returns
+    -------
+    int
+        実際に適用した active BLAS thread 数.
     """
     ...
 
