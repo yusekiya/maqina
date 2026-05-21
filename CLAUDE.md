@@ -267,6 +267,16 @@ thread pool が 2 系統並走するため運用ルール:
   「spin-wait が rayon を圧迫」も実害無し (`OPENBLAS_THREAD_TIMEOUT=1` で spin
   抑制すると逆に +4-9% 遅化する。Lanczos の BLAS call 間隔が短く futex
   park → unpark の wake-up cost が遊休 core 占有より高くつくため)。
+  - **本番 perf bench (Pareto / QuTiP 比較 等) の運用** (2026-05-21 確定):
+    `bench_qutip_large.py` / `bench_per_step.py` の `--blas-threads N` フラグに
+    **NT=8 を明示渡す** のを default にする。理由は上記 sweep の sweet spot で,
+    `--blas-threads` 不指定 (= OpenBLAS の物理コア数 default で 64 threads) だと
+    NT=8 比 ~1.10× 遅化する (PR #106 の 0.8.0 bench で実測, PR #106
+    コメントに対比表)。`set_blas_threads_auto()` は EPYC 7713P で同じく NT=8 を
+    自動算出するので, "machine 種別を意識せず使いたい" 場合は auto setter を
+    bench script 冒頭で 1 度呼んでも等価。`--blas-threads 1` は machine-
+    independent baseline (= 純シリアル比較) 用途で本番 perf bench とは別の
+    意味づけ。
 - **並列ジョブ実行 (multiprocessing / Slurm job array 等)**: 1 プロセス
   あたりの thread budget を絞るには **`kryanneal` / `numpy` を import する前**
   に上記 env (`RAYON_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS`

@@ -48,6 +48,15 @@ uv run python benchmarks/bench_per_step.py
   ため、小 dim で thread-launch overhead が支配し per-step がノイジーになる.
   **machine-independent baseline には `--blas-threads 1` を推奨**.
   default は `None` (BLAS thread 数に手を加えない, Phase 1 baseline と同じ).
+  - **本番 perf bench (Pareto / QuTiP 比較 等) は `--blas-threads 8` を default に**
+    する運用 (issue #116 / PR #115 の Linux AMD EPYC 7713P perf sweep で NT=8 が
+    sweet spot, NT=1 比 1.52× speedup; NT=64 default は NT=8 比 -9% 劣化).
+    `--blas-threads` 不指定で起動すると OpenBLAS が物理コア数まで thread を
+    張って sweet spot 比 ~1.10× 遅化する (2026-05-21 PR #106 bench で実測,
+    PR #106 のコメントに数値あり). 本番 sweep を 0.8.0 で取った場合も
+    `--blas-threads 8` を渡せば 0.9.0+ 相当の挙動になる
+    (`set_blas_threads_auto()` は 0.9.0 で追加された自動算出 API だが,
+    EPYC 7713P と分かっている本番 bench では `--blas-threads 8` 直指定で十分).
 - `--results-dir DIR`: 出力先 (default `benchmarks/results/<YYYYMMDD-HHMMSS>/`).
 
 ## 出力
