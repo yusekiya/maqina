@@ -9,8 +9,8 @@ bench は他の setting (atol=1e-3,1e-5,1e-7,1e-9 / cfm4 / single thread / ...)
 で並行 Linux 上を走っているので, ここでは macOS でローカル 1 cell だけ取る.
 res.m_eff_stats (Phase 4 follow-up #52 で expose) を print して終了.
 
-起動 (SSH 切断 + macOS sleep 耐性):
-    caffeinate -i nohup uv run python -u probe_m_eff_n18.py \\
+起動 (SSH 切断 + macOS sleep 耐性. repo root から実行する想定):
+    caffeinate -i nohup uv run python -u scripts/probe_m_eff_n18.py \\
         > probe_m_eff_n18.log 2>&1 < /dev/null &
     echo $! > probe_m_eff_n18.pid
     disown
@@ -34,8 +34,10 @@ from kryanneal.initial_states import uniform_superposition
 kryanneal.set_blas_threads(1)
 print(f"[config] BLAS threads = 1 (spin wait / rayon×BLAS 競合回避)", flush=True)
 
-# 既存の non-stiff 問題 npz を読み込む (Linux 本番 bench でも使う問題と同じ)
-PROBLEM_FILE = Path("benchmarks/data/problem_non-stiff_n18_seed20260518.npz")
+# 既存の non-stiff 問題 npz を読み込む (Linux 本番 bench でも使う問題と同じ).
+# scripts/ 配下から相対参照するため __file__ 基準で repo root を解決.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+PROBLEM_FILE = REPO_ROOT / "benchmarks/data/problem_non-stiff_n18_seed20260518.npz"
 print(f"[probe] loading {PROBLEM_FILE}", flush=True)
 data = np.load(PROBLEM_FILE)
 n = int(data["n"])

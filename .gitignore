@@ -65,11 +65,21 @@ python/kryanneal/_rust*.dylib
 # Claude Code local (per-machine) settings
 .claude/settings.local.json
 
-# README figure pipeline の long-running 計算 (run_compute_references.sh) の
-# 実行ログ / PID file. run-specific なので ignore. shell script 自体は track.
+# scripts/ 配下の bench / probe スクリプト (scripts/run_*.sh,
+# scripts/probe_*.py) は track. 実行時に repo root or scripts/ 配下に動的
+# 生成される log / pid は ignore. ただし過去 probe の実行例として保存価値の
+# ある log は force track する (e.g. scripts/probe_m_eff_n18.log).
+
+# 実行時に repo root に生成される log / pid (起動コマンドが repo root から
+# `nohup bash scripts/run_*.sh > <name>.log 2>&1 ...` の形を取るため).
 /compute_references.log
 /compute_references.pid
-
-# m_eff probe (probe_m_eff_n18.py) の PID file. probe script + log は track
-# (将来 issue #114 の Phase 9 改修や perf 解析で再現に valuable).
+/run_bench_readme.log
+/run_bench_readme.pid
 /probe_m_eff_n18.pid
+
+# scripts/ 配下に生成されることもある log / pid (起動 path 次第).
+# 過去 probe の実行例 (m_eff_stats 取得) は exception で track 維持.
+/scripts/*.log
+/scripts/*.pid
+!/scripts/probe_m_eff_n18.log

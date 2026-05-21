@@ -34,8 +34,8 @@
 # [saved] 行で CSV が atomic save されるので, 途中中断しても完了 cell は失われ
 # ない (同じコマンドで再起動すれば skip-existing で続きから再開).
 #
-# 実行:
-#   nohup bash run_bench_readme.sh > run_bench_readme.log 2>&1 < /dev/null &
+# 実行 (repo root から起動する想定. log と pid も repo root に作られる):
+#   nohup bash scripts/run_bench_readme.sh > run_bench_readme.log 2>&1 < /dev/null &
 #   echo $! > run_bench_readme.pid
 #   disown
 #
@@ -47,7 +47,9 @@
 #   kill -TERM -- -"$(ps -o pgid= -p "$PID" | tr -d ' ')"
 
 set -euo pipefail
-cd "$(dirname "$0")"
+# script は scripts/ 配下にあるので 1 階層上 (= repo root) に移動.
+# これで PROBLEM_DIR / OUTPUT_DIR 等の相対 path が repo root 基準で解決される.
+cd "$(dirname "$0")/.."
 
 # 問題設定
 N=18
