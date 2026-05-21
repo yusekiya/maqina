@@ -90,12 +90,17 @@ from kryanneal import IsingProblem, QuantumAnnealer, Schedule
 from kryanneal.initial_states import uniform_superposition
 
 # CSV のカラム順. plot_readme_figure.py と同期.
+# 'variant' 列は kryanneal の method + thread mode を区別するタグ
+# (e.g. "adaptive_multi", "cfm4_single"). qutip 系は "qutip" 固定.
+# plot 側はこの variant 列を使って 5 系列 (adaptive_multi /
+# adaptive_single / cfm4_multi / cfm4_single / qutip) を別曲線として描く.
 CSV_FIELDNAMES = [
     "scenario",
     "n",
     "T",
     "seed",
     "solver",
+    "variant",
     "knob_name",
     "knob_value",
     "wall_sec",
@@ -111,6 +116,33 @@ _KNOB_FMT = "{:.6e}"
 def _normalize_knob(value: float) -> str:
     """sweep 値を ``done_cells`` の比較に使う正規化文字列に変換する."""
     return _KNOB_FMT.format(float(value))
+
+
+def _run_kryanneal_cfm4_fixed_dt(
+    prob: IsingProblem,
+    sched: Schedule,
+    psi0: np.ndarray,
+    T: float,
+    dt: float,
+) -> tuple[float, np.ndarray, int]:
+    """``cfm4`` (固定 dt CFM4:2) を ``dt`` 指定で 1 回走らせ wall_sec / ψ_final / n_steps.
+
+    ``n_steps = round(T / dt)``. dt は精度つまみで, 4 次精度なので
+    infidelity が概ね ``O(dt^4)`` で減少する想定 (大 dt で truncation,
+    小 dt で round-off 上昇).
+    """
+    n_steps = max(1, int(round(T / dt)))
+    ann = QuantumAnnealer(prob, sched)
+    t_start = time.perf_counter()
+    res = ann.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4",
+        n_steps=n_steps,
+    )
+    elapsed = time.perf_counter() - t_start
+    return elapsed, np.ascontiguousarray(res.psi_final), n_steps
 
 
 def _run_kryanneal_adaptive(
@@ -141,15 +173,16 @@ def _parse_floats(s: str) -> list[float]:
 
 def _load_existing(
     csv_path: Path,
-) -> tuple[list[dict[str, object]], set[tuple[str, str]]]:
+) -> tuple[list[dict[str, object]], set[tuple[str, str, str]]]:
     """既存 CSV から ``(rows, done_cells)`` を作る. なければ空.
 
-    ``done_cells`` は ``(solver, normalized_knob_str)`` の set.
+    ``done_cells`` は ``(solver, variant, normalized_knob_str)`` の set.
+    'variant' 列が無い旧 CSV を読んだ場合は空 string として扱う.
     """
     if not csv_path.exists():
         return [], set()
     rows: list[dict[str, object]] = []
-    done: set[tuple[str, str]] = set()
+    done: set[tuple[str, str, str]] = set()
     with csv_path.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for r in reader:
@@ -158,7 +191,7 @@ def _load_existing(
                 knob_norm = _normalize_knob(float(r["knob_value"]))
             except (KeyError, ValueError):
                 continue
-            done.add((str(r["solver"]), knob_norm))
+            done.add((str(r["solver"]), str(r.get("variant", "")), knob_norm))
     return rows, done
 
 
@@ -182,9 +215,12 @@ def run_bench(
     problem_file: Path,
     reference_file: Path,
     kryanneal_atols: Sequence[float],
+    kryanneal_cfm4_dts: Sequence[float],
     qutip_tols: Sequence[float],
     output_dir: Path,
     solver: Literal["both", "kryanneal", "qutip"] = "both",
+    method: Literal["adaptive", "cfm4"] = "adaptive",
+    variant_tag: str | None = None,
 ) -> Path:
     # 問題ファイル
     pdata = np.load(problem_file)
@@ -239,9 +275,12 @@ def run_bench(
     # 既存 CSV をロードして skip-existing に使う
     rows, done_cells = _load_existing(csv_path)
 
+    # kryanneal cells 用 variant tag (default = method 名). qutip は固定 "qutip".
+    kryanneal_variant = variant_tag if variant_tag is not None else method
+
     print(
         f"\n=== bench: scenario={scenario}, n={n}, T={T:.0f}, seed={seed} "
-        f"(solver={solver}) ===",
+        f"(solver={solver}, method={method}, variant={kryanneal_variant!r}) ===",
         flush=True,
     )
     print(f"problem:   {problem_file}", flush=True)
@@ -250,26 +289,41 @@ def run_bench(
     if rows:
         print(
             f"[resume] {csv_path} に既存 {len(rows)} 行. "
-            f"同 (solver, knob_value) cell は skip して残りから再開する.",
+            f"同 (solver, variant, knob_value) cell は skip して残りから再開する.",
             flush=True,
         )
 
     # ---- kryanneal cells ----
     if solver in ("both", "kryanneal"):
-        for atol in kryanneal_atols:
-            knob_key = ("kryanneal", _normalize_knob(atol))
+        if method == "adaptive":
+            knob_name = "atol"
+            knob_sweep = list(kryanneal_atols)
+            runner = _run_kryanneal_adaptive
+        elif method == "cfm4":
+            knob_name = "dt"
+            knob_sweep = list(kryanneal_cfm4_dts)
+            runner = _run_kryanneal_cfm4_fixed_dt
+        else:
+            raise ValueError(f"unknown method: {method!r}")
+
+        for knob in knob_sweep:
+            knob_key = ("kryanneal", kryanneal_variant, _normalize_knob(knob))
             if knob_key in done_cells:
                 print(
-                    f"[skip] kryanneal atol={atol:.0e} (既存 cell, CSV に保存済み)",
+                    f"[skip] kryanneal {kryanneal_variant} {knob_name}={knob:.3g} "
+                    f"(既存 cell, CSV に保存済み)",
                     flush=True,
                 )
                 continue
-            print(f"\n[kryanneal] atol={atol:.0e} running ...", flush=True)
-            wall, psi, n_steps = _run_kryanneal_adaptive(prob, sched, psi0, T, atol)
+            print(
+                f"\n[kryanneal/{kryanneal_variant}] {knob_name}={knob:.3g} running ...",
+                flush=True,
+            )
+            wall, psi, n_steps = runner(prob, sched, psi0, T, knob)
             inf = infidelity(psi, psi_ref)
             print(
-                f"[kryanneal] atol={atol:.0e}: wall={wall:.2f}s, "
-                f"infidelity={inf:.3e}, n_steps={n_steps}",
+                f"[kryanneal/{kryanneal_variant}] {knob_name}={knob:.3g}: "
+                f"wall={wall:.2f}s, infidelity={inf:.3e}, n_steps={n_steps}",
                 flush=True,
             )
             rows.append(
@@ -279,8 +333,9 @@ def run_bench(
                     "T": T,
                     "seed": seed,
                     "solver": "kryanneal",
-                    "knob_name": "atol",
-                    "knob_value": atol,
+                    "variant": kryanneal_variant,
+                    "knob_name": knob_name,
+                    "knob_value": knob,
                     "wall_sec": wall,
                     "infidelity": inf,
                     "n_steps_eff": n_steps,
@@ -296,7 +351,7 @@ def run_bench(
     # ---- QuTiP cells ----
     if solver in ("both", "qutip"):
         for tol in qutip_tols:
-            knob_key = ("qutip", _normalize_knob(tol))
+            knob_key = ("qutip", "qutip", _normalize_knob(tol))
             if knob_key in done_cells:
                 print(
                     f"[skip] qutip tol={tol:.0e} (既存 cell, CSV に保存済み)",
@@ -317,6 +372,7 @@ def run_bench(
                     "T": T,
                     "seed": seed,
                     "solver": "qutip",
+                    "variant": "qutip",
                     "knob_name": "tol",
                     "knob_value": tol,
                     "wall_sec": wall,
@@ -350,16 +406,41 @@ def main() -> None:
         help="compute_readme_reference.py が生成した参照解 npz (T はここから取得)",
     )
     parser.add_argument(
+        "--method",
+        choices=["adaptive", "cfm4"],
+        default="adaptive",
+        help="kryanneal の propagator method. "
+        "adaptive = cfm4_adaptive_richardson (atol sweep), "
+        "cfm4 = 固定 dt CFM4:2 (dt sweep). "
+        "solver=qutip では無視される.",
+    )
+    parser.add_argument(
+        "--variant-tag",
+        type=str,
+        default=None,
+        help="CSV の variant 列に書く識別子 (kryanneal cells 用). "
+        "None なら method 名そのまま. thread mode を区別したいときは "
+        "'adaptive_multi' / 'cfm4_single' のように指定. "
+        "qutip cells は常に variant='qutip' 固定.",
+    )
+    parser.add_argument(
         "--kryanneal-atols",
         type=_parse_floats,
         default=[1e-3, 1e-5, 1e-7, 1e-9],
-        help="cfm4_adaptive_richardson atol sweep (CSV)",
+        help="cfm4_adaptive_richardson atol sweep (method=adaptive のとき)",
+    )
+    parser.add_argument(
+        "--cfm4-dts",
+        type=_parse_floats,
+        default=[5.0, 2.0, 0.5, 0.2, 0.05],
+        help="cfm4 (固定 dt) dt sweep (method=cfm4 のとき). T/dt = n_steps. "
+        "default は粗 → 細順で T=1e4 想定 (n_steps = 2000-200000)",
     )
     parser.add_argument(
         "--qutip-tols",
         type=_parse_floats,
         default=[1e-3, 1e-5, 1e-7, 1e-9],
-        help="QuTiP sesolve (Adams) tol sweep (CSV)",
+        help="QuTiP sesolve (Adams) tol sweep",
     )
     parser.add_argument(
         "--output-dir",
@@ -406,9 +487,12 @@ def main() -> None:
         problem_file=args.problem_file,
         reference_file=args.reference_file,
         kryanneal_atols=args.kryanneal_atols,
+        kryanneal_cfm4_dts=args.cfm4_dts,
         qutip_tols=args.qutip_tols,
         output_dir=args.output_dir,
         solver=args.solver,
+        method=args.method,
+        variant_tag=args.variant_tag,
     )
 
 
