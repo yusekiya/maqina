@@ -311,18 +311,20 @@ i ∈ {0, 1, 2} を SIMD 特化 (`feature = "simd"`, default ON)。
 - **`--no-default-features` ビルド**: SIMD 依存も外れ scalar 経路に戻る。
   `wide` クレートはリンクされない。
 
-## perf 計測用 binary (Phase 6 D follow-up, issue #79 / #82 / #90)
+## perf 計測用 binary (Phase 6 D follow-up, issue #79 / #82 / #90 / #113)
 
-`apply_h_kryanneal` / `trotter_step` / `apply_single_mode_axis_i` の真の
-bottleneck (DRAM bound / L3 contention / barrier / chunk_size 戦略の差 等の
-どれか) を Linux `perf stat` で hardware counter から特定するための
-pure-Rust 計測 binary を `src/bin/` に配置:
+`apply_h_kryanneal` / `trotter_step` / `apply_single_mode_axis_i` /
+`cfm4_adaptive_richardson` の真の bottleneck (DRAM bound / L3 contention /
+barrier / chunk_size 戦略の差 / Lanczos vs GS の wall 比率 等のどれか) を Linux
+`perf stat` で hardware counter から特定するための pure-Rust 計測 binary を
+`src/bin/` に配置:
 
 | binary | 対象 kernel | 主な用途 |
 |---|---|---|
 | `src/bin/perf_apply_h.rs` | `apply_h_kryanneal` (matvec) | #79 Phase D 試行で確立した DRAM/L2 latency 計測 |
 | `src/bin/perf_trotter_step.rs` | `trotter_step` (Strang 2 次 Trotter 1 step) | #82 で C3 multi-qubit gate fusion + phase_p rayon 化の真の compute speedup 検証 |
 | `src/bin/perf_apply_single_mode_axis_i.rs` | `apply_single_mode_axis_i` (Trotter per-axis 2×2 ユニタリ) | #90 で #71 fixup `578d050` (動的 chunk_size) 棄却を perf binary で再評価し dynamic を採用 (詳細は `docs/design/05-1-matvec.md` §5.1.4 末尾) |
+| `src/bin/perf_cfm4_richardson.rs` | `cfm4_step_with_richardson_estimate` (Richardson 1 step = 6 Lanczos call) | #113 で Phase 9+ scoping のため component 別 wall % を実測 breakdown. `full` / `single_lanczos` / `matvec_only` / `gram_schmidt` の 4 mode を持ち, "step → Lanczos call → matvec / GS" の各層を同一 PMU セットで比較する |
 
 いずれも Python の `bench_*.py` が `*_py` (allocate-and-return) 経路の
 alloc/copy overhead で wall-time を歪めるのを回避し,
@@ -334,12 +336,16 @@ Rust 側 micro-optimization の compute 効果だけを切り出す目的.
 RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_apply_h
 RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_trotter_step
 RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_apply_single_mode_axis_i
+RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_cfm4_richardson
 ```
 
 対象関数は `pub fn` に上げ, `crate::bench_api` (`src/lib.rs`) で再 export
-している (`apply_h_kryanneal`, `trotter_step`, `apply_single_mode_axis_i`).
+している (`apply_h_kryanneal`, `trotter_step`, `apply_single_mode_axis_i`,
+`lanczos_propagate`, `cfm4_step_with_richardson_estimate`; あと
+`gram_schmidt` mode が直接呼ぶ BLAS-1 primitive として `dot_conj` / `axpy`).
 Python 側 API (`_rust.apply_h_kryanneal_py` / `_rust.trotter_step_py` /
-`_rust.apply_single_mode_axis_i_inplace_py` 等) には影響なし.
+`_rust.apply_single_mode_axis_i_inplace_py` /
+`_rust.cfm4_step_with_richardson_estimate_py` 等) には影響なし.
 
 計測例 (Linux, AMD EPYC で実証済み):
 
@@ -378,6 +384,19 @@ RAYON_NUM_THREADS=64 perf stat \
     -e l2_request_g1.all_no_prefetch,l2_cache_req_stat.ic_dc_miss_in_l2 \
     -e l2_latency.l2_cycles_waiting_on_fills \
     -- ./target/release/perf_apply_single_mode_axis_i 20 500 0
+
+# cfm4_step_with_richardson_estimate (issue #113). 第 3 引数で mode 切替:
+# full (default) / single_lanczos / matvec_only / gram_schmidt. 4 mode 全部
+# 同じ counter セットで取って "step → Lanczos call → matvec / GS" 各層の
+# wall % を実測 breakdown する.
+for mode in full single_lanczos matvec_only gram_schmidt; do
+    RAYON_NUM_THREADS=64 perf stat \
+        -e cycles,instructions,branch-misses \
+        -e stalled-cycles-backend,stalled-cycles-frontend \
+        -e l2_request_g1.all_no_prefetch,l2_cache_req_stat.ic_dc_miss_in_l2 \
+        -e l2_latency.l2_cycles_waiting_on_fills \
+        -- ./target/release/perf_cfm4_richardson 18 100 $mode
+done
 ```
 
 binary は stderr に wall time / per-iter time / sink (DCE 防止) を出し,
