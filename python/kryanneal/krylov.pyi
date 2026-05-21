@@ -48,7 +48,7 @@ from kryanneal.schedule import Schedule as Schedule
 from kryanneal.observable import Observable as Observable
 from typing import Any
 SnapshotData = dict[str, 'np.ndarray | dict[str, np.ndarray] | None']
-__all__ = ['SnapshotData', 'evolve_schedule_adaptive_m2', 'evolve_schedule_adaptive_richardson', 'evolve_schedule_cfm4', 'evolve_schedule_m2', 'evolve_schedule_trotter', 'evolve_schedule_trotter_suzuki4']
+__all__ = ['SnapshotData', 'evolve_schedule_adaptive_m2', 'evolve_schedule_adaptive_richardson', 'evolve_schedule_adaptive_richardson_chebyshev', 'evolve_schedule_cfm4', 'evolve_schedule_m2', 'evolve_schedule_trotter', 'evolve_schedule_trotter_suzuki4']
 
 def evolve_schedule_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, m: int=24, krylov_tol: float=1e-12, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, int, SnapshotData | None]:
     """固定 dt = (t1 - t0) / n_steps の M2 中点則ドライバ.
@@ -422,5 +422,78 @@ def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, s
     ------
     ValueError, RuntimeError
         ``evolve_schedule_adaptive_m2`` と同様.
+    """
+    ...
+
+def evolve_schedule_adaptive_richardson_chebyshev(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, chebyshev_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
+    """CFM4:2 + step-doubling Richardson + Chebyshev propagator (issue #122).
+
+    既存 :func:`evolve_schedule_adaptive_richardson` (Lanczos 経路) と
+    **同じ PI controller 構造** を維持したまま, 各 stage の短時間プロパゲータ
+    を Lanczos から Chebyshev 3 項漸化に差し替えた variant. アルゴリズム軸
+    での V matrix (dim × m_max) cache stall 回避 + Gram-Schmidt 消滅を
+    狙う (Phase A POC #120 / PR #121 で per-call 4.45× を実測).
+
+    Rust 拡張 (``_rust.cfm4_step_chebyshev_with_richardson_estimate_py``) が
+    必須. Python リファレンス fallback は提供しない (詳細は
+    :func:`_adaptive_dispatch_richardson_estimate_chebyshev`).
+
+    PI controller の Magnus 起因駆動量は Lanczos 版と同型:
+
+    .. code-block:: text
+
+        err_magnus = max(0, err - err_chebyshev_total)
+
+    ここで ``err_chebyshev_total`` は full + half×2 の 3 軌道分の Chebyshev
+    切り捨て残差 (``2·|J_{K+1}(z)|·‖ψ‖``) を triangle inequality で集約した
+    上界. Lanczos 版の ``err_lanczos_total`` と同じ役割.
+
+    Parameters
+    ----------
+    h_x, h_p_diag, schedule, psi0, t0, t1
+        :func:`evolve_schedule_adaptive_richardson` と同じ.
+    chebyshev_tol
+        Chebyshev 切り捨て次数 ``K_used`` の決定閾値
+        (``|J_{K+1}(z)| < chebyshev_tol / 2``). semantics は Lanczos 版の
+        ``krylov_tol`` 同等で, "Krylov 近似の許容誤差" 規約 (issue #98 Phase 8).
+        新パラメータは導入せず本 driver 内では ``chebyshev_tol`` 命名のみ
+        使う. 既定 ``1e-12``.
+    tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects,
+    richardson_extrapolate, observables, save_tlist, store_states
+        :func:`evolve_schedule_adaptive_richardson` と同じ.
+
+    Returns
+    -------
+    psi_final, t_history, dt_history, n_rejects
+        :func:`evolve_schedule_adaptive_richardson` と同じ.
+    k_used_history : np.ndarray
+        shape ``(K-1,)`` int64. 各 accept された step の Chebyshev
+        ``K_used`` 合計 (full + half×2 = 6 chebyshev_propagate 呼出の K_used
+        合計). Lanczos 版の ``m_eff_history`` に相当 (ただし上界 ``6m`` は
+        無く, K_used は ``z = R·dt`` に応じて動的に決まる).
+    beta_m_history : np.ndarray
+        shape ``(K-1,)`` float64. Chebyshev には β_m に相当する量がないため
+        本 driver では常に 0.0 を埋める (型互換のため). Lanczos 版との
+        コンシステンシのみ目的.
+    err_chebyshev_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の
+        ``err_chebyshev_total`` (Chebyshev 切り捨て残差の triangle inequality
+        和). Lanczos 版の ``err_lanczos_history`` に相当.
+    err_magnus_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の
+        ``err_magnus = max(0, err - err_chebyshev_total)`` (Magnus 起因の dt
+        誤差成分). PI controller の駆動量に使われた値.
+    n_chebyshev_insufficient : int
+        累積で ``err_chebyshev_total > tol_step`` を検出した step 数. Lanczos
+        版の ``n_krylov_insufficient`` に相当する診断指標.
+    snapshot
+        :func:`evolve_schedule_adaptive_richardson` と同じ.
+
+    Raises
+    ------
+    ValueError, RuntimeError
+        :func:`evolve_schedule_adaptive_richardson` と同様.
+    NotImplementedError
+        Rust 拡張 ``kryanneal._rust`` が import できなかった場合.
     """
     ...

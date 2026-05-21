@@ -11,7 +11,7 @@ Acceptance:
   と一致.
 * ``psi`` プロパティが defensive copy を返し, 戻り値の mutation が
   内部状態に影響しない.
-* adaptive method (``cfm4_adaptive_richardson``) で ``step(dt)`` を
+* adaptive method (``cfm4_adaptive_richardson_krylov``) で ``step(dt)`` を
   呼ぶと dt が proposal 扱いになり PI controller の accept/reject 動作が
   観測される (大き過ぎる dt を渡すと内部で sub-step 化される).
 * ``measure`` で ``Observable`` 以外を渡すと ``TypeError``.
@@ -213,7 +213,9 @@ def test_advance_to_adaptive_rejects_n_steps() -> None:
     prob = _build_problem(n)
     sched = Schedule.linear(T=1.0)
     psi0 = uniform_superposition(n)
-    sim = AnnealingSimulator(prob, sched, psi0, 0.0, method="cfm4_adaptive_richardson")
+    sim = AnnealingSimulator(
+        prob, sched, psi0, 0.0, method="cfm4_adaptive_richardson_krylov"
+    )
     with pytest.raises(ValueError, match="n_steps must be None"):
         sim.advance_to(1.0, n_steps=10)
 
@@ -286,7 +288,9 @@ def test_adaptive_step_advances_by_exactly_dt() -> None:
     prob = _build_problem(n)
     sched = Schedule.linear(T=5.0)
     psi0 = uniform_superposition(n)
-    sim = AnnealingSimulator(prob, sched, psi0, 0.0, method="cfm4_adaptive_richardson")
+    sim = AnnealingSimulator(
+        prob, sched, psi0, 0.0, method="cfm4_adaptive_richardson_krylov"
+    )
     sim.step(0.3)
     assert sim.t == pytest.approx(0.3)
     assert sim.n_matvec > 0
@@ -309,7 +313,7 @@ def test_adaptive_step_large_dt_triggers_sub_stepping() -> None:
         sched,
         psi0,
         0.0,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-12,
         m=24,
     )
@@ -333,9 +337,11 @@ def test_adaptive_advance_to_matches_run_psi() -> None:
     psi0 = uniform_superposition(n)
 
     ann = QuantumAnnealer(prob, sched)
-    res = ann.run(psi0, 0.0, 2.0, method="cfm4_adaptive_richardson", atol=1e-8)
+    res = ann.run(psi0, 0.0, 2.0, method="cfm4_adaptive_richardson_krylov", atol=1e-8)
 
-    sim = ann.create_simulator(psi0, 0.0, method="cfm4_adaptive_richardson", atol=1e-8)
+    sim = ann.create_simulator(
+        psi0, 0.0, method="cfm4_adaptive_richardson_krylov", atol=1e-8
+    )
     sim.advance_to(2.0)
     rel = float(np.linalg.norm(sim.psi - res.psi_final) / np.linalg.norm(res.psi_final))
     # 同じ driver を同じ引数 (auto-resolved dt_init/dt_max 含め) で呼ぶので
@@ -406,7 +412,7 @@ def test_init_validates_adaptive_param_positivity() -> None:
     prob = _build_problem(n)
     sched = Schedule.linear(T=1.0)
     psi0 = uniform_superposition(n)
-    base_kwargs: dict[str, object] = {"method": "cfm4_adaptive_richardson"}
+    base_kwargs: dict[str, object] = {"method": "cfm4_adaptive_richardson_krylov"}
     with pytest.raises(ValueError, match="atol must be > 0"):
         AnnealingSimulator(prob, sched, psi0, 0.0, atol=-1.0, **base_kwargs)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="dt_init must be > 0"):

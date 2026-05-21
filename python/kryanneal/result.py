@@ -89,7 +89,7 @@ class QuantumResult:
         ``False`` を返す余地を残すための signal).
     method
         Phase 4 追加. 実行された propagator 名 (``"m2"`` / ``"trotter"``
-        / ``"trotter_suzuki4"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson"``).
+        / ``"trotter_suzuki4"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"``).
     n_steps_actual
         Phase 4 追加. adaptive 経路で実際に accept された step 数.
         固定 dt 経路では ``n_steps`` と一致する整数値を返し,

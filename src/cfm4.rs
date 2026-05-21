@@ -38,6 +38,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::blas::nrm2;
+use crate::chebyshev::chebyshev_propagate;
 use crate::krylov::lanczos_propagate;
 use crate::matvec::{apply_h_drv, apply_h_kryanneal, apply_h_p_diag};
 
@@ -934,6 +935,359 @@ pub(crate) fn cfm4_step_with_richardson_estimate_py<'py>(
         err,
         m_eff_total,
         err_lanczos_total,
+    ))
+}
+
+// ============================================================
+// Chebyshev variant (issue #122, Phase B)
+// ============================================================
+//
+// 既存 `cfm4_step` / `cfm4_step_with_richardson_estimate` が各 stage で
+// `lanczos_propagate` を呼ぶのに対し, Chebyshev variant は同じ 2 stage 構造
+// (Alvermann-Fehske 2011) を保ったまま **各 stage の短時間プロパゲータを
+// `chebyshev_propagate` に差し替える**. 差し替えの動機は Phase A (#120) で
+// 実証された V matrix (dim × m_max) cache stall の構造的回避と Gram-Schmidt
+// 消滅 (per-stage 4.45× / Linux EPYC, PR #121). スペクトル境界 `(E_c, R)` は
+// 各 stage の凍結 `(c_drv, c_diag)` に対して Gershgorin で per-stage 再計算
+// する.
+
+/// `cfm4_step` の Chebyshev variant. CFM4:2 の 2 stage 短時間プロパゲータを
+/// Lanczos から Chebyshev 3 項漸化に差し替える.
+///
+/// # 引数
+///
+/// `cfm4_step` と同一だが Krylov 部分空間次元 `m` は不要 (Chebyshev は
+/// 切り捨て次数 `K_used` を `chebyshev_tol` から動的に決定する).
+///
+/// * `psi` (length `2^n`): 入力状態.
+/// * `h_x` (length `n`), `h_p_diag` (length `2^n`): operator 部分.
+/// * `a_s1`, `b_s1`, `a_s2`, `b_s2`: 2 stage 用スケジュール係数 (ガウス-
+///   ルジャンドル 2 点ノードで pre-eval 済).
+/// * `dt`: 時刻刻み幅.
+/// * `chebyshev_tol`: Chebyshev 切り捨て次数 `K_used` の決定閾値
+///   (`|J_{K+1}(z)| < chebyshev_tol / 2`). semantics は `krylov_tol` 同等
+///   (issue #98 Phase 8: "Krylov 近似の許容誤差"; issue #122 では新パラメータ
+///   `chebyshev_tol` を導入せず `krylov_tol` を流用する方針).
+/// * `n`: サイト数.
+///
+/// # 戻り値
+///
+/// `(psi_new, k_used_sum, err_chebyshev_sum)`:
+/// * `psi_new` (length `2^n`): 2 stage 適用後の状態.
+/// * `k_used_sum`: 2 stage の `K_used` 合計. adaptive Richardson driver が
+///   per-step 統計に集計する.
+/// * `err_chebyshev_sum`: 2 stage の Chebyshev 切り捨て残差を triangle inequality
+///   で集約 (`err_estimate_stage1 + err_estimate_stage2`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_chebyshev(
+    psi: &[Complex64],
+    h_x: &[f64],
+    h_p_diag: &[f64],
+    a_s1: f64,
+    b_s1: f64,
+    a_s2: f64,
+    b_s2: f64,
+    dt: f64,
+    chebyshev_tol: f64,
+    n: usize,
+) -> PyResult<(Vec<Complex64>, usize, f64)> {
+    let a_high = cfm4_a_high();
+    let a_low = cfm4_a_low();
+
+    // stage 1: B_1 = a_high · H_1 + a_low · H_2 を (c_drv_1, c_diag_1) に畳み込む.
+    let c_drv_1 = a_high * a_s1 + a_low * a_s2;
+    let c_diag_1 = a_high * b_s1 + a_low * b_s2;
+    let (psi_mid, k_used_stage1, err_stage1) =
+        chebyshev_propagate(h_x, h_p_diag, c_drv_1, c_diag_1, psi, dt, chebyshev_tol, n);
+
+    // stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に畳み込む.
+    let c_drv_2 = a_low * a_s1 + a_high * a_s2;
+    let c_diag_2 = a_low * b_s1 + a_high * b_s2;
+    let (psi_new, k_used_stage2, err_stage2) = chebyshev_propagate(
+        h_x,
+        h_p_diag,
+        c_drv_2,
+        c_diag_2,
+        &psi_mid,
+        dt,
+        chebyshev_tol,
+        n,
+    );
+
+    Ok((
+        psi_new,
+        k_used_stage1 + k_used_stage2,
+        err_stage1 + err_stage2,
+    ))
+}
+
+/// `cfm4_step_chebyshev` の Python wrap (allocate-and-return).
+///
+/// Python 側 (`_rust.cfm4_step_chebyshev_py`) からは
+///
+/// ```python
+/// psi_new, k_used_sum, err_cheb_sum = _rust.cfm4_step_chebyshev_py(
+///     psi, h_x, h_p_diag,
+///     a_s1, b_s1, a_s2, b_s2,
+///     dt, chebyshev_tol,
+/// )
+/// ```
+///
+/// として呼ぶ.
+#[pyfunction]
+#[pyo3(signature = (psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, chebyshev_tol))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_chebyshev_py<'py>(
+    py: Python<'py>,
+    psi: PyReadonlyArray1<'py, Complex64>,
+    h_x: PyReadonlyArray1<'py, f64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    a_s1: f64,
+    b_s1: f64,
+    a_s2: f64,
+    b_s2: f64,
+    dt: f64,
+    chebyshev_tol: f64,
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, usize, f64)> {
+    let psi_slice = psi.as_slice()?;
+    let h_x_slice = h_x.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+
+    let n = h_x_slice.len();
+    let dim = 1usize << n;
+    if h_p_diag_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "h_p_diag length {} does not match 2^len(h_x) = 2^{} = {}",
+            h_p_diag_slice.len(),
+            n,
+            dim,
+        )));
+    }
+    if psi_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "psi length {} does not match 2^len(h_x) = {}",
+            psi_slice.len(),
+            dim,
+        )));
+    }
+
+    let (psi_new, k_used_sum, err_cheb_sum) = cfm4_step_chebyshev(
+        psi_slice,
+        h_x_slice,
+        h_p_diag_slice,
+        a_s1,
+        b_s1,
+        a_s2,
+        b_s2,
+        dt,
+        chebyshev_tol,
+        n,
+    )?;
+    Ok((psi_new.into_pyarray(py), k_used_sum, err_cheb_sum))
+}
+
+/// `cfm4_step_with_richardson_estimate` の Chebyshev variant. full-step (dt) と
+/// half-step×2 (dt/2 + dt/2) の 2 軌道を Chebyshev で走らせ
+///
+/// ```text
+/// err = ‖ψ_full - ψ_h2‖_2 ≈ (1 - 1/16) · C_4 · dt^5
+/// ```
+///
+/// を step-doubling Richardson 推定値として返す. 構造は Lanczos 版と同一だが,
+/// Lanczos の `iter-0 cache` (issue #100) は Chebyshev では適用しない
+/// (Chebyshev の `chebyshev_propagate` 内部にはそうした cache 経路は無く,
+/// 削減効果も per-stage K_used ~ 20 個の matvec のうち 1 個と小さい).
+///
+/// # 戻り値
+///
+/// `(err, k_used_total, err_chebyshev_total)`:
+/// * `err`: `‖ψ_full - ψ_h2‖_2`. PI controller の accept 判定に使う.
+/// * `k_used_total`: full + h1 + h2 の `K_used` 合計 (`k_used_sum` × 3 軌道).
+/// * `err_chebyshev_total`: 3 軌道分の Chebyshev 切り捨て残差を triangle
+///   inequality で集約. adaptive driver で
+///   `err_magnus ≈ err - err_chebyshev_total` として Magnus 4 次誤差を切り出す.
+#[allow(clippy::too_many_arguments)]
+pub fn cfm4_step_chebyshev_with_richardson_estimate(
+    psi: &mut [Complex64],
+    h_x: &[f64],
+    h_p_diag: &[f64],
+    a_s1_full: f64,
+    b_s1_full: f64,
+    a_s2_full: f64,
+    b_s2_full: f64,
+    a_s1_h1: f64,
+    b_s1_h1: f64,
+    a_s2_h1: f64,
+    b_s2_h1: f64,
+    a_s1_h2: f64,
+    b_s1_h2: f64,
+    a_s2_h2: f64,
+    b_s2_h2: f64,
+    dt: f64,
+    chebyshev_tol: f64,
+    n: usize,
+    extrapolate: bool,
+) -> PyResult<(f64, usize, f64)> {
+    // 1) full-step CFM4:2 (dt) chebyshev variant.
+    let (psi_full, k_used_full, err_cheb_full) = cfm4_step_chebyshev(
+        psi,
+        h_x,
+        h_p_diag,
+        a_s1_full,
+        b_s1_full,
+        a_s2_full,
+        b_s2_full,
+        dt,
+        chebyshev_tol,
+        n,
+    )?;
+
+    // 2) 前半 half-step CFM4:2 (dt/2).
+    let (psi_mid, k_used_h1, err_cheb_h1) = cfm4_step_chebyshev(
+        psi,
+        h_x,
+        h_p_diag,
+        a_s1_h1,
+        b_s1_h1,
+        a_s2_h1,
+        b_s2_h1,
+        0.5 * dt,
+        chebyshev_tol,
+        n,
+    )?;
+
+    // 3) 後半 half-step CFM4:2 (dt/2) — 前半出口から.
+    let (psi_h2, k_used_h2, err_cheb_h2) = cfm4_step_chebyshev(
+        &psi_mid,
+        h_x,
+        h_p_diag,
+        a_s1_h2,
+        b_s1_h2,
+        a_s2_h2,
+        b_s2_h2,
+        0.5 * dt,
+        chebyshev_tol,
+        n,
+    )?;
+
+    let k_used_total = k_used_full + k_used_h1 + k_used_h2;
+    let err_chebyshev_total = err_cheb_full + err_cheb_h1 + err_cheb_h2;
+
+    // 4) err = ‖ψ_full - ψ_h2‖_2.
+    let diff: Vec<Complex64> = psi_full
+        .iter()
+        .zip(psi_h2.iter())
+        .map(|(a, b)| a - b)
+        .collect();
+    let err = nrm2(&diff);
+
+    // 5) extrapolate or h2 を書き戻す (Lanczos 版と同じ規約).
+    if extrapolate {
+        let inv15 = 1.0 / 15.0;
+        for k in 0..psi.len() {
+            psi[k] = (psi_h2[k] * 16.0 - psi_full[k]) * inv15;
+        }
+    } else {
+        psi.copy_from_slice(&psi_h2);
+    }
+
+    Ok((err, k_used_total, err_chebyshev_total))
+}
+
+/// `cfm4_step_chebyshev_with_richardson_estimate` の Python wrap.
+///
+/// Python 側 (`_rust.cfm4_step_chebyshev_with_richardson_estimate_py`) からは
+///
+/// ```python
+/// psi_new, err, k_used_total, err_cheb_total = _rust.cfm4_step_chebyshev_with_richardson_estimate_py(
+///     psi, h_x, h_p_diag,
+///     a_s1_full, b_s1_full, a_s2_full, b_s2_full,
+///     a_s1_h1,   b_s1_h1,   a_s2_h1,   b_s2_h1,
+///     a_s1_h2,   b_s1_h2,   a_s2_h2,   b_s2_h2,
+///     dt, chebyshev_tol, extrapolate,
+/// )
+/// ```
+///
+/// として呼ぶ.
+#[pyfunction]
+#[pyo3(signature = (
+    psi, h_x, h_p_diag,
+    a_s1_full, b_s1_full, a_s2_full, b_s2_full,
+    a_s1_h1, b_s1_h1, a_s2_h1, b_s2_h1,
+    a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2,
+    dt, chebyshev_tol, extrapolate,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_chebyshev_with_richardson_estimate_py<'py>(
+    py: Python<'py>,
+    psi: PyReadonlyArray1<'py, Complex64>,
+    h_x: PyReadonlyArray1<'py, f64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    a_s1_full: f64,
+    b_s1_full: f64,
+    a_s2_full: f64,
+    b_s2_full: f64,
+    a_s1_h1: f64,
+    b_s1_h1: f64,
+    a_s2_h1: f64,
+    b_s2_h1: f64,
+    a_s1_h2: f64,
+    b_s1_h2: f64,
+    a_s2_h2: f64,
+    b_s2_h2: f64,
+    dt: f64,
+    chebyshev_tol: f64,
+    extrapolate: bool,
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, f64, usize, f64)> {
+    let psi_slice = psi.as_slice()?;
+    let h_x_slice = h_x.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+
+    let n = h_x_slice.len();
+    let dim = 1usize << n;
+    if h_p_diag_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "h_p_diag length {} does not match 2^len(h_x) = 2^{} = {}",
+            h_p_diag_slice.len(),
+            n,
+            dim,
+        )));
+    }
+    if psi_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "psi length {} does not match 2^len(h_x) = {}",
+            psi_slice.len(),
+            dim,
+        )));
+    }
+
+    let mut psi_owned: Vec<Complex64> = psi_slice.to_vec();
+    let (err, k_used_total, err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate(
+        &mut psi_owned,
+        h_x_slice,
+        h_p_diag_slice,
+        a_s1_full,
+        b_s1_full,
+        a_s2_full,
+        b_s2_full,
+        a_s1_h1,
+        b_s1_h1,
+        a_s2_h1,
+        b_s2_h1,
+        a_s1_h2,
+        b_s1_h2,
+        a_s2_h2,
+        b_s2_h2,
+        dt,
+        chebyshev_tol,
+        n,
+        extrapolate,
+    )?;
+    Ok((
+        psi_owned.into_pyarray(py),
+        err,
+        k_used_total,
+        err_cheb_total,
     ))
 }
 
@@ -2060,5 +2414,286 @@ mod tests {
             err_actual,
             err_expected,
         );
+    }
+
+    // ===== issue #122 (Phase B): cfm4_step_chebyshev =====
+
+    /// time-independent H (`a_s1 == a_s2`, `b_s1 == b_s2`) で 1 step の Chebyshev
+    /// 経路 CFM4:2 が厳密に `exp(-i dt H) · ψ` を返すことを確認する.
+    ///
+    /// 定数係数だと `B_1 = a_high·H + a_low·H = H/2`, `B_2 = H/2` で `U = exp(-i dt H)`
+    /// (交換するので厳密に等しい). Chebyshev 切り捨て誤差のみ残り `rel < 1e-10`
+    /// を要求.
+    #[test]
+    fn cfm4_chebyshev_time_independent_matches_exact_chain() {
+        let n = 4_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xc4ebbb55);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let psi0 = random_complex_vec(dim, 0xdada);
+
+        let a_t = rng.signed();
+        let b_t = rng.signed();
+
+        let n_steps = 100_usize;
+        let total_t = 1.0_f64;
+        let dt = total_t / n_steps as f64;
+        let cheb_tol = 1e-13_f64;
+
+        let mut psi = psi0.clone();
+        for _ in 0..n_steps {
+            let (psi_new, _k_used, _err_cheb) =
+                cfm4_step_chebyshev(&psi, &h_x, &h_p_diag, a_t, b_t, a_t, b_t, dt, cheb_tol, n)
+                    .expect("ok");
+            psi = psi_new;
+        }
+
+        let h_real = build_dense_h_real(n, &h_x, &h_p_diag, a_t, b_t);
+        let expected = reference_propagate_real_h(&h_real, &psi0, total_t);
+
+        let rel = relative_error(&psi, &expected);
+        assert!(rel < 1e-10, "chain n_steps={} rel = {}", n_steps, rel);
+    }
+
+    /// `cfm4_step_chebyshev` と `cfm4_step` (Lanczos 版) が時間依存 schedule で
+    /// 同じ精度オーダで一致することを確認する. tol を十分小さく取れば両者は
+    /// 高精度の `exp(-i ∫ H dt)` に収束するはずなので, 同じ tol で実行した
+    /// 結果が `rel < 1e-9` レベルで一致するべき.
+    #[test]
+    fn cfm4_chebyshev_matches_lanczos_for_smooth_schedule() {
+        let n = 4_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xc4eb_4444);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let psi_raw = random_complex_vec(dim, 0xa1b2);
+        let norm = nrm2(&psi_raw);
+        let psi0: Vec<Complex64> = psi_raw.iter().map(|c| *c / norm).collect();
+
+        let a_base = 0.4_f64;
+        let b_base = 0.7_f64;
+        let f = |t: f64| t.sin();
+        let total_t = 0.5_f64;
+
+        let n_steps = 16_usize;
+        let dt = total_t / n_steps as f64;
+        let tol = 1e-12_f64;
+        let m = 24_usize;
+        let c_1 = cfm4_c1();
+        let c_2 = cfm4_c2();
+
+        let mut psi_lan = psi0.clone();
+        let mut psi_che = psi0.clone();
+        for k in 0..n_steps {
+            let t_k = k as f64 * dt;
+            let s_1 = t_k + c_1 * dt;
+            let s_2 = t_k + c_2 * dt;
+            let a_s1 = a_base * f(s_1);
+            let b_s1 = b_base * f(s_1);
+            let a_s2 = a_base * f(s_2);
+            let b_s2 = b_base * f(s_2);
+
+            let (psi_lan_new, _m_eff, _err_l) = cfm4_step(
+                &psi_lan, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, tol, n, None,
+            )
+            .expect("lanczos ok");
+            psi_lan = psi_lan_new;
+
+            let (psi_che_new, _k, _err_c) = cfm4_step_chebyshev(
+                &psi_che, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, tol, n,
+            )
+            .expect("chebyshev ok");
+            psi_che = psi_che_new;
+        }
+
+        let rel = relative_error(&psi_che, &psi_lan);
+        assert!(
+            rel < 1e-9,
+            "Chebyshev vs Lanczos rel = {} (should be ≤ 1e-9 for tol = {})",
+            rel,
+            tol,
+        );
+    }
+
+    /// Chebyshev 経路の Richardson estimator: per-step err = ‖ψ_full - ψ_h2‖ が
+    /// `O(dt^5)` (CFM4:2 LTE) でスケールすることを確認.
+    ///
+    /// 構造は `richardson_estimate_err_scales_as_dt_fifth_for_smooth_schedule`
+    /// (Lanczos 版) と同じ. `f(t) = sin(2t)` schedule で dt 半減で err 比 ~32,
+    /// `[16, 64]` 窓を要求.
+    #[test]
+    fn cfm4_chebyshev_richardson_err_scales_as_dt_fifth() {
+        let n = 3_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xc4eb_cafe);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let psi_raw = random_complex_vec(dim, 0xbeef);
+        let norm = nrm2(&psi_raw);
+        let psi0: Vec<Complex64> = psi_raw.iter().map(|c| *c / norm).collect();
+
+        let a_base = 0.4_f64;
+        let b_base = 0.7_f64;
+        let f = |t: f64| (2.0 * t).sin();
+        let t0 = 1.0_f64;
+        let tol = 1e-14_f64;
+        let c_1 = cfm4_c1();
+        let c_2 = cfm4_c2();
+
+        let step_err = |dt: f64| -> f64 {
+            let a_s1_full = a_base * f(t0 + c_1 * dt);
+            let b_s1_full = b_base * f(t0 + c_1 * dt);
+            let a_s2_full = a_base * f(t0 + c_2 * dt);
+            let b_s2_full = b_base * f(t0 + c_2 * dt);
+            let a_s1_h1 = a_base * f(t0 + c_1 * dt * 0.5);
+            let b_s1_h1 = b_base * f(t0 + c_1 * dt * 0.5);
+            let a_s2_h1 = a_base * f(t0 + c_2 * dt * 0.5);
+            let b_s2_h1 = b_base * f(t0 + c_2 * dt * 0.5);
+            let a_s1_h2 = a_base * f(t0 + 0.5 * dt + c_1 * dt * 0.5);
+            let b_s1_h2 = b_base * f(t0 + 0.5 * dt + c_1 * dt * 0.5);
+            let a_s2_h2 = a_base * f(t0 + 0.5 * dt + c_2 * dt * 0.5);
+            let b_s2_h2 = b_base * f(t0 + 0.5 * dt + c_2 * dt * 0.5);
+
+            let mut psi = psi0.clone();
+            let (err, _k_total, _err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate(
+                &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
+                b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, dt, tol, n, false,
+            )
+            .expect("ok");
+            err
+        };
+
+        let dt_coarse = 0.05_f64;
+        let err_coarse = step_err(dt_coarse);
+        let err_fine = step_err(dt_coarse * 0.5);
+        let ratio = err_coarse / err_fine;
+
+        assert!(
+            ratio > 16.0 && ratio < 64.0,
+            "expected ratio ~ 32 (O(dt^5)), got ratio = {} (err_coarse = {}, err_fine = {})",
+            ratio,
+            err_coarse,
+            err_fine,
+        );
+        assert!(
+            err_fine > 1e-12,
+            "err_fine = {} too small (truncation floor reached?)",
+            err_fine,
+        );
+    }
+
+    /// Chebyshev Richardson estimator が dt=0 で恒等変換: err = 0, psi 不変.
+    #[test]
+    fn cfm4_chebyshev_richardson_dt_zero_err_is_zero() {
+        let n = 4_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xc4eb_0d70);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let psi0 = random_complex_vec(dim, 0xdada);
+        let (a_s1_full, b_s1_full) = (rng.signed(), rng.signed());
+        let (a_s2_full, b_s2_full) = (rng.signed(), rng.signed());
+        let (a_s1_h1, b_s1_h1) = (rng.signed(), rng.signed());
+        let (a_s2_h1, b_s2_h1) = (rng.signed(), rng.signed());
+        let (a_s1_h2, b_s1_h2) = (rng.signed(), rng.signed());
+        let (a_s2_h2, b_s2_h2) = (rng.signed(), rng.signed());
+
+        let mut psi = psi0.clone();
+        let (err, _k_total, _err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate(
+            &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
+            b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, 0.0, 1e-12, n, false,
+        )
+        .expect("ok");
+
+        assert!(err.abs() < 1e-13, "dt=0 err = {}", err);
+        let rel = relative_error(&psi, &psi0);
+        assert!(rel < 1e-13, "dt=0 psi rel = {}", rel);
+    }
+
+    /// Chebyshev Richardson の psi 出力 (extrapolate=false で ψ_h2 そのまま) が,
+    /// 独立に `cfm4_step_chebyshev` を h1 / h2 schedule で dt/2 × 2 回呼んだ結果と
+    /// **bit-exact 一致** することを確認する.
+    ///
+    /// Lanczos 版と異なり iter-0 cache 経路を持たないため bit-exact が成り立つ.
+    #[test]
+    fn cfm4_chebyshev_richardson_extrapolate_false_matches_two_half_steps_bit_exact() {
+        let n = 4_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xc4eb_8888);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let psi0 = random_complex_vec(dim, 0x4321);
+
+        let (a_s1_full, b_s1_full) = (0.4_f64, 1.1_f64);
+        let (a_s2_full, b_s2_full) = (0.7_f64, 0.3_f64);
+        let (a_s1_h1, b_s1_h1) = (0.45_f64, 1.05_f64);
+        let (a_s2_h1, b_s2_h1) = (0.65_f64, 0.35_f64);
+        let (a_s1_h2, b_s1_h2) = (0.50_f64, 0.95_f64);
+        let (a_s2_h2, b_s2_h2) = (0.60_f64, 0.40_f64);
+
+        let dt = 0.25_f64;
+        let tol = 1e-12_f64;
+
+        // reference: cfm4_step_chebyshev を dt/2 で 2 回叩く.
+        let (psi_mid_expected, _k_mid, _err_mid) = cfm4_step_chebyshev(
+            &psi0,
+            &h_x,
+            &h_p_diag,
+            a_s1_h1,
+            b_s1_h1,
+            a_s2_h1,
+            b_s2_h1,
+            0.5 * dt,
+            tol,
+            n,
+        )
+        .expect("ok");
+        let (psi_expected, _k_h2, _err_h2) = cfm4_step_chebyshev(
+            &psi_mid_expected,
+            &h_x,
+            &h_p_diag,
+            a_s1_h2,
+            b_s1_h2,
+            a_s2_h2,
+            b_s2_h2,
+            0.5 * dt,
+            tol,
+            n,
+        )
+        .expect("ok");
+
+        // actual: Richardson 経路 (extrapolate=false).
+        let mut psi_actual = psi0.clone();
+        let (_err, _k_total, _err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate(
+            &mut psi_actual,
+            &h_x,
+            &h_p_diag,
+            a_s1_full,
+            b_s1_full,
+            a_s2_full,
+            b_s2_full,
+            a_s1_h1,
+            b_s1_h1,
+            a_s2_h1,
+            b_s2_h1,
+            a_s1_h2,
+            b_s1_h2,
+            a_s2_h2,
+            b_s2_h2,
+            dt,
+            tol,
+            n,
+            false,
+        )
+        .expect("ok");
+
+        for k in 0..dim {
+            assert_eq!(
+                psi_actual[k], psi_expected[k],
+                "k={}: actual={:?}, expected={:?}",
+                k, psi_actual[k], psi_expected[k]
+            );
+        }
     }
 }

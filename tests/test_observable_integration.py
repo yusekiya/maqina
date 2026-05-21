@@ -9,7 +9,7 @@
 スコープ:
 
 * ``method="m2"`` smoke (固定 dt 中点則).
-* ``method="cfm4_adaptive_richardson"`` smoke (adaptive PI controller).
+* ``method="cfm4_adaptive_richardson_krylov"`` smoke (adaptive PI controller).
 * エネルギー保存則 (constant schedule で ``<ψ|H|ψ>`` が時間で不変).
 * ``save_tlist`` 検証エラー (monotonicity / 範囲外 / dtype).
 * ``store_states=True`` で ``states.shape == (K, 2**n)`` の契約.
@@ -65,7 +65,7 @@ def test_observables_m2_returns_history_with_save_tlist_length() -> None:
 
 
 def test_observables_adaptive_richardson_returns_history() -> None:
-    """``method='cfm4_adaptive_richardson'`` でも同様に観測量時系列が
+    """``method='cfm4_adaptive_richardson_krylov'`` でも同様に観測量時系列が
     記録される. PI が ``save_tlist`` を target に dt クランプする経路の smoke.
     """
     n = 3
@@ -80,7 +80,7 @@ def test_observables_adaptive_richardson_returns_history() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
         observables={"M_z": Observable.magnetization(n)},
         save_tlist=save_tlist,
@@ -133,7 +133,7 @@ def test_energy_conservation_constant_schedule_m2() -> None:
 def test_energy_conservation_constant_schedule_richardson() -> None:
     """adaptive Richardson 経路でも A=0, B=1 でエネルギー保存則.
 
-    ``cfm4_adaptive_richardson`` は constant schedule + 対角 H で
+    ``cfm4_adaptive_richardson_krylov`` は constant schedule + 対角 H で
     rounding 誤差レベルの err≈0 となり PI が dt を ``dt_max`` まで伸ばす.
     観測量を ``save_tlist`` 時刻で記録し H_p 期待値が保存することを確認.
     """
@@ -149,7 +149,7 @@ def test_energy_conservation_constant_schedule_richardson() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-10,
         observables={"H_p": Observable.ising_energy(prob)},
         save_tlist=save_tlist,

@@ -82,7 +82,9 @@ mod trotter;
 /// 経由のみで呼び出す.
 pub mod bench_api {
     pub use crate::blas::{axpy, dot_conj};
-    pub use crate::cfm4::cfm4_step_with_richardson_estimate;
+    pub use crate::cfm4::{
+        cfm4_step_chebyshev_with_richardson_estimate, cfm4_step_with_richardson_estimate,
+    };
     pub use crate::chebyshev::chebyshev_propagate;
     pub use crate::krylov::lanczos_propagate;
     pub use crate::matvec::apply_h_kryanneal;
@@ -154,6 +156,11 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cfm4::cfm4_step_with_m2_estimate_py, m)?)?;
     m.add_function(wrap_pyfunction!(
         cfm4::cfm4_step_with_richardson_estimate_py,
+        m
+    )?)?;
+    m.add_function(wrap_pyfunction!(cfm4::cfm4_step_chebyshev_py, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        cfm4::cfm4_step_chebyshev_with_richardson_estimate_py,
         m
     )?)?;
     m.add_function(wrap_pyfunction!(trotter::trotter_step_py, m)?)?;

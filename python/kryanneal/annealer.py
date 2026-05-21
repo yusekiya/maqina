@@ -17,7 +17,7 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
 * サポート ``method``: ``"m2"`` (固定 dt M2 中点則, Phase 1), ``"trotter"``
   (固定 dt Strang 2 次 Trotter, Phase 2), ``"trotter_suzuki4"`` (固定 dt
   Suzuki S_4 4 次 Trotter, Phase 2 末), ``"cfm4"`` (固定 dt CFM4:2
-  commutator-free Magnus, Phase 3), ``"cfm4_adaptive_richardson"`` (Phase 4
+  commutator-free Magnus, Phase 3), ``"cfm4_adaptive_richardson_krylov"`` (Phase 4
   C3, step-doubling Richardson + PI controller). それ以外は
   ``NotImplementedError``.
 * ``save_tlist`` 引数は **API 互換性のために予約済み** だが本リリースでは
@@ -59,7 +59,7 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
 ``evolve_schedule_cfm4`` (固定 dt driver) / ``evolve_schedule_adaptive_richardson``
 (adaptive driver) を内部で呼ぶ薄いラッパ. 入力検証 (shape / dtype /
 L2-normalize) を本クラスで集中させ, krylov 層は数値計算に専念させる.
-``m`` / ``krylov_tol`` は ``"m2"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson"``
+``m`` / ``krylov_tol`` は ``"m2"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"``
 経路でのみ意味を持ち, ``"trotter"`` / ``"trotter_suzuki4"`` 経路は Lanczos を
 使わないため両パラメータは無視される.
 """
@@ -85,6 +85,7 @@ from kryanneal._helpers import _resolve_dt_max_auto as _resolve_dt_max_auto
 from kryanneal._helpers import _validate_psi0 as _validate_psi0
 from kryanneal.krylov import (
     evolve_schedule_adaptive_richardson,
+    evolve_schedule_adaptive_richardson_chebyshev,
     evolve_schedule_cfm4,
     evolve_schedule_m2,
     evolve_schedule_trotter,
@@ -122,7 +123,7 @@ class QuantumAnnealer:
 
         ``None`` (既定) のとき経路ごとに自動解決する (issue #54):
 
-        * ``cfm4_adaptive_richardson`` (adaptive Richardson):
+        * ``cfm4_adaptive_richardson_krylov`` (adaptive Richardson):
           ``run`` 時の ``atol`` (実効 ``tol_step``) に対し
           ``effective_krylov_tol = tol_step · _KRYLOV_TOL_ATOL_RATIO``
           (既定 ``1e-3``). atol=1e-8 default で ``1e-11``.
@@ -174,7 +175,12 @@ class QuantumAnnealer:
         t1: float,
         *,
         method: Literal[
-            "m2", "trotter", "trotter_suzuki4", "cfm4", "cfm4_adaptive_richardson"
+            "m2",
+            "trotter",
+            "trotter_suzuki4",
+            "cfm4",
+            "cfm4_adaptive_richardson_krylov",
+            "cfm4_adaptive_richardson_chebyshev",
         ] = "m2",
         n_steps: int | None = None,
         atol: float | None = None,
@@ -199,10 +205,10 @@ class QuantumAnnealer:
             ``"trotter"`` (固定 dt Strang 2 次 Trotter, Phase 2),
             ``"trotter_suzuki4"`` (固定 dt Suzuki S_4 4 次 Trotter, Phase 2 末),
             ``"cfm4"`` (固定 dt CFM4:2 commutator-free Magnus, Phase 3),
-            または ``"cfm4_adaptive_richardson"`` (Phase 4 C3,
+            または ``"cfm4_adaptive_richardson_krylov"`` (Phase 4 C3,
             step-doubling Richardson + PI controller). Trotter 系経路は
             Lanczos を呼ばないため ``m`` / ``krylov_tol`` は無視される.
-            ``"cfm4"`` / ``"cfm4_adaptive_richardson"`` は M2 と同じく
+            ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"`` は M2 と同じく
             Lanczos を介すので ``m`` / ``krylov_tol`` が有効.
         n_steps
             固定 dt 経路の step 数 (``n_steps >= 1``). 等間隔 ``dt =
@@ -298,7 +304,7 @@ class QuantumAnnealer:
               × Strang per-step コスト).
             * ``"cfm4"``: ``n_steps × 2m`` (CFM4:2 は 1 step あたり Lanczos
               を 2 回呼ぶため M2 の 2 倍).
-            * ``"cfm4_adaptive_richardson"``: ``n_steps_actual × 6m``
+            * ``"cfm4_adaptive_richardson_krylov"``: ``n_steps_actual × 6m``
               (full CFM4:2 ``2m`` + half×2 CFM4:2 ``4m`` = ``6m``,
               ``docs/design/05-3-propagator.md`` §5.3).
 
@@ -324,7 +330,8 @@ class QuantumAnnealer:
             "trotter",
             "trotter_suzuki4",
             "cfm4",
-            "cfm4_adaptive_richardson",
+            "cfm4_adaptive_richardson_krylov",
+            "cfm4_adaptive_richardson_chebyshev",
         )
         if method not in valid_methods:
             raise NotImplementedError(
@@ -351,7 +358,7 @@ class QuantumAnnealer:
 
         psi0_arr = _validate_psi0(self.problem, psi0)
 
-        if method == "cfm4_adaptive_richardson":
+        if method == "cfm4_adaptive_richardson_krylov":
             # NOTE: 既定値は driver (``evolve_schedule_adaptive_richardson``)
             # 側と一致させること. driver 側を変えたら本ファイルも追従する.
             #
@@ -465,6 +472,97 @@ class QuantumAnnealer:
                 m_eff_stats=m_eff_stats,
                 beta_m_stats=beta_m_stats,
                 n_krylov_insufficient=int(n_krylov_insufficient),
+            )
+
+        if method == "cfm4_adaptive_richardson_chebyshev":
+            # issue #122 (Phase B): Chebyshev variant. Lanczos 経路 (上) と
+            # 同じ atol / dt0 / dt_max 解決ロジックを踏襲. `m` (Lanczos
+            # 部分空間次元) は Chebyshev で使われないが ``_resolve_dt_max_auto``
+            # は依然 Lanczos capacity (``4m / ‖H‖``) を返す保守側上限として
+            # 流用する (Chebyshev は breakdown しないので大きめの dt_max でも
+            # 安全だが, 初期実装では Lanczos と同じ上限で挙動を観察する).
+            tol_step = float(atol) if atol is not None else 1e-8
+            if self.krylov_tol is not None:
+                effective_chebyshev_tol = self.krylov_tol
+            else:
+                effective_chebyshev_tol = tol_step * _KRYLOV_TOL_ATOL_RATIO
+            if dt_init is None:
+                dt0 = _resolve_dt_init_auto(t0, t1)
+            else:
+                dt0 = float(dt_init)
+            if dt_max is None:
+                # ``m`` は ``_resolve_dt_max_auto`` の Lanczos capacity 引数
+                # としてのみ使う. Chebyshev driver 自体は ``m`` を取らない.
+                dt_max_resolved_cheb: float = _resolve_dt_max_auto(
+                    self.problem, self.m, dt0
+                )
+            else:
+                dt_max_resolved_cheb = float(dt_max)
+            # ``m_max`` は Chebyshev で意味を持たないが, 互換のため受け取り
+            # 検証のみ通す (silent 無視は debug 罠なので, 渡されたら
+            # ValueError で弾く方針).
+            if m_max is not None:
+                raise ValueError(
+                    "m_max is not supported for method="
+                    "'cfm4_adaptive_richardson_chebyshev' "
+                    "(Chebyshev uses dynamic K_used, not Krylov subspace dimension)."
+                )
+            (
+                psi_final,
+                _t_history,
+                dt_history,
+                _n_rejects,
+                k_used_history,
+                _beta_m_history,
+                _err_cheb_history,
+                _err_magnus_history,
+                n_cheb_insufficient,
+                snapshot,
+            ) = evolve_schedule_adaptive_richardson_chebyshev(
+                h_x=self.problem.h_x,
+                h_p_diag=self.problem.H_p_diag,
+                schedule=self.schedule,
+                psi0=psi0_arr,
+                t0=t0,
+                t1=t1,
+                chebyshev_tol=effective_chebyshev_tol,
+                tol_step=tol_step,
+                dt0=dt0,
+                dt_max=dt_max_resolved_cheb,
+                observables=observables_validated,
+                save_tlist=save_tlist_arr,
+                store_states=store_states,
+            )
+            n_steps_actual = int(dt_history.shape[0])
+            # Chebyshev では K_used を ``m_eff_stats`` と同じスロットに格納
+            # (driver 戻り値 shape 互換を保ち, ``QuantumResult.m_eff_stats``
+            # のキー意味を「per-step propagator 評価コスト統計」に拡張).
+            # 別途 ``QuantumResult.method`` で Lanczos / Chebyshev を判別可.
+            if k_used_history.size > 0:
+                m_eff_stats_cheb: dict[str, int | float] | None = {
+                    "total": int(np.sum(k_used_history)),
+                    "mean": float(np.mean(k_used_history)),
+                    "median": float(np.median(k_used_history)),
+                    "min": int(np.min(k_used_history)),
+                    "max": int(np.max(k_used_history)),
+                }
+                # Chebyshev の matvec 推定: K_used 合計 (= 6 chebyshev_propagate
+                # 呼出の K_used 合計, 各 K_used が matvec 数とほぼ等しい
+                # — phi_1 で 1 matvec, k=2..K で各 1 matvec).
+                n_matvec_cheb = int(np.sum(k_used_history))
+            else:
+                m_eff_stats_cheb = None
+                n_matvec_cheb = 0
+            return self._build_result(
+                psi_final=psi_final,
+                snapshot=snapshot,
+                method=method,
+                n_steps=n_steps_actual,
+                n_matvec=int(n_matvec_cheb),
+                n_steps_actual=n_steps_actual,
+                m_eff_stats=m_eff_stats_cheb,
+                beta_m_stats=None,
+                n_krylov_insufficient=int(n_cheb_insufficient),
             )
 
         # 固定 dt 経路は n_steps が必須.
@@ -691,7 +789,11 @@ class QuantumAnnealer:
         t0: float,
         *,
         method: Literal[
-            "m2", "trotter", "trotter_suzuki4", "cfm4", "cfm4_adaptive_richardson"
+            "m2",
+            "trotter",
+            "trotter_suzuki4",
+            "cfm4",
+            "cfm4_adaptive_richardson_krylov",
         ] = "cfm4",
         atol: float | None = None,
         dt_init: float | None = None,
@@ -713,9 +815,9 @@ class QuantumAnnealer:
         method
             プロパゲータ. ``run`` と同じ集合をサポート (``m2`` /
             ``trotter`` / ``trotter_suzuki4`` / ``cfm4`` /
-            ``cfm4_adaptive_richardson``).
+            ``cfm4_adaptive_richardson_krylov``).
         atol, dt_init, dt_max, m_max
-            adaptive method (``cfm4_adaptive_richardson``) 専用パラメータ.
+            adaptive method (``cfm4_adaptive_richardson_krylov``) 専用パラメータ.
             固定 dt method で指定すると ``ValueError``. 詳細は
             ``AnnealingSimulator.__init__`` の docstring.
 

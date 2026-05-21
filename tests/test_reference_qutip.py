@@ -12,10 +12,10 @@ issue #8 / #21 / #65 acceptance:
     対称性誤差で ``1e-6`` までは届かないので ``1e-4`` 設定 (issue #21).
 
 * 大規模 (n=12-16, issue #65 Phase 6 C4) で QuTiP ``sesolve`` を ground truth
-  として 4 method (m2 / trotter / cfm4 / cfm4_adaptive_richardson) と比較する.
+  として 4 method (m2 / trotter / cfm4 / cfm4_adaptive_richardson_krylov) と比較する.
 
   * 固定 dt (m2 / trotter / cfm4): ``n=12-14``, fidelity ``> 1 - 1e-6``.
-  * adaptive (cfm4_adaptive_richardson): ``n=12-16``, fidelity ``> 1 - 1e-6``
+  * adaptive (cfm4_adaptive_richardson_krylov): ``n=12-16``, fidelity ``> 1 - 1e-6``
     (atol=1e-8 で局所誤差を絞った設定).
 
   ``n >= 14`` は ``@pytest.mark.slow`` で除外可能 (CI fast loop 用).
@@ -349,7 +349,7 @@ def test_quantum_annealer_large_n_matches_qutip_trotter(n: int) -> None:
     ],
 )
 def test_quantum_annealer_large_n_matches_qutip_adaptive(n: int) -> None:
-    """n=12-16 で ``method="cfm4_adaptive_richardson"`` を QuTiP sesolve と比較.
+    """n=12-16 で ``method="cfm4_adaptive_richardson_krylov"`` を QuTiP sesolve と比較.
 
     PI controller atol=1e-8 で局所誤差を絞り, fidelity ``> 1 - 1e-6`` を
     要求する (issue #65 acceptance).
@@ -366,7 +366,7 @@ def test_quantum_annealer_large_n_matches_qutip_adaptive(n: int) -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
     )
 
@@ -375,6 +375,6 @@ def test_quantum_annealer_large_n_matches_qutip_adaptive(n: int) -> None:
 
     fid = _fidelity(res.psi_final, psi_qutip)
     assert fid > _LARGE_FIDELITY_ADAPTIVE, (
-        f"fidelity too low (n={n}, method='cfm4_adaptive_richardson'): "
+        f"fidelity too low (n={n}, method='cfm4_adaptive_richardson_krylov'): "
         f"{fid} (1 - fid = {1 - fid})"
     )
