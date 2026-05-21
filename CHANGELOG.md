@@ -11,6 +11,39 @@
   (`0.N.0` → `0.N+1.0`) で破壊的変更を吸収する (`docs/conventions.md`
   §2 参照).
 
+## 0.9.0 - 2026-05-22 — BLAS thread default 方針改訂 (issue #116)
+
+EPYC 7713P perf 実測 (#113 / PR #115) で「rayon 経路では BLAS=1」という
+従来推奨が 1.52× の改善余地を逃していたことが判明し, 新ヘルパ
+`set_blas_threads_auto()` を導入して default policy を改訂.
+
+### Added
+
+- **issue #116**: `kryanneal.set_blas_threads_auto()` 公開. 内部で
+  `_recommended_blas_threads()` を呼んで `set_blas_threads(n)` を適用 (戻り値
+  は適用した n). `_recommended_blas_threads()` は
+  `os.process_cpu_count() // 8` を 1-16 でクランプし, さらに
+  `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS` / `VECLIB_MAXIMUM_THREADS` /
+  `OMP_NUM_THREADS` (この優先順) が set されていれば strict な上限として
+  `min(auto, env_cap)` を返す. `available_blas_threads()` (現在の BLAS
+  pool 状態 query) とは意図的に分離し冪等性を担保.
+
+### Changed
+
+- **`CLAUDE.md` "Thread pool 運用 (rayon × BLAS)" 節**: 旧推奨
+  `set_blas_threads(1)` を撤回し, 新推奨 `set_blas_threads_auto()` に
+  全面書き換え. 撤回理由 (PR #115 perf 実測で NT=8 で 1.52× speedup,
+  NT=16-32 でも +2% 以内, spin-wait の rayon 圧迫も実害無し) を併記.
+- **`docs/quickstart.md`** "並列ジョブ実行時のスレッド数制御" 節:
+  `set_blas_threads_auto()` を新 default の便利関数として追加紹介.
+- **`python/kryanneal/__init__.py::set_blas_threads` docstring**: 旧
+  「rayon 経路で `set_blas_threads(1)`」例示を新方針 (`set_blas_threads_auto()`
+  を default 推奨, 完全隔離が要件なら明示 `set_blas_threads(1)` または env で
+  `OPENBLAS_NUM_THREADS=1`) に差し替え.
+
+公開 API シグネチャに新 helper 追加 + 推奨 default 変更 → **minor bump
+(`0.8 → 0.9`)**.
+
 ## 0.8.0 - 2026-05-18 — Phase 8 (Lanczos a posteriori 早期打切)
 
 Phase 8 (#98) で Lanczos 早期打切判定式を `β_k · |c_last| · |dt| / (k+1) <

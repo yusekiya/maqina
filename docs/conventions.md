@@ -18,9 +18,12 @@
   pre-commit hook と `.claude/rules/api-stubs-sync.md` で drift 防止する
   二段運用 (人間編集も hook が拾う)。
 - BLAS 多プロセス制御: `set_blas_threads(n)` /
-  `available_blas_threads()` を `__init__.py` に export
-  (`threadpoolctl.threadpool_limits` を BLAS API 単位で呼び出す
+  `set_blas_threads_auto()` / `available_blas_threads()` を `__init__.py`
+  に export (`threadpoolctl.threadpool_limits` を BLAS API 単位で呼び出す
   ラッパで、numpy/scipy bundled + system の OpenBLAS pool 同居問題に対処)。
+  推奨 default は `set_blas_threads_auto()` (issue #116, EPYC 7713P perf
+  実測で 1.52× speedup の sweet spot; `process_cpu_count / 8` を 1-16 で
+  クランプ, env で上限指定可)。
 
 ---
 
@@ -39,7 +42,8 @@
 | Phase 6 完了 | `0.6.0` |
 | Phase 7 完了 (Lanczos β_m exposure + Richardson 誤差源分離, #93) | `0.7.0` |
 | Phase 8 完了 (Lanczos a posteriori 早期打切, #98) | `0.8.0` |
-| Phase 8 後 | `docs/design/13-future-work.md` §13 Future work を再評価して `0.9.0+` のロードマップを引く |
+| issue #116 (BLAS thread default 方針改訂, `set_blas_threads_auto()` 追加) | `0.9.0` |
+| Phase 9+ | `docs/design/13-future-work.md` §13 Future work を再評価して `0.10.0+` のロードマップを引く |
 
 注: Phase 6 / 7 / 8 はそれぞれ完了時に `0.N.0` への bump を予定していたが,
 Phase 6 finalize (#66) で Phase 7 / 8 の変更も合わせて遡及的に版数化した

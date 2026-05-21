@@ -246,11 +246,27 @@ thread pool が 2 系統並走するため運用ルール:
     (`threadpoolctl.threadpool_limits` 経由)。**pool size 自体は縮まらない**
     (sleeping thread の stack / kernel resource は残る) ので, per-process
     thread budget の隔離が要件なら env 設定が必須。
-- **競合回避**: 両 pool が同時に `cpu_count` 個ずつ thread を張ると総スレッド
-  数が `cpu_count^2` 相当となり context-switch で性能劣化する。**rayon 経路
-  で並列化するときは `kryanneal.set_blas_threads(1)` に落として BLAS pool
-  を 1 thread に固定する** ことを推奨。ベンチマークでも同様
-  (`benchmarks/bench_parallel_scaling.py` は子モード冒頭でこれを強制)。
+- **競合回避と推奨 default (issue #116, 2026-05-21 改訂)**: rayon 経路でも
+  Lanczos 内部の BLAS-1 (`gemv` / `axpy` / `nrm2` 等) は **適度な BLAS 並列化が
+  prod 速い** ことが Linux AMD EPYC 7713P での perf sweep (#113 / PR #115) で
+  実証された。NT=8 で **1.52× speedup** (NT=1 baseline 比), NT=16-32 でも
+  +2% 程度の劣化で許容範囲, NT=64 で -9% に明確な劣化という curve。
+  **新方針**:
+  - 既定値は `kryanneal.set_blas_threads_auto()` を import 後に 1 度呼ぶ。
+    内部で `os.process_cpu_count() // 8` を 1-16 でクランプし
+    (EPYC SMT2 で 16, 32-core で 4, 8-core 以下で 1), さらに
+    `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS` / `VECLIB_MAXIMUM_THREADS` /
+    `OMP_NUM_THREADS` (この優先順) が set されていればそれを strict な
+    上限として `min(auto, env_cap)` を返す。冪等。
+  - 完全隔離が要件なら `set_blas_threads(1)` を明示。あるいは起動前に
+    env で `OPENBLAS_NUM_THREADS=1` 等を set。
+  - 旧推奨「rayon 経路では `set_blas_threads(1)`」は perf 計測前の仮説で
+    あり, 1.52× の改善余地を逃していた。**撤回済み**。
+  ベンチ運用 (`benchmarks/bench_parallel_scaling.py` 子モード冒頭の強制) も
+  同じく `set_blas_threads_auto()` 経由に揃える方向。当初懸念だった
+  「spin-wait が rayon を圧迫」も実害無し (`OPENBLAS_THREAD_TIMEOUT=1` で spin
+  抑制すると逆に +4-9% 遅化する。Lanczos の BLAS call 間隔が短く futex
+  park → unpark の wake-up cost が遊休 core 占有より高くつくため)。
 - **並列ジョブ実行 (multiprocessing / Slurm job array 等)**: 1 プロセス
   あたりの thread budget を絞るには **`kryanneal` / `numpy` を import する前**
   に上記 env (`RAYON_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS`

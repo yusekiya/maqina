@@ -61,8 +61,17 @@ __all__ = [
     "available_blas_threads",
     "instantaneous_eigenstates",
     "set_blas_threads",
+    "set_blas_threads_auto",
     "show_config",
 ]
+
+
+_ENV_VARS_BLAS_CAP = (
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "OMP_NUM_THREADS",
+)
 
 
 def _warn_if_no_blas() -> None:
@@ -124,9 +133,12 @@ def set_blas_threads(n: int) -> None:
 
     そのため:
 
-    - **import 後に動的に active BLAS thread 数を絞りたい** シナリオ
-      (例: rayon 並列経路で ``set_blas_threads(1)`` に落として競合回避)
-      では本関数を使う.
+    - **import 後に動的に active BLAS thread 数を絞りたい** シナリオでは
+      本関数を使う. rayon 経路と併用する際の **推奨 default** は
+      :func:`set_blas_threads_auto` (issue #116 perf 実証で
+      ``OPENBLAS_NUM_THREADS=8`` 相当で 1.52× speedup). 明示的に 1
+      thread に絞りたい (= 完全に隔離したい) ときのみ
+      ``set_blas_threads(1)`` を直接呼ぶ.
     - **per-process thread budget の隔離** が要件のシナリオ
       (multiprocessing / Slurm job array で 1 プロセスあたりの thread 数を
       物理的に制限したい) では, ``kryanneal`` / ``numpy`` を import する
@@ -169,6 +181,106 @@ def available_blas_threads() -> int:
     else:
         n_blas = n_cpu
     return max(1, min(n_blas, n_cpu))
+
+
+def _read_env_cap() -> int | None:
+    """BLAS pool size の env 上限を読む.
+
+    :data:`_ENV_VARS_BLAS_CAP` (筆頭 ``OPENBLAS_NUM_THREADS``) を順に走査し,
+    最初に見つかった値を採用して ``int`` に parse して返す. parse 失敗時は
+    その変数をスキップして次へ. 1 つも見つからなければ ``None``.
+
+    Returns
+    -------
+    int | None
+        env で指定された BLAS thread 上限 (1 以上). 何も set されていなければ
+        ``None``.
+    """
+    import os
+
+    for var in _ENV_VARS_BLAS_CAP:
+        val = os.environ.get(var)
+        if val is None:
+            continue
+        try:
+            return max(1, int(val))
+        except ValueError:
+            continue
+    return None
+
+
+def _recommended_blas_threads() -> int:
+    """Lanczos 内部 BLAS-1 経路で使う推奨 active thread 数 (issue #116).
+
+    Default は ``process_cpu_count // 8`` を 1-16 でクランプ:
+
+    ===================  ===========
+    process_cpu_count    recommended
+    ===================  ===========
+    128 (EPYC SMT2)               16
+     64 (32-core SMT2)             8
+     32                            4
+     16                            2
+      ≤ 8                          1
+    ===================  ===========
+
+    数値は perf 実測 (#113 / PR #115, Linux AMD EPYC 7713P) の sweet spot
+    (NT=8 で 1.52× speedup, NT=16 でも +2% で 1.49×) に基づく. 物理コア
+    ≤ 8 の小規模マシンでは BLAS=1 として rayon 全コア並列との
+    oversubscription を回避.
+
+    :func:`_read_env_cap` で得た env 上限 (``OPENBLAS_NUM_THREADS`` 等) が
+    set されていれば, それを **strict な上限** として
+    ``min(auto, env_cap)`` を返す. ``os.process_cpu_count()`` 経由なので
+    Slurm / cgroup / taskset で CPU 割当が絞られた環境ではそれを honor
+    する (host 全 logical コア数ではなくプロセスへの割当を見る).
+
+    :func:`available_blas_threads` (BLAS pool の現在 active 数 query) とは
+    意図的に分離: 本関数は env から決まる **静的な policy** であり, 何度
+    呼んでも同じ値を返す (idempotent). :func:`available_blas_threads` を
+    cap に使うと :func:`set_blas_threads_auto` を 2 回呼んだとき cap が
+    下がっていく non-idempotent な挙動になるため避ける.
+
+    Returns
+    -------
+    int
+        推奨 active BLAS thread 数 (1 以上).
+    """
+    import os
+
+    cores = os.process_cpu_count() or os.cpu_count() or 1
+    auto = max(1, min(16, cores // 8))
+    env_cap = _read_env_cap()
+    if env_cap is not None:
+        return min(auto, env_cap)
+    return auto
+
+
+def set_blas_threads_auto() -> int:
+    """:func:`_recommended_blas_threads` の値を適用し, 適用した値を返す.
+
+    内部で :func:`set_blas_threads` を呼んで全 BLAS pool の active thread
+    数を推奨値に統一する. issue #116 で確立した「rayon 経路でも
+    BLAS=1 ではなく ``process_cpu_count / 8`` 程度を使う」という
+    新方針の便利関数.
+
+    冪等. 同じ環境変数 / cpu 割当下では何度呼んでも同じ値を返す.
+
+    Examples
+    --------
+    >>> import kryanneal
+    >>> kryanneal.set_blas_threads_auto()   # 推奨 default を適用  # doctest: +SKIP
+    8
+    >>> kryanneal.set_blas_threads(1)       # 明示 override            # doctest: +SKIP
+
+    Returns
+    -------
+    int
+        実際に適用した active BLAS thread 数.
+    """
+    n = _recommended_blas_threads()
+    set_blas_threads(n)
+    return n
 
 
 def show_config() -> None:
