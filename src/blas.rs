@@ -24,7 +24,7 @@ use cblas::{dznrm2, zaxpy, zdotc_sub, zdscal, zgemv, Layout, Transpose};
 ///
 /// # Panics
 /// `x.len() != y.len()`
-pub(crate) fn axpy(alpha: Complex64, x: &[Complex64], y: &mut [Complex64]) {
+pub fn axpy(alpha: Complex64, x: &[Complex64], y: &mut [Complex64]) {
     assert_eq!(x.len(), y.len(), "axpy: x and y must have the same length");
     let n = x.len();
 
@@ -55,7 +55,7 @@ pub(crate) fn axpy(alpha: Complex64, x: &[Complex64], y: &mut [Complex64]) {
 ///
 /// # Panics
 /// `x.len() != y.len()`
-pub(crate) fn dot_conj(x: &[Complex64], y: &[Complex64]) -> Complex64 {
+pub fn dot_conj(x: &[Complex64], y: &[Complex64]) -> Complex64 {
     assert_eq!(
         x.len(),
         y.len(),

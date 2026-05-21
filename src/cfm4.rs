@@ -709,7 +709,7 @@ pub(crate) fn cfm4_step_with_m2_estimate_py<'py>(
 // 係数 3 セット × 4 = 12 引数 + 共通 7 引数で計 19 だが, 構造体化は adaptive
 // driver (Python 側) の API が固まるまで保留.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn cfm4_step_with_richardson_estimate(
+pub fn cfm4_step_with_richardson_estimate(
     psi: &mut [Complex64],
     h_x: &[f64],
     h_p_diag: &[f64],

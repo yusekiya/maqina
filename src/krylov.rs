@@ -142,7 +142,7 @@ fn tridiag_c_last_abs(alpha: &[f64], beta_sub: &[f64], dt: f64) -> PyResult<f64>
 ///
 /// # Panics
 /// `m == 0`.
-pub(crate) fn lanczos_propagate<F>(
+pub fn lanczos_propagate<F>(
     mut matvec: F,
     psi: &[Complex64],
     dt: f64,
