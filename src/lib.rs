@@ -56,6 +56,7 @@ use blas_src as _;
 
 mod blas;
 mod cfm4;
+mod chebyshev;
 mod krylov;
 mod matvec;
 mod tridiag;
@@ -65,20 +66,24 @@ mod trotter;
 ///
 /// `src/bin/perf_apply_h.rs` / `src/bin/perf_trotter_step.rs` /
 /// `src/bin/perf_apply_single_mode_axis_i.rs` /
-/// `src/bin/perf_cfm4_richardson.rs` (Linux `perf stat` 等で hardware counter
-/// を取るための pure-Rust binary) から `apply_h_kryanneal` / `trotter_step` /
-/// `apply_single_mode_axis_i` / `lanczos_propagate` /
-/// `cfm4_step_with_richardson_estimate` を呼べるよう公開する. このモジュール
-/// は Python 側には露出されない (pyo3 `#[pymodule]` には登録しない).
+/// `src/bin/perf_cfm4_richardson.rs` / `src/bin/perf_chebyshev.rs`
+/// (Linux `perf stat` 等で hardware counter を取るための pure-Rust binary)
+/// から `apply_h_kryanneal` / `trotter_step` / `apply_single_mode_axis_i` /
+/// `lanczos_propagate` / `cfm4_step_with_richardson_estimate` /
+/// `chebyshev_propagate` を呼べるよう公開する. このモジュールは Python 側
+/// には露出されない (pyo3 `#[pymodule]` には登録しない).
 ///
 /// Python 経由で呼びたい場合は引き続き `_rust.apply_h_kryanneal_py` /
 /// `_rust.trotter_step_py` / `_rust.apply_single_mode_axis_i_inplace_py` /
 /// `_rust.lanczos_propagate_py` /
 /// `_rust.cfm4_step_with_richardson_estimate_py` (および non-inplace 版) を
-/// 使うこと.
+/// 使うこと. issue #120 の Chebyshev POC は Phase A scope では Python 公開
+/// 不要なため, `chebyshev_propagate` には `_py` wrap を作らず本 bench_api
+/// 経由のみで呼び出す.
 pub mod bench_api {
     pub use crate::blas::{axpy, dot_conj};
     pub use crate::cfm4::cfm4_step_with_richardson_estimate;
+    pub use crate::chebyshev::chebyshev_propagate;
     pub use crate::krylov::lanczos_propagate;
     pub use crate::matvec::apply_h_kryanneal;
     pub use crate::matvec::apply_single_mode_axis_i;
