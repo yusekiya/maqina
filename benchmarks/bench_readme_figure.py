@@ -376,7 +376,31 @@ def main() -> None:
         "both=両方 (default), kryanneal=kryanneal cells のみ, qutip=QuTiP cells のみ. "
         "戦略 B (scenario 順次 + QuTiP cells 2 scenario 並列実行) で使う.",
     )
+    parser.add_argument(
+        "--blas-threads",
+        type=int,
+        default=1,
+        help="全 BLAS pool (numpy bundled + system OpenBLAS) の thread 数. "
+        "default 1 = OpenBLAS の spin wait による CPU 浪費を回避. "
+        "QuTiP cells を 2 scenario 並列実行 (戦略 B Step 2) するとき, "
+        "両 process が default thread 数 (=物理コア数) で spawn すると spin wait "
+        "で互いに競合して計算時間が伸びるのを防ぐ. memory "
+        "`project_bench_machine` の確立済運用と整合 (kryanneal cell 中の rayon と "
+        'OpenBLAS pool の競合回避も兼ねる, CLAUDE.md "Thread pool 運用" 節参照).',
+    )
     args = parser.parse_args()
+
+    # set_blas_threads は kryanneal._init_ で export 済の API. threadpoolctl 経由で
+    # numpy bundled + system OpenBLAS の thread 数を一括制御. rayon pool には
+    # 影響しないので kryanneal cell の matvec 並列化は維持される.
+    import kryanneal as _kryanneal  # noqa: PLC0415  (CLI 引数解決後の呼び出し)
+
+    _kryanneal.set_blas_threads(args.blas_threads)
+    print(
+        f"[config] BLAS threads = {args.blas_threads} "
+        f"(spin wait / rayon×BLAS 競合回避のため)",
+        flush=True,
+    )
 
     run_bench(
         problem_file=args.problem_file,
