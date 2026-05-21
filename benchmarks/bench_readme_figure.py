@@ -460,28 +460,40 @@ def main() -> None:
     parser.add_argument(
         "--blas-threads",
         type=int,
-        default=1,
-        help="全 BLAS pool (numpy bundled + system OpenBLAS) の thread 数. "
-        "default 1 = OpenBLAS の spin wait による CPU 浪費を回避. "
-        "QuTiP cells を 2 scenario 並列実行 (戦略 B Step 2) するとき, "
-        "両 process が default thread 数 (=物理コア数) で spawn すると spin wait "
-        "で互いに競合して計算時間が伸びるのを防ぐ. memory "
-        "`project_bench_machine` の確立済運用と整合 (kryanneal cell 中の rayon と "
-        'OpenBLAS pool の競合回避も兼ねる, CLAUDE.md "Thread pool 運用" 節参照).',
+        default=None,
+        help="全 BLAS pool (numpy bundled + system OpenBLAS) の thread 数を "
+        "指定する (default None = 制御しない = OpenBLAS default thread).\n"
+        "kryanneal の adaptive Richardson は Lanczos 内部で Gram-Schmidt + 終端 "
+        "gemv (BLAS Level-1/2) を多用するため, BLAS=1 にすると wall time が "
+        "1.5× 程度遅くなる (実測 Linux EPYC 7713P, N=18, atol=1e-3 で 27.5 min "
+        "→ 40+ min). したがって kryanneal cell では明示指定しない (default).\n"
+        "QuTiP cells を 2 scenario 並列実行する場合のみ spin wait + 2 process "
+        "間競合を避けるため --blas-threads 1 を明示渡す (sparse matvec は "
+        "BLAS を使わないので thread 数が wall time に影響しない). "
+        "shell script `run_bench_readme.sh` の Step 3 で実装済.",
     )
     args = parser.parse_args()
 
-    # set_blas_threads は kryanneal._init_ で export 済の API. threadpoolctl 経由で
-    # numpy bundled + system OpenBLAS の thread 数を一括制御. rayon pool には
-    # 影響しないので kryanneal cell の matvec 並列化は維持される.
-    import kryanneal as _kryanneal  # noqa: PLC0415  (CLI 引数解決後の呼び出し)
+    # `--blas-threads` を渡された場合のみ set_blas_threads を呼ぶ. 渡されない場合
+    # (default = None) は OpenBLAS の default thread (= 物理コア数) のまま. これに
+    # より kryanneal の Lanczos 内部 BLAS calls (Gram-Schmidt / 終端 gemv) が並列化
+    # を維持できる. (set_blas_threads は threadpoolctl 経由で numpy bundled +
+    # system OpenBLAS の両方を制御するが rayon pool には影響しない.)
+    if args.blas_threads is not None:
+        import kryanneal as _kryanneal  # noqa: PLC0415  (CLI 引数解決後)
 
-    _kryanneal.set_blas_threads(args.blas_threads)
-    print(
-        f"[config] BLAS threads = {args.blas_threads} "
-        f"(spin wait / rayon×BLAS 競合回避のため)",
-        flush=True,
-    )
+        _kryanneal.set_blas_threads(args.blas_threads)
+        print(
+            f"[config] BLAS threads = {args.blas_threads} "
+            f"(明示指定; spin wait 排除 / 2 scenario 並列時の競合回避用)",
+            flush=True,
+        )
+    else:
+        print(
+            "[config] BLAS threads = default (制御しない). "
+            "kryanneal Lanczos 内部 BLAS の並列化を維持.",
+            flush=True,
+        )
 
     run_bench(
         problem_file=args.problem_file,

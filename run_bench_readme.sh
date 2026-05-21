@@ -20,8 +20,15 @@
 # thread vs multi thread の並列化効果を可視化する追加情報なので, 必要に応じて
 # 途中で kill 可能.
 #
-# BLAS thread は全 step で 1 固定 (bench_readme_figure.py の --blas-threads
-# default. spin wait 回避 + kryanneal cell 中の rayon×BLAS 競合回避).
+# BLAS thread の運用:
+#  - Step 1-2, 4-5 (kryanneal cells): BLAS=default (= 物理コア数) を使う.
+#    kryanneal adaptive Richardson は Lanczos 内部で Gram-Schmidt + 終端 gemv
+#    (BLAS Level-1/2) を多用するため BLAS=1 にすると wall time が ~1.5× 遅く
+#    なる (実測 N=18, atol=1e-3 で 27.5 min → 40+ min).
+#  - Step 3 (qutip cells): `--blas-threads 1` を明示. QuTiP sparse matvec は
+#    BLAS を使わないので thread 数が wall time に影響しないが, default で
+#    spawn される 64 thread が spin wait で CPU を空費する + 2 scenario 並列
+#    実行時に互いに競合する. これを排除するため 1 thread に固定.
 #
 # 進捗: 各 step が完了するごとに [done] 行が log に出る. atol/tol 1 cell ごとに
 # [saved] 行で CSV が atomic save されるので, 途中中断しても完了 cell は失われ
@@ -149,8 +156,11 @@ echo "################################################################"
 for scenario in "${scenarios[@]}"; do
     problem_npz="$PROBLEM_DIR/problem_${scenario}_n${N}_seed${SEED}.npz"
     reference_npz="$PROBLEM_DIR/reference_${scenario}_n${N}_T${T_INT}_seed${SEED}.npz"
+    # qutip cells のみ --blas-threads 1 を明示 (spin wait + 2 process 並列時の
+    # 競合を排除). QuTiP sparse matvec は BLAS を使わないので影響なし.
     uv run python -u -m benchmarks.bench_readme_figure \
         --solver qutip \
+        --blas-threads 1 \
         --problem-file   "$problem_npz" \
         --reference-file "$reference_npz" \
         --output-dir     "$OUTPUT_DIR" &
