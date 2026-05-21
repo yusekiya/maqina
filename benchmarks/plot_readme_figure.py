@@ -53,35 +53,35 @@ COLUMNS = [
 # 5 系列が同 plot に描かれる前提で配色を分離.
 SOLVER_STYLE: dict[tuple[str, str], dict[str, object]] = {
     ("kryanneal", "adaptive_multi"): {
-        "label": "kryanneal cfm4_adaptive_richardson (multi-thread)",
+        "label": "adaptive dt (par.)",
         "color": "#d62728",  # red
         "marker": "o",
         "linestyle": "-",
         "alpha": 0.95,
     },
     ("kryanneal", "adaptive_single"): {
-        "label": "kryanneal cfm4_adaptive_richardson (single-thread)",
+        "label": "adaptive dt (seq.)",
         "color": "#d62728",  # red
         "marker": "o",
         "linestyle": "--",
         "alpha": 0.65,
     },
     ("kryanneal", "cfm4_multi"): {
-        "label": "kryanneal cfm4 (fixed dt, multi-thread)",
+        "label": "fixed dt (par.)",
         "color": "#2ca02c",  # green
         "marker": "^",
         "linestyle": "-",
         "alpha": 0.95,
     },
     ("kryanneal", "cfm4_single"): {
-        "label": "kryanneal cfm4 (fixed dt, single-thread)",
+        "label": "fixed dt (seq.)",
         "color": "#2ca02c",  # green
         "marker": "^",
         "linestyle": "--",
         "alpha": 0.65,
     },
     ("qutip", "qutip"): {
-        "label": "QuTiP sesolve (Adams, sparse)",
+        "label": "QuTiP",
         "color": "#1f77b4",  # blue
         "marker": "s",
         "linestyle": "-",
@@ -206,14 +206,14 @@ def _plot_scenario(
     # kryanneal が左下に Pareto を握る形を想定して legend は右上に固定.
     ax.legend(loc="upper right", framealpha=0.95, fontsize=8)
 
-    # 右下 footer に thread mode の凡例補強 + 描画情報. kryanneal の rayon は
-    # multi (solid) / single (dashed) を線種で区別, QuTiP の sparse 経路は
-    # scipy.sparse の制約上 single-thread が本質.
+    # 右下 footer に凡例補強. kryanneal は rayon で multi (solid, par.) /
+    # single (dashed, seq.) を線種で区別. QuTiP は sparse 制約上ほぼ
+    # single-thread (solid 1 系列だけ).
     fig.text(
         0.99,
         0.01,
-        f"kryanneal v{version}  |  solid = multi-thread, dashed = single-thread "
-        f"(kryanneal only)",
+        f"kryanneal v{version}  |  par. = parallel (multi-thread), "
+        f"seq. = sequential (single-thread)",
         ha="right",
         va="bottom",
         fontsize=7,
