@@ -36,6 +36,7 @@ COLUMNS = [
     "T",
     "seed",
     "solver",
+    "variant",
     "knob_name",
     "knob_value",
     "wall_sec",
@@ -43,19 +44,54 @@ COLUMNS = [
     "n_steps_eff",
 ]
 
-# 表示用ラベル / 色
-SOLVER_STYLE = {
-    "kryanneal": {
-        "label": "kryanneal cfm4_adaptive_richardson",
+# 表示用ラベル / 色 / 線種.
+# key = (solver, variant) tuple. variant は kryanneal の method + thread mode を
+# 識別するタグ. 視覚的な識別軸:
+#   - 色 = method (adaptive=red, cfm4=green, qutip=blue): 比較する propagator 系列
+#   - 線種 = thread mode (solid=multi, dashed=single): 並列化の効果を視覚化
+#   - marker = method 補強 (○=adaptive, △=cfm4, □=qutip)
+# 5 系列が同 plot に描かれる前提で配色を分離.
+SOLVER_STYLE: dict[tuple[str, str], dict[str, object]] = {
+    ("kryanneal", "adaptive_multi"): {
+        "label": "kryanneal cfm4_adaptive_richardson (multi-thread)",
         "color": "#d62728",  # red
         "marker": "o",
+        "linestyle": "-",
+        "alpha": 0.95,
     },
-    "qutip": {
-        "label": "QuTiP sesolve (sparse)",
+    ("kryanneal", "adaptive_single"): {
+        "label": "kryanneal cfm4_adaptive_richardson (single-thread)",
+        "color": "#d62728",  # red
+        "marker": "o",
+        "linestyle": "--",
+        "alpha": 0.65,
+    },
+    ("kryanneal", "cfm4_multi"): {
+        "label": "kryanneal cfm4 (fixed dt, multi-thread)",
+        "color": "#2ca02c",  # green
+        "marker": "^",
+        "linestyle": "-",
+        "alpha": 0.95,
+    },
+    ("kryanneal", "cfm4_single"): {
+        "label": "kryanneal cfm4 (fixed dt, single-thread)",
+        "color": "#2ca02c",  # green
+        "marker": "^",
+        "linestyle": "--",
+        "alpha": 0.65,
+    },
+    ("qutip", "qutip"): {
+        "label": "QuTiP sesolve (Adams, sparse)",
         "color": "#1f77b4",  # blue
         "marker": "s",
+        "linestyle": "-",
+        "alpha": 0.95,
     },
 }
+
+# Legend に表示する順序. SOLVER_STYLE の挿入順と一致させる (adaptive →
+# cfm4 → qutip, multi → single の順) ことで凡例の並びを method ベースに揃える.
+_LEGEND_ORDER: list[tuple[str, str]] = list(SOLVER_STYLE.keys())
 
 # 内部 scenario 名 (CLI / npz / CSV で使う legacy ID, 影響範囲が大きいので
 # そのまま) と, ユーザー向け表示タイトルの対応. 厳密には Schrödinger 方程式
@@ -105,11 +141,26 @@ def _plot_scenario(
     T: float,
     output_dir: Path,
 ) -> Path:
-    """1 scenario 分の散布図を生成し PNG として保存."""
+    """1 scenario 分の散布図を生成し PNG として保存.
+
+    SOLVER_STYLE の (solver, variant) を順に巡って各系列を描画する.
+    cells が無い variant は skip. CSV に variant 列が無い (legacy) 行は
+    variant 空文字列扱いで SOLVER_STYLE と照合できず skip + warn.
+    """
     fig, ax = plt.subplots(figsize=(8.0, 5.5), dpi=120)
 
-    for solver, style in SOLVER_STYLE.items():
-        cells = [r for r in rows if r["solver"] == solver and r["scenario"] == scenario]
+    unknown_keys: set[tuple[str, str]] = set()
+
+    for key in _LEGEND_ORDER:
+        solver_name, variant = key
+        style = SOLVER_STYLE[key]
+        cells = [
+            r
+            for r in rows
+            if r["solver"] == solver_name
+            and r.get("variant", "") == variant
+            and r["scenario"] == scenario
+        ]
         if not cells:
             continue
         # knob_value 昇順 (粗精度→高精度) で並べる
@@ -121,11 +172,25 @@ def _plot_scenario(
             infs,
             color=style["color"],
             marker=style["marker"],
-            linestyle="-",
+            linestyle=style["linestyle"],
             linewidth=1.4,
-            alpha=0.9,
+            alpha=style["alpha"],
             markersize=9,
             label=style["label"],
+        )
+
+    # 未知の (solver, variant) があれば warning (描画から除外される).
+    for r in rows:
+        if r["scenario"] != scenario:
+            continue
+        key = (r["solver"], r.get("variant", ""))
+        if key not in SOLVER_STYLE:
+            unknown_keys.add(key)
+    if unknown_keys:
+        print(
+            f"[warn] scenario={scenario}: unknown (solver, variant) keys "
+            f"{sorted(unknown_keys)} を SOLVER_STYLE から照合できず描画から除外しました.",
+            flush=True,
         )
 
     ax.set_xscale("log")
@@ -137,18 +202,18 @@ def _plot_scenario(
         f"(N={n}, T={T:.0f})"
     )
     ax.grid(True, which="both", linestyle=":", alpha=0.4)
-    # 本番では kryanneal が左下に Pareto を握る形を想定して legend は右上に固定.
-    # data と重ならない方向で安定する.
-    ax.legend(loc="upper right", framealpha=0.95)
+    # 5 系列分の legend は density が高めなので fontsize 8 で詰める. 本番は
+    # kryanneal が左下に Pareto を握る形を想定して legend は右上に固定.
+    ax.legend(loc="upper right", framealpha=0.95, fontsize=8)
 
-    # 右下 footer に thread 情報を開示 (透明性). kryanneal は rayon で全コア
-    # 並列, QuTiP の sparse 経路は scipy.sparse / qutip-data の制約上ほぼ
-    # シングルスレッド. 数値の絶対値はこの非対称性込みで読む.
+    # 右下 footer に thread mode の凡例補強 + 描画情報. kryanneal の rayon は
+    # multi (solid) / single (dashed) を線種で区別, QuTiP の sparse 経路は
+    # scipy.sparse の制約上 single-thread が本質.
     fig.text(
         0.99,
         0.01,
-        f"kryanneal v{version}  |  kryanneal: rayon multi-thread, "
-        f"QuTiP: sparse (effectively single-thread)",
+        f"kryanneal v{version}  |  solid = multi-thread, dashed = single-thread "
+        f"(kryanneal only)",
         ha="right",
         va="bottom",
         fontsize=7,
