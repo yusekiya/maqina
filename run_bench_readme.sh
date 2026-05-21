@@ -2,19 +2,23 @@
 # README 用 fidelity-vs-runtime 散布図のための bench を 1 コマンドで全実行する.
 #
 # 構成 (戦略 B + thread mode 切替): 計 5 系列 × 2 scenario (non-stiff / stiff).
+# **途中で止めても plot が描ける順** で実行する:
 #
-#   Step 1-2: kryanneal cells (multi-thread) を順次実行
-#             - adaptive_multi  : cfm4_adaptive_richardson, rayon 全 core
-#             - cfm4_multi      : 固定 dt CFM4, rayon 全 core
-#   Step 3-4: kryanneal cells (single-thread) を順次実行
-#             - adaptive_single : cfm4_adaptive_richardson, RAYON_NUM_THREADS=1
-#             - cfm4_single     : 固定 dt CFM4, RAYON_NUM_THREADS=1
-#   Step 5  : QuTiP cells を 2 scenario 並列実行
-#             - qutip           : sesolve Adams (sparse), single-thread が本質
+#   Step 1: adaptive_multi  (kryanneal cfm4_adaptive_richardson, rayon 全 core)
+#   Step 2: cfm4_multi      (kryanneal 固定 dt CFM4, rayon 全 core)
+#   Step 3: qutip           (QuTiP sesolve Adams, sparse) — 2 scenario 並列実行
+#   ─────  ここで止めれば multi-thread × 2 method + QuTiP の Pareto 完成  ─────
+#   Step 4: adaptive_single (kryanneal cfm4_adaptive_richardson, RAYON_NUM_THREADS=1)
+#   Step 5: cfm4_single     (kryanneal 固定 dt CFM4, RAYON_NUM_THREADS=1)
 #
-# Step 1-4 は順次 (kryanneal multi の DRAM 帯域競合と single の rayon thread 数
-# 切替を clean に分けるため). Step 5 のみ並列 (sparse は CPU 1 core 占有なので
-# 2 scenario 同時起動でも互いに競合しない).
+# Step 1-2 は順次 (kryanneal multi が DRAM 帯域を使い切るため scenario 並列は競合).
+# Step 3 のみ 2 scenario 並列 (sparse は CPU 1 core 占有のみで競合最小).
+# Step 4-5 は順次 (single thread × scenario の組合せが多数並ぶ).
+#
+# **中間 plot は Step 3 完了後** (推定 ~4.5 日後) に取れる. その時点で README に
+# 載せる core message (kryanneal multi vs QuTiP) は確定済. Step 4-5 は single
+# thread vs multi thread の並列化効果を可視化する追加情報なので, 必要に応じて
+# 途中で kill 可能.
 #
 # BLAS thread は全 step で 1 固定 (bench_readme_figure.py の --blas-threads
 # default. spin wait 回避 + kryanneal cell 中の rayon×BLAS 競合回避).
@@ -47,8 +51,6 @@ PROBLEM_DIR="benchmarks/data"
 OUTPUT_DIR="benchmarks/data/0.8.0"
 
 scenarios=(non-stiff stiff)
-kryanneal_methods=(adaptive cfm4)
-thread_modes=(multi single)
 
 # 各 scenario について必要な npz が揃っているか確認
 for scenario in "${scenarios[@]}"; do
@@ -70,58 +72,79 @@ echo "================================================================"
 echo "run_bench_readme.sh start: $(date)"
 echo "  N=$N, T=$T_INT, seed=$SEED"
 echo "  scenarios: ${scenarios[*]}"
-echo "  kryanneal methods: ${kryanneal_methods[*]}"
-echo "  thread modes: ${thread_modes[*]}"
+echo "  order: adaptive_multi → cfm4_multi → qutip (並列) → adaptive_single → cfm4_single"
 echo "================================================================"
 
+# ----------------------------------------------------------------------------
+# 内部ヘルパ: kryanneal の 1 (method, scenario) cell sweep を起動する.
+# thread_mode = "multi" or "single" で rayon thread を制御.
+# ----------------------------------------------------------------------------
+run_kryanneal_cell() {
+    local method=$1
+    local thread_mode=$2
+    local scenario=$3
+    local variant="${method}_${thread_mode}"
+
+    local problem_npz="$PROBLEM_DIR/problem_${scenario}_n${N}_seed${SEED}.npz"
+    local reference_npz="$PROBLEM_DIR/reference_${scenario}_n${N}_T${T_INT}_seed${SEED}.npz"
+
+    echo ""
+    echo "================================================================"
+    echo "=== kryanneal $variant $scenario start: $(date) ==="
+    echo "================================================================"
+
+    if [ "$thread_mode" = "single" ]; then
+        RAYON_NUM_THREADS=1 uv run python -u -m benchmarks.bench_readme_figure \
+            --solver kryanneal \
+            --method "$method" \
+            --variant-tag "$variant" \
+            --problem-file   "$problem_npz" \
+            --reference-file "$reference_npz" \
+            --output-dir     "$OUTPUT_DIR"
+    else
+        uv run python -u -m benchmarks.bench_readme_figure \
+            --solver kryanneal \
+            --method "$method" \
+            --variant-tag "$variant" \
+            --problem-file   "$problem_npz" \
+            --reference-file "$reference_npz" \
+            --output-dir     "$OUTPUT_DIR"
+    fi
+
+    echo "=== kryanneal $variant $scenario done: $(date) ==="
+}
+
 # ============================================================================
-# Step 1-4: kryanneal cells を順次 (thread mode × method × scenario)
-# multi → single の順で先に Pareto 全体像を見えるようにする.
+# Step 1: adaptive_multi (2 scenarios 順次)
 # ============================================================================
-for thread_mode in "${thread_modes[@]}"; do
-    for method in "${kryanneal_methods[@]}"; do
-        variant="${method}_${thread_mode}"
-        for scenario in "${scenarios[@]}"; do
-            echo ""
-            echo "================================================================"
-            echo "=== kryanneal $variant $scenario start: $(date) ==="
-            echo "================================================================"
-
-            problem_npz="$PROBLEM_DIR/problem_${scenario}_n${N}_seed${SEED}.npz"
-            reference_npz="$PROBLEM_DIR/reference_${scenario}_n${N}_T${T_INT}_seed${SEED}.npz"
-
-            if [ "$thread_mode" = "single" ]; then
-                RAYON_NUM_THREADS=1 uv run python -u -m benchmarks.bench_readme_figure \
-                    --solver kryanneal \
-                    --method "$method" \
-                    --variant-tag "$variant" \
-                    --problem-file   "$problem_npz" \
-                    --reference-file "$reference_npz" \
-                    --output-dir     "$OUTPUT_DIR"
-            else
-                uv run python -u -m benchmarks.bench_readme_figure \
-                    --solver kryanneal \
-                    --method "$method" \
-                    --variant-tag "$variant" \
-                    --problem-file   "$problem_npz" \
-                    --reference-file "$reference_npz" \
-                    --output-dir     "$OUTPUT_DIR"
-            fi
-
-            echo "=== kryanneal $variant $scenario done: $(date) ==="
-        done
-    done
+echo ""
+echo "################################################################"
+echo "### Step 1: adaptive_multi (kryanneal cfm4_adaptive_richardson) ###"
+echo "################################################################"
+for scenario in "${scenarios[@]}"; do
+    run_kryanneal_cell adaptive multi "$scenario"
 done
 
 # ============================================================================
-# Step 5: QuTiP cells を 2 scenario 並列実行
+# Step 2: cfm4_multi (2 scenarios 順次)
+# ============================================================================
+echo ""
+echo "################################################################"
+echo "### Step 2: cfm4_multi (kryanneal 固定 dt CFM4) ###"
+echo "################################################################"
+for scenario in "${scenarios[@]}"; do
+    run_kryanneal_cell cfm4 multi "$scenario"
+done
+
+# ============================================================================
+# Step 3: QuTiP cells を 2 scenario 並列実行
 # QuTiP sparse matvec は single-thread が本質で 1 core 占有のみ. 2 scenario 同時
 # 起動しても互いに帯域/コア競合は最小 (BLAS=1 fix で spin wait も排除済み).
 # ============================================================================
 echo ""
-echo "================================================================"
-echo "=== QuTiP cells (2 scenario parallel) start: $(date) ==="
-echo "================================================================"
+echo "################################################################"
+echo "### Step 3: qutip (2 scenario parallel) start: $(date) ###"
+echo "################################################################"
 
 for scenario in "${scenarios[@]}"; do
     problem_npz="$PROBLEM_DIR/problem_${scenario}_n${N}_seed${SEED}.npz"
@@ -134,7 +157,34 @@ for scenario in "${scenarios[@]}"; do
 done
 wait
 
-echo "=== QuTiP cells done: $(date) ==="
+echo "### Step 3: qutip done: $(date) ###"
+
+# ----------------------------------------------------------------------------
+# ここで止めても README 図の core message (multi-thread Pareto) は完成済.
+# Step 4-5 は single thread vs multi thread の並列化効果可視化用追加情報.
+# ----------------------------------------------------------------------------
+
+# ============================================================================
+# Step 4: adaptive_single (2 scenarios 順次)
+# ============================================================================
+echo ""
+echo "################################################################"
+echo "### Step 4: adaptive_single (RAYON_NUM_THREADS=1) ###"
+echo "################################################################"
+for scenario in "${scenarios[@]}"; do
+    run_kryanneal_cell adaptive single "$scenario"
+done
+
+# ============================================================================
+# Step 5: cfm4_single (2 scenarios 順次)
+# ============================================================================
+echo ""
+echo "################################################################"
+echo "### Step 5: cfm4_single (RAYON_NUM_THREADS=1) ###"
+echo "################################################################"
+for scenario in "${scenarios[@]}"; do
+    run_kryanneal_cell cfm4 single "$scenario"
+done
 
 echo ""
 echo "================================================================"
