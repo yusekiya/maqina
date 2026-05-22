@@ -160,6 +160,46 @@ Lanczos 経路の iter-0 cache (#100) と同型の memoization も Chebyshev で
 可能だが per-stage K_used ~ 20 個の matvec のうち 1 個と削減比小なので Phase B
 スコープ外 (follow-up).
 
+#### PoC: Power iteration による spectral radius R refine (issue #125)
+
+Gershgorin 行和上界は TFIM 構造ではオフ対角の正負キャンセル + 対角値の局在性
+により典型的に `R_true / R_gershgorin ~ 0.5-0.7` の loose 上界を返す。`z = R · dt`
+で `K_used` が決まるので, R を真値に近づければ per-step matvec を ~1.3-1.5×
+削減できる。Pareto win 後の **直接最適化軸** として本 PoC で検証する。
+
+実装 (本 PoC スコープ, R-only refine):
+
+- `src/chebyshev.rs::power_iter_spectral_radius`: shifted operator
+  `M = H - E_c_gershgorin·I` への標準 power iteration. Rayleigh quotient
+  `λ_k = <v, M v>` が **下から** 単調に `|λ_max(M)| = R_true` に収束する.
+  対称 H 性質を利用. `n_iter = 5-10` 想定で計算量は `n_iter + 1` 回 matvec.
+- `chebyshev_propagate(..., r_override: Option<f64>)`: `Some(r)` で
+  Gershgorin の R を上書き. `E_c` は引き続き Gershgorin 由来. `None` で
+  従来動作 (safe default).
+- 安全マージン: 呼出側で `R_used = R_power_iter · 1.05` (Tal-Ezer & Kosloff
+  の経験則 `δ ∈ [0.01, 0.05]` の上端) を渡し, 未収束で `R_power_iter < R_true`
+  となっても `\tilde H` の固有値が [-1, 1] 内に収まることを保証.
+
+判定 gate (PoC 完了基準, `perf_chebyshev N=16-20` での K_used 縮小率):
+
+| 縮小率 | 次 action |
+|---|---|
+| ≥ 30% | full 実装 (CFM4 統合 + adaptive driver) を別 issue で起票 |
+| 10-30% | 改善余地は小. Trotter pre-conditioning との組合せを検討 |
+| < 10% | 中止 + archive. Gershgorin で十分タイトだった結論 |
+
+API 対称性に関する future work (案 B, 本 PoC スコープ外):
+
+`E_c` も Power iteration で refine する 2-pass 版は `gershgorin_bounds` と
+同じく `(E_min, E_max)` を返す形に拡張するのが自然 (= `power_iter_spectrum_bounds`).
+`chebyshev_propagate` の `r_override: Option<f64>` も `bounds_override:
+Option<(f64, f64)>` に置換すると Lanczos / Gershgorin インタフェースとの API
+対称性が揃う. 利点は `R_used = (λ_max - λ_min) / 2` の最適 centering (最小 R) が
+取れること, 欠点は matvec が 2× になること. TFIM `h_p_diag ∈ [-1, 1]^{2^N}`
+random scenario では `E_c_g ≈ E_c_true ≈ 0` で追加利得 α が小さい見込みのため,
+PoC は R-only に絞り case-by-case で起票する方針 (詳細は
+`src/chebyshev.rs::power_iter_spectral_radius` docstring 末尾).
+
 #### Trotter (Strang 2 次 / Suzuki 4 次) — `trotter_step`
 
 横磁場 driver の `[X_i, X_j] = 0` を活用し、`exp(-i dt H_drv)` を

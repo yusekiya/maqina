@@ -85,7 +85,9 @@ pub mod bench_api {
     pub use crate::cfm4::{
         cfm4_step_chebyshev_with_richardson_estimate, cfm4_step_with_richardson_estimate,
     };
-    pub use crate::chebyshev::chebyshev_propagate;
+    pub use crate::chebyshev::{
+        chebyshev_propagate, gershgorin_bounds, power_iter_spectral_radius,
+    };
     pub use crate::krylov::lanczos_propagate;
     pub use crate::matvec::apply_h_kryanneal;
     pub use crate::matvec::apply_single_mode_axis_i;

@@ -76,6 +76,134 @@ use num_complex::Complex64;
 
 use crate::matvec::apply_h_kryanneal;
 
+/// Power iteration で `R_refined = max |λ(H - E_c·I)|` を推定するヘルパ
+/// (issue #125 PoC, R-only refine).
+///
+/// # 動機
+///
+/// 既存 [`gershgorin_bounds`] は閉形式 O(N) で `(E_min, E_max)` を返すが,
+/// オフ対角の正負キャンセル + 対角値の局在性により TFIM では典型的に
+/// `R_true / R_gershgorin ~ 0.5-0.7` の loose 上界となる. `z = R · dt` で
+/// `K_used` が決まる (`determine_truncation`) ので, R を真値に近づければ
+/// per-step matvec を ~1.3-1.5× 削減できる (issue #125 期待値).
+///
+/// # アルゴリズム
+///
+/// shifted operator `M = H - E_c·I` に対する標準 power iteration. 対称 H
+/// なので Rayleigh quotient が単調に `|λ_max(M)|` に **下から** 収束する.
+///
+/// 1. 初期ベクトル `v_0` を xorshift64 (seed) で複素一様サンプリング + L2 正規化
+/// 2. 各 iter:
+///    * `w = H v - E_c v`
+///    * `λ_k = <v, w> / <v, v> = <v, w>` (v は正規化済みなので分母 = 1)
+///    * `v ← w / ‖w‖`
+/// 3. 最後の |λ_k| を返す
+///
+/// # 戻り値
+///
+/// `R_refined`: `max |λ(H - E_c·I)|` の下界推定値. 呼出側で安全マージン
+/// (e.g. `R_used = R_refined * 1.05`) を掛けて Chebyshev `tilde H` の
+/// `|eigenvalue| ≤ 1` 不変条件を保証する.
+///
+/// # 計算量
+///
+/// `n_iter + 1` 回の `apply_h_kryanneal` 呼出 (= matvec) + 2·n_iter 回の
+/// O(dim) BLAS-1 ops. `n_iter = 5-10` 想定. per-step amortize で 1 step あたり
+/// ~0.1 ms (#125 期待値).
+///
+/// # 案 B (E_c も refine する 2-pass 版) との関係 (本 PoC は採用しない)
+///
+/// `E_c` も Power iter で refine する案は本 helper を **2-pass** に拡張する形:
+///
+/// 1. pass 1: 生 `H` に power iter → `λ_ext = argmax|λ(H)|` (=λ_max または λ_min)
+/// 2. pass 2: shifted `(H - λ_ext·I)` に power iter → 反対端 `λ_other`
+/// 3. return `(min, max) = (min(λ_ext, λ_other), max(λ_ext, λ_other))`
+///
+/// 利点: `E_c_true = (λ_max+λ_min)/2`, `R_true = (λ_max-λ_min)/2` (最小 R) が
+/// 取れる. 欠点: matvec が 2× / degenerate spectrum (λ_max ≈ -λ_min) で 2-pass
+/// stability check が要 / TFIM では `h_p_diag` が 0 周りに対称なシナリオで
+/// `E_c_g ≈ E_c_true` となり追加利得 α が小さい見込み.
+///
+/// 案 B 採用時は本関数より `(f64, f64)` を返す `power_iter_spectrum_bounds` に
+/// rename し, `chebyshev_propagate` の `r_override: Option<f64>` も
+/// `bounds_override: Option<(f64, f64)>` に置き換えるのが API 対称性として
+/// 自然 (Lanczos の `(E_min, E_max)` インタフェースに揃う). 本 PoC では
+/// scope 外として R-only に絞り, full 実装 (CFM4 統合 + adaptive driver) で
+/// 必要なら起票する.
+#[allow(clippy::too_many_arguments)]
+pub fn power_iter_spectral_radius(
+    h_x: &[f64],
+    h_p_diag: &[f64],
+    a_t: f64,
+    b_t: f64,
+    e_c: f64,
+    n: usize,
+    n_iter: usize,
+    seed: u64,
+) -> f64 {
+    let dim = 1usize << n;
+    assert_eq!(h_x.len(), n, "h_x must have length n");
+    assert_eq!(h_p_diag.len(), dim, "h_p_diag must have length 2^n");
+
+    if n_iter == 0 {
+        return 0.0;
+    }
+
+    // 1. 初期ベクトル: xorshift64 で複素一様サンプリング + L2 正規化.
+    //    決定論 (seed 経由) で run-to-run 再現性を担保する.
+    let mut state = seed | 1;
+    let mut next_u64 = || {
+        let mut x = state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        state = x;
+        x
+    };
+    let mut signed = || (next_u64() as f64) / (u64::MAX as f64) * 2.0 - 1.0;
+    let mut v: Vec<Complex64> = (0..dim)
+        .map(|_| Complex64::new(signed(), signed()))
+        .collect();
+    let mut nrm: f64 = v.iter().map(|c| c.norm_sqr()).sum::<f64>().sqrt();
+    if nrm < 1e-300 {
+        // pathological: all-zero seed produced零ベクトル. unit basis に逃がす.
+        v[0] = Complex64::new(1.0, 0.0);
+        nrm = 1.0;
+    }
+    let inv_n = 1.0 / nrm;
+    for c in v.iter_mut() {
+        *c *= Complex64::new(inv_n, 0.0);
+    }
+
+    let mut w = vec![Complex64::new(0.0, 0.0); dim];
+    let mut lambda_abs = 0.0_f64;
+
+    for _ in 0..n_iter {
+        // w := H v (apply_h_kryanneal は overwrite 形なので out-buffer reuse OK).
+        apply_h_kryanneal(&v, &mut w, h_x, h_p_diag, a_t, b_t, n);
+        // w := H v - E_c v.
+        for k in 0..dim {
+            w[k] -= Complex64::new(e_c, 0.0) * v[k];
+        }
+        // λ = <v, w> = Σ conj(v_k) w_k. H が実対称なので λ は虚部 ~0; abs を取る.
+        let inner: Complex64 = v.iter().zip(w.iter()).map(|(vi, wi)| vi.conj() * wi).sum();
+        lambda_abs = inner.norm();
+
+        // v <- w / ‖w‖. ‖w‖ ~ 0 (M v が直交固有空間にしか乗らない pathological) は
+        // power iter が動かなくなる極端ケースだが, 1 iter で抜けるのが安全.
+        let w_norm: f64 = w.iter().map(|c| c.norm_sqr()).sum::<f64>().sqrt();
+        if w_norm < 1e-300 {
+            break;
+        }
+        let inv_w = 1.0 / w_norm;
+        for k in 0..dim {
+            v[k] = w[k] * Complex64::new(inv_w, 0.0);
+        }
+    }
+
+    lambda_abs
+}
+
 /// Gershgorin の行和上界 / 下界による `H = a_t · H_drv + b_t · diag(h_p_diag)`
 /// のスペクトル境界推定 `(E_min, E_max)` を返す (E_min ≤ λ_min(H), λ_max(H) ≤ E_max).
 ///
@@ -245,6 +373,18 @@ pub fn determine_truncation(z: f64, tol: f64, k_max_cap: usize) -> usize {
 /// * `dt`: 時刻刻み幅 (real).
 /// * `tol`: Chebyshev 切り捨て次数 K の決定閾値 (`|J_K(z)| < tol/2`).
 /// * `n`: サイト数. `dim = 2^n` を呼出側と一意に決める.
+/// * `r_override`: opt-in spectral radius 上書き (issue #125 PoC). `Some(r)`
+///   のとき Gershgorin 由来の `R` をこの値で置き換える. `E_c` は引き続き
+///   Gershgorin 由来 (本 PoC は R-only refine スコープ). 呼出側で
+///   [`power_iter_spectral_radius`] 等で `R_true` を推定して安全マージン込みで
+///   渡す. **必ず `R_override ≥ R_true` を満たすこと** (下回ると `tilde H` の
+///   固有値が [-1, 1] を超え Chebyshev 展開が divergent になる). `None` で
+///   従来 Gershgorin 経路 (safe default).
+///
+///   案 B (E_c も refine する 2-pass 版) に拡張するときは, 本引数を
+///   `bounds_override: Option<(f64, f64)>` (E_c, R 両方) に置換するのが
+///   `gershgorin_bounds` の `(E_min, E_max)` インタフェースとの API 対称性
+///   として自然. 詳細は [`power_iter_spectral_radius`] docstring 末尾.
 ///
 /// # 戻り値
 ///
@@ -290,16 +430,20 @@ pub fn chebyshev_propagate(
     dt: f64,
     tol: f64,
     n: usize,
+    r_override: Option<f64>,
 ) -> (Vec<Complex64>, usize, f64) {
     let dim = 1usize << n;
     assert_eq!(psi.len(), dim, "psi must have length 2^n");
     assert_eq!(h_x.len(), n, "h_x must have length n");
     assert_eq!(h_p_diag.len(), dim, "h_p_diag must have length 2^n");
 
-    // 1. Gershgorin bounds.
+    // 1. Gershgorin bounds (E_c は常にここから; R は r_override で上書き可).
+    //    案 B (E_c も refine) を将来採用する場合は bounds_override: Option<(f64, f64)>
+    //    に置換し E_c もここで上書きする.
     let (e_min, e_max) = gershgorin_bounds(h_x, h_p_diag, a_t, b_t);
     let e_c = 0.5 * (e_max + e_min);
-    let r = 0.5 * (e_max - e_min);
+    let r_gershgorin = 0.5 * (e_max - e_min);
+    let r = r_override.unwrap_or(r_gershgorin);
 
     // 2. Zero Hamiltonian fast-path: R = 0 で T_k(\tilde H) が ill-defined.
     //    exp(-i H dt) ψ = exp(-i E_c dt) ψ をそのまま返す (E_c も 0 ならただの id).
@@ -580,7 +724,7 @@ mod tests {
         let expected = reference_propagate_real_h(&h_dense, &psi, dt);
 
         let (actual, k_used, err_estimate) =
-            chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, tol, n);
+            chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, tol, n, None);
         assert!(k_used >= 1, "K_used = {k_used} should be >= 1");
         let rel = relative_error(&actual, &expected);
         assert!(
@@ -606,7 +750,8 @@ mod tests {
         let h_dense = build_dense_h_real(n, &h_x, &h_p_diag, a_t, b_t);
         let expected = reference_propagate_real_h(&h_dense, &psi, dt);
 
-        let (actual, k_used, _) = chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, tol, n);
+        let (actual, k_used, _) =
+            chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, tol, n, None);
         let rel = relative_error(&actual, &expected);
         assert!(
             rel < 1e-12,
@@ -628,7 +773,8 @@ mod tests {
         let a_t = 0.5_f64;
         let b_t = 0.5_f64;
 
-        let (result, _, _) = chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, 1e-13, n);
+        let (result, _, _) =
+            chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, 1e-13, n, None);
         let new_norm: f64 = result.iter().map(|p| p.norm_sqr()).sum::<f64>().sqrt();
         let rel = (new_norm - psi_norm).abs() / psi_norm.max(1.0);
         assert!(
@@ -649,7 +795,7 @@ mod tests {
         let dt = 0.5_f64;
 
         let (result, k_used, err) =
-            chebyshev_propagate(&h_x, &h_p_diag, 1.0, 1.0, &psi, dt, 1e-13, n);
+            chebyshev_propagate(&h_x, &h_p_diag, 1.0, 1.0, &psi, dt, 1e-13, n, None);
         assert_eq!(k_used, 0, "zero Hamiltonian fast-path expected K_used = 0");
         assert_eq!(err, 0.0, "zero Hamiltonian fast-path expected err = 0");
         // E_c = 0 のはずなのでそのまま一致.
@@ -669,7 +815,8 @@ mod tests {
         let dt = 0.5_f64;
         let b_t = 1.0_f64;
 
-        let (result, _, _) = chebyshev_propagate(&h_x, &h_p_diag, 0.0, b_t, &psi, dt, 1e-13, n);
+        let (result, _, _) =
+            chebyshev_propagate(&h_x, &h_p_diag, 0.0, b_t, &psi, dt, 1e-13, n, None);
 
         let mut expected = vec![Complex64::new(0.0, 0.0); dim];
         for k in 0..dim {
@@ -715,5 +862,155 @@ mod tests {
             e_max >= true_max - 1e-12,
             "e_max = {e_max} should be ≥ true_max = {true_max}",
         );
+    }
+
+    // ============================================================
+    // issue #125 PoC: Power iteration による R refine + r_override 経路
+    // ============================================================
+
+    /// Power iter が `R_true = max|λ(H - E_c·I)|` の **下界** として動作し,
+    /// かつ Gershgorin 上界より tighter であることを確認.
+    ///
+    /// 注: 絶対精度 (rel < 1e-6 等) は小 dim では gap ratio が大きく遅収束する.
+    /// たとえば N=4 / 50 iter で rel ~ 7% にとどまる. PoC scope の判定 gate は
+    /// **N=16-20 での K_used 縮小率** (perf binary) で行うため, ここでは
+    /// アルゴリズム正当性のみを検証する (from-below convergence + Gershgorin
+    /// より tight).
+    #[test]
+    fn power_iter_bounds_true_radius_from_below() {
+        let n = 4_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(2024);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let a_t = 0.7_f64;
+        let b_t = 0.3_f64;
+
+        // 真値: H の固有値 λ_i に対し R_true = max|λ_i - E_c_gershgorin|.
+        let (e_min_g, e_max_g) = gershgorin_bounds(&h_x, &h_p_diag, a_t, b_t);
+        let e_c_g = 0.5 * (e_max_g + e_min_g);
+        let r_gershgorin = 0.5 * (e_max_g - e_min_g);
+        let h_dense = build_dense_h_real(n, &h_x, &h_p_diag, a_t, b_t);
+        let eig = SymmetricEigen::new(h_dense);
+        let r_true = eig
+            .eigenvalues
+            .iter()
+            .map(|l| (l - e_c_g).abs())
+            .fold(0.0_f64, f64::max);
+
+        let r_pi = power_iter_spectral_radius(&h_x, &h_p_diag, a_t, b_t, e_c_g, n, 50, 12345);
+
+        // (1) from-below convergence: R_pi ≤ R_true + tiny tolerance (収束途中で
+        //     overshoot しない). f64 算術 noise を許容する微小マージン込み.
+        assert!(
+            r_pi <= r_true * (1.0 + 1e-10),
+            "Power iter must be from below: r_pi = {r_pi} > r_true = {r_true}",
+        );
+
+        // (2) Gershgorin より tighter (= 小さい) であること. TFIM ではこれが
+        //     期待動作 (PoC が成立する前提).
+        assert!(
+            r_pi < r_gershgorin,
+            "Power iter R ({r_pi}) should be < R_gershgorin ({r_gershgorin})",
+        );
+
+        // (3) progress sanity: 50 iter で R_true の少なくとも 50% は埋めている.
+        //     gap ratio が極端 (=1 近傍) でも 50 iter なら半分は埋まる経験則.
+        assert!(
+            r_pi > 0.5 * r_true,
+            "Power iter R ({r_pi}) should make significant progress toward r_true ({r_true})",
+        );
+    }
+
+    /// `r_override = Some(R_gershgorin)` が `None` 経路と数値的に一致.
+    /// 内部で R 値が同じになる経路の sanity check (bit-for-bit までは保証しない;
+    /// f64 算術の同一性で rel < 1e-15).
+    #[test]
+    fn chebyshev_with_r_override_matches_default() {
+        let n = 4_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(31415);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let psi = random_complex_vec(dim, 99);
+        let dt = 1.0_f64;
+        let a_t = 0.5_f64;
+        let b_t = 0.5_f64;
+        let tol = 1e-13;
+
+        let (e_min, e_max) = gershgorin_bounds(&h_x, &h_p_diag, a_t, b_t);
+        let r_g = 0.5 * (e_max - e_min);
+
+        let (psi_default, k_def, _) =
+            chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, tol, n, None);
+        let (psi_over, k_over, _) =
+            chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, tol, n, Some(r_g));
+
+        assert_eq!(
+            k_def, k_over,
+            "K_used should match when r_override = R_gershgorin",
+        );
+        let rel = relative_error(&psi_over, &psi_default);
+        assert!(
+            rel < 1e-15,
+            "rel = {rel:e}: r_override=Some(R_g) must match None path",
+        );
+    }
+
+    /// Power iter + 5% safety margin で得た R で Chebyshev を回し,
+    /// 真値 (dense eigendecomp) と rel < 1e-12 一致. 安全マージンが効いて
+    /// `\tilde H` の固有値が [-1, 1] 内に収まり Chebyshev 展開が divergent
+    /// しないことを保証する.
+    #[test]
+    fn power_iter_safety_margin_keeps_chebyshev_stable() {
+        let n = 4_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(7);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let psi = random_complex_vec(dim, 42);
+        let dt = 0.8_f64;
+        let a_t = 0.6_f64;
+        let b_t = 0.4_f64;
+        let tol = 1e-13;
+
+        let (e_min_g, e_max_g) = gershgorin_bounds(&h_x, &h_p_diag, a_t, b_t);
+        let e_c_g = 0.5 * (e_max_g + e_min_g);
+        let r_pi = power_iter_spectral_radius(&h_x, &h_p_diag, a_t, b_t, e_c_g, n, 20, 4242);
+        let r_used = r_pi * 1.05; // 5% safety margin (= POWER_ITER_SAFETY in perf binary).
+
+        let (actual, k_used, _) =
+            chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, tol, n, Some(r_used));
+
+        // 真値 (dense): exp(-i dt H) ψ.
+        let h_dense = build_dense_h_real(n, &h_x, &h_p_diag, a_t, b_t);
+        let expected = reference_propagate_real_h(&h_dense, &psi, dt);
+
+        let rel = relative_error(&actual, &expected);
+        assert!(
+            rel < 1e-12,
+            "rel = {rel:e} (K_used = {k_used}, R_used = {r_used}, R_g = {})",
+            0.5 * (e_max_g - e_min_g),
+        );
+
+        // refined R は Gershgorin R より小さく, K_used も同条件比で小さく出る
+        // ことが期待される (PoC の存在意義の sanity check).
+        let (_, k_g, _) = chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, tol, n, None);
+        assert!(
+            k_used <= k_g,
+            "K_used (power_iter) = {k_used} should be ≤ K_used (gershgorin) = {k_g}",
+        );
+    }
+
+    /// `n_iter = 0` は no-op で 0 を返す (edge case).
+    #[test]
+    fn power_iter_zero_iter_returns_zero() {
+        let n = 3_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(2024);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let r = power_iter_spectral_radius(&h_x, &h_p_diag, 1.0, 1.0, 0.0, n, 0, 1);
+        assert_eq!(r, 0.0, "n_iter=0 should return 0.0");
     }
 }

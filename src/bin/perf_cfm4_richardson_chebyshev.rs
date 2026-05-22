@@ -230,15 +230,34 @@ fn main() {
         Mode::SingleChebyshev => {
             // warmup.
             for _ in 0..3 {
-                let _ = chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, chebyshev_tol, n);
+                let _ = chebyshev_propagate(
+                    &h_x,
+                    &h_p_diag,
+                    a_t,
+                    b_t,
+                    &psi,
+                    dt,
+                    chebyshev_tol,
+                    n,
+                    None,
+                );
             }
 
             let t0 = Instant::now();
             let mut k_used_total: usize = 0;
             let mut sink_acc = 0.0_f64;
             for _ in 0..n_steps {
-                let (psi_new, k_used, _err_estimate) =
-                    chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, chebyshev_tol, n);
+                let (psi_new, k_used, _err_estimate) = chebyshev_propagate(
+                    &h_x,
+                    &h_p_diag,
+                    a_t,
+                    b_t,
+                    &psi,
+                    dt,
+                    chebyshev_tol,
+                    n,
+                    None,
+                );
                 k_used_total += k_used;
                 sink_acc += psi_new.iter().take(8).map(|c| c.re + c.im).sum::<f64>();
             }

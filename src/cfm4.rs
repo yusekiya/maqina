@@ -997,8 +997,19 @@ pub(crate) fn cfm4_step_chebyshev(
     // stage 1: B_1 = a_high · H_1 + a_low · H_2 を (c_drv_1, c_diag_1) に畳み込む.
     let c_drv_1 = a_high * a_s1 + a_low * a_s2;
     let c_diag_1 = a_high * b_s1 + a_low * b_s2;
-    let (psi_mid, k_used_stage1, err_stage1) =
-        chebyshev_propagate(h_x, h_p_diag, c_drv_1, c_diag_1, psi, dt, chebyshev_tol, n);
+    // r_override = None: CFM4 stage 統合経路は issue #125 PoC スコープ外
+    // (Power iter refine は時間独立 H frozen schedule の perf binary 計測のみ).
+    let (psi_mid, k_used_stage1, err_stage1) = chebyshev_propagate(
+        h_x,
+        h_p_diag,
+        c_drv_1,
+        c_diag_1,
+        psi,
+        dt,
+        chebyshev_tol,
+        n,
+        None,
+    );
 
     // stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に畳み込む.
     let c_drv_2 = a_low * a_s1 + a_high * a_s2;
@@ -1012,6 +1023,7 @@ pub(crate) fn cfm4_step_chebyshev(
         dt,
         chebyshev_tol,
         n,
+        None,
     );
 
     Ok((

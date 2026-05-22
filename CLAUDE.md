@@ -352,7 +352,7 @@ wall 比率, Lanczos vs Chebyshev のアルゴリズム軸 等のどれか) を 
 | `src/bin/perf_trotter_step.rs` | `trotter_step` (Strang 2 次 Trotter 1 step) | #82 で C3 multi-qubit gate fusion + phase_p rayon 化の真の compute speedup 検証 |
 | `src/bin/perf_apply_single_mode_axis_i.rs` | `apply_single_mode_axis_i` (Trotter per-axis 2×2 ユニタリ) | #90 で #71 fixup `578d050` (動的 chunk_size) 棄却を perf binary で再評価し dynamic を採用 (詳細は `docs/design/05-1-matvec.md` §5.1.4 末尾) |
 | `src/bin/perf_cfm4_richardson.rs` | `cfm4_step_with_richardson_estimate` (Richardson 1 step = 6 Lanczos call) | #113 で Phase 9+ scoping のため component 別 wall % を実測 breakdown. `full` / `single_lanczos` / `matvec_only` / `gram_schmidt` の 4 mode を持ち, "step → Lanczos call → matvec / GS" の各層を同一 PMU セットで比較する |
-| `src/bin/perf_chebyshev.rs` | `chebyshev_propagate` (時間独立 H, Chebyshev 3 項漸化) | #120 Phase A POC で Lanczos の V matrix cache stall を **アルゴリズム軸で bypass** する Chebyshev 経路の per-call wall を Linux で実測. `perf_cfm4_richardson 18 100 single_lanczos` (Lanczos baseline ~129 ms / IPC=0.78) と直接比較し, 判定 gate (≤ 50 ms で Phase B 進行 / 50-100 ms で設計再検討 / > 100 ms で中止) を判断する. 時間独立 frozen schedule `a_t = b_t = 0.5` で Lanczos baseline と input pattern を完全一致させる |
+| `src/bin/perf_chebyshev.rs` | `chebyshev_propagate` (時間独立 H, Chebyshev 3 項漸化) | #120 Phase A POC で Lanczos の V matrix cache stall を **アルゴリズム軸で bypass** する Chebyshev 経路の per-call wall を Linux で実測. `perf_cfm4_richardson 18 100 single_lanczos` (Lanczos baseline ~129 ms / IPC=0.78) と直接比較し, 判定 gate (≤ 50 ms で Phase B 進行 / 50-100 ms で設計再検討 / > 100 ms で中止) を判断する. 時間独立 frozen schedule `a_t = b_t = 0.5` で Lanczos baseline と input pattern を完全一致させる. #125 PoC で 4 番目引数 `r_mode` を追加 (`gershgorin` default / `power_iter:<N>`) し, Power iteration で R を refine した場合の K_used 縮小と per-call wall 効果を計測する |
 | `src/bin/perf_cfm4_richardson_chebyshev.rs` | `cfm4_step_chebyshev_with_richardson_estimate` (Chebyshev variant Richardson 1 step) | #122 Phase B で Chebyshev を CFM4 Magnus + step-doubling Richardson に統合した後の per-step wall + K_used を Linux で実測 breakdown. 3 mode (`full` / `single_chebyshev` / `matvec_only`) を持ち, 既存 `perf_cfm4_richardson` の同名 mode (`full` / `single_lanczos` / `matvec_only`) と直接比較することで Chebyshev vs Lanczos の compute 効果差を IPC / L2 fill latency / Stalled cycles まで掘れる. `gram_schmidt` mode は Chebyshev では原理的に存在しない (3 項漸化が直交保証, re-orthogonalization 不要) |
 
 いずれも Python の `bench_*.py` が `*_py` (allocate-and-return) 経路の
@@ -373,7 +373,8 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_cfm4_richardso
 対象関数は `pub fn` に上げ, `crate::bench_api` (`src/lib.rs`) で再 export
 している (`apply_h_kryanneal`, `trotter_step`, `apply_single_mode_axis_i`,
 `lanczos_propagate`, `cfm4_step_with_richardson_estimate`,
-`chebyshev_propagate`; あと `gram_schmidt` mode が直接呼ぶ BLAS-1 primitive
+`chebyshev_propagate`, `gershgorin_bounds`, `power_iter_spectral_radius`;
+あと `gram_schmidt` mode が直接呼ぶ BLAS-1 primitive
 として `dot_conj` / `axpy`).
 Python 側 API (`_rust.apply_h_kryanneal_py` / `_rust.trotter_step_py` /
 `_rust.apply_single_mode_axis_i_inplace_py` /
@@ -433,6 +434,7 @@ for mode in full single_lanczos matvec_only gram_schmidt; do
 done
 
 # chebyshev_propagate (issue #120 POC). 第 3 引数で tol 切替 (default 1e-10).
+# 第 4 引数で R 推定法切替: `gershgorin` (default) / `power_iter:<N_iter>` (#125 PoC).
 # perf_cfm4_richardson 18 100 single_lanczos と直接比較する想定なので n_iters=100
 # default. K_used 平均 (stderr) で Chebyshev 切り捨て次数の実測値も同時に取れる.
 RAYON_NUM_THREADS=64 perf stat \
@@ -440,7 +442,24 @@ RAYON_NUM_THREADS=64 perf stat \
     -e stalled-cycles-backend,stalled-cycles-frontend \
     -e l2_request_g1.all_no_prefetch,l2_cache_req_stat.ic_dc_miss_in_l2 \
     -e l2_latency.l2_cycles_waiting_on_fills \
-    -- ./target/release/perf_chebyshev 18 100
+    -- ./target/release/perf_chebyshev 18 100 1e-10 gershgorin
+
+# #125 PoC: Power iter で spectral radius R を refine し K_used 縮小を実測.
+# power_iter:N の N は Power iteration 回数 (5-10 推奨). 計測 loop 外で
+# 1 回だけ実行され, R_used = R_power_iter · 1.05 (5% safety) を chebyshev_propagate
+# の r_override に渡す. stderr に R_gershgorin / R_power_iter / R_used /
+# power_iter wall (amortized) が出る. 判定 gate は K_used 縮小率 (≥30%, 10-30%,
+# <10% の 3 段). E_c も refine する案 B (2-pass power iter / bounds_override
+# API) は本 PoC スコープ外で, src/chebyshev.rs::power_iter_spectral_radius
+# docstring に future work として残す.
+for niter in 5 10 20; do
+    RAYON_NUM_THREADS=64 perf stat \
+        -e cycles,instructions,branch-misses \
+        -e stalled-cycles-backend,stalled-cycles-frontend \
+        -e l2_request_g1.all_no_prefetch,l2_cache_req_stat.ic_dc_miss_in_l2 \
+        -e l2_latency.l2_cycles_waiting_on_fills \
+        -- ./target/release/perf_chebyshev 18 100 1e-10 power_iter:$niter
+done
 ```
 
 binary は stderr に wall time / per-iter time / sink (DCE 防止) を出し,
