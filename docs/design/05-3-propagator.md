@@ -212,6 +212,60 @@ bench acceptance (Linux AMD EPYC 7713P, NT=64): per-step wall 10%+ で full
 merge / 5-10% で marginal accept / < 5% で 中止. 詳細は `12-release-plan.md`
 "Phase B follow-up: Chebyshev 3 項漸化 inner loop の SIMD + fusion (#126)".
 
+##### Chebyshev non-matvec inner loop の rayon 並列化 (issue #127, Phase B follow-up)
+
+#126 の SIMD + fusion 完了後の直交最適化。`chebyshev_recurrence_fused` は
+single-thread で走っていたため, #124 perf archive で **Chebyshev の parallel
+efficiency が 64 thread で 44% に留まる** (Lanczos の 27% より良いが理想 100%
+には程遠い) ことが判明した。`apply_h_kryanneal` は #62 で rayon 並列化済だが,
+Chebyshev 固有の non-matvec hot loop (recurrence scaling + accumulator) が
+serial bottleneck になっている。
+
+これを `rayon::par_chunks_mut` で並列化する 2 段構造に拡張する:
+
+```text
+外側: scratch.par_chunks_mut(chunk_size).zip(psi_acc.par_chunks_mut(chunk_size))
+内側: 各 chunk 内で simd_kernels::chebyshev_recurrence_fused (SIMD ON) または
+      chebyshev_recurrence_fused_scalar (SIMD OFF) を呼ぶ
+```
+
+chunk_size は `matvec.rs::apply_h_kryanneal_rayon` と同じ式
+`(dim / (nth * 4)).clamp(RAYON_CHUNK_MIN_CHEB, RAYON_CHUNK_MAX_CHEB)` で動的
+決定 (定数は matvec 側と同値 `1 << 6` / `1 << 14` を chebyshev module 内に
+localize)。SIMD kernel の偶数長前提を満たすため chunk_size を 2 倍数に丸める
+(min/max 共に 2 の倍数なので invariant 不変)。
+
+実装:
+
+- `src/chebyshev.rs::chebyshev_recurrence_fused_rayon`
+  (`#[cfg(feature = "rayon")]`).
+- `chebyshev_recurrence_fused` dispatch wrapper を 3 段に拡張:
+  1. rayon ON + `dim >= MIN_RAYON_DIM_CHEB` → rayon path (内側 SIMD or scalar).
+  2. simd ON + `n >= 2 && n % 2 == 0` → single-thread SIMD kernel.
+  3. それ以外 → scalar fused (`--no-default-features` / 退化ケース).
+- 4 slice の borrow: `scratch` (RW), `psi_acc` (RW) は呼出側 disjoint な
+  `Vec<Complex64>` 由来。 `par_chunks_mut` を 2 本独立に取って `zip` し,
+  `enumerate` で base offset から `phi_curr` / `phi_prev` (R) を共有 sub-slice
+  で切り出す。
+
+dispatch 閾値 `MIN_RAYON_DIM_CHEB` 初期値は `matvec.rs::MIN_RAYON_DIM = 1 << 17`
+と揃える。Chebyshev non-matvec hot loop は matvec より per-element cost が
+小さい (memory bound) ため本来はより低い閾値でも改善が出る可能性があるが,
+PoC 段階では保守寄りで始め, Linux 本番 bench (N ∈ {14, 16, 18, 20} sweep)
+の結果次第で tuning する方針。
+
+数値同等性: rayon path と single-thread SIMD/scalar fused の random fuzz
+10-iter テスト (`chebyshev_recurrence_fused_rayon_matches_serial`,
+`rel < 1e-13`). 各 chunk が独立に同じ kernel を呼ぶため理論上は bit-identical,
+chunk 境界が `scratch[k]` / `psi_acc[k]` の単一値生成位置に影響しない設計。
+
+bench acceptance (Linux AMD EPYC 7713P, perf binary 計測): N=18 で per-step
+wall 10%+ 改善 + N=12 で 5% 未満劣化 → full merge / N=18 改善 5-10% + N=12
+劣化 5-15% → 閾値 tuning 継続 / N=18 改善 5% 未満 → 中止 + archive。dim 小
+劣化が大きい場合は `MIN_RAYON_DIM_CHEB` を上げる方向で safety net を張る。
+詳細は `12-release-plan.md` "Phase B follow-up: Chebyshev non-matvec inner
+loop の rayon 並列化 (#127)".
+
 #### Trotter (Strang 2 次 / Suzuki 4 次) — `trotter_step`
 
 横磁場 driver の `[X_i, X_j] = 0` を活用し、`exp(-i dt H_drv)` を

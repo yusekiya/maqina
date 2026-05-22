@@ -669,6 +669,47 @@ accumulate scalar) を発生させていたが, walk 2 / walk 3 を **1 dim-walk
   `docs/design/12-release-plan.md` "Phase B follow-up: Chebyshev 3 項漸化 inner
   loop の SIMD + fusion (#126)".
 
+## Phase B follow-up (issue #127): Chebyshev non-matvec inner loop の rayon 並列化
+
+#126 の SIMD + fusion 完了後の直交最適化. #124 perf archive で **Chebyshev の
+parallel efficiency が 64 thread で 44%** (Lanczos 27% より良いが理想 100% には
+程遠い) と判明. `apply_h_kryanneal` は #62 で rayon 並列化済だが,
+`chebyshev_recurrence_fused` (k_ord ≥ 2 hot loop) が **scalar single-thread** で
+走っており, ここがスケーリング bottleneck の一部.
+
+- 実装: `src/chebyshev.rs::chebyshev_recurrence_fused_rayon` (rayon path).
+  `scratch` / `psi_acc` の 2 RW slice を `par_chunks_mut` 2 本独立に取って
+  `zip()`, `enumerate()` で base offset から `phi_curr` / `phi_prev` (R) を共有
+  sub-slice 切り出し. chunk 内で `simd_kernels::chebyshev_recurrence_fused`
+  (SIMD ON) または `chebyshev_recurrence_fused_scalar` (SIMD OFF) を呼ぶ 2 段構造.
+- `chebyshev_recurrence_fused` dispatch wrapper を 3 段に拡張: rayon ON +
+  `dim >= MIN_RAYON_DIM_CHEB` → rayon path / simd ON + 偶数長 → single-thread
+  SIMD / それ以外 → scalar fused.
+- chunk_size は matvec.rs の `apply_h_kryanneal_rayon` と同じ式
+  `(dim / (nth * 4)).clamp(RAYON_CHUNK_MIN_CHEB, RAYON_CHUNK_MAX_CHEB)`. SIMD
+  kernel の偶数長前提を満たすため 2 倍数に丸める (min/max 共 2 倍数なので
+  invariant 不変).
+- dispatch 閾値 `MIN_RAYON_DIM_CHEB` 初期値は `matvec.rs::MIN_RAYON_DIM = 1 << 17`
+  と揃える. Chebyshev non-matvec hot loop は matvec より per-element cost が
+  小さい (memory bound) ため本来はより低い閾値でも改善が出る可能性があるが,
+  PoC 段階では保守寄りで始め, 本番 bench (N ∈ {14, 16, 18, 20} sweep) で tuning.
+- `cfm4_step_chebyshev_*` 経由でも自動で乗る (同じ `chebyshev_propagate` を
+  呼ぶため).
+- 数値同等性: rayon path と single-thread SIMD/scalar fused の random fuzz
+  10-iter テスト (`chebyshev_recurrence_fused_rayon_matches_serial`,
+  `rel < 1e-13`). N=17 end-to-end の rayon path 経由 unitarity smoke
+  (`chebyshev_propagate_rayon_path_smoke`).
+- bench acceptance (Linux 本番サーバー, perf binary 計測; **本番計算環境とは
+  別マシンで CPU 性能は本番より低い**): N=18 で per-step wall 10%+ 改善 + N=12
+  (or N=14) で 5% 未満劣化 → full merge / N=18 改善 5-10% + dim 小劣化 5-15% →
+  `MIN_RAYON_DIM_CHEB` を上げる方向で閾値 tuning 継続 / N=18 改善 5% 未満 →
+  中止 + archive. 計測は `perf_chebyshev N 100` と
+  `perf_cfm4_richardson_chebyshev N 100 full` を N ∈ {14, 16, 18, 20} ×
+  RAYON_NUM_THREADS ∈ {1, 8, 16, 32, 64} で sweep.
+- 詳細: `docs/design/05-3-propagator.md` "Chebyshev non-matvec inner loop の
+  rayon 並列化" / `docs/design/12-release-plan.md` "Phase B follow-up:
+  Chebyshev non-matvec inner loop の rayon 並列化 (#127)".
+
 ## 設計判断の出典 (cv_ising 流用箇所)
 
 - CFM4:2 係数: `cv_ising/rust/src/cfm4.rs` の `a_high = 1/4 + √3/6` 等

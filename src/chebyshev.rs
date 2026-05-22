@@ -74,7 +74,38 @@
 
 use num_complex::Complex64;
 
+#[cfg(feature = "rayon")]
+use rayon::prelude::*;
+
 use crate::matvec::apply_h_kryanneal;
+
+/// rayon dispatch を起動する **最小 dim 閾値** (issue #127 PoC).
+///
+/// `chebyshev_recurrence_fused` (k ≥ 2 hot loop) を `par_chunks_mut` で並列化
+/// する経路を起動するかどうかの境界. これ未満では single-thread (SIMD or
+/// scalar) fallback で動く. 小 dim で fork/join overhead が並列化 gain を
+/// 超える領域を避けるための safety net.
+///
+/// 初期値は `src/matvec.rs::MIN_RAYON_DIM` (= 1 << 17) と揃える. Chebyshev
+/// non-matvec hot loop は matvec より per-element cost が小さい (memory bound)
+/// ため, 本来はより低い閾値でも改善が出る可能性があるが, PoC 段階では保守
+/// 寄りで始め, Linux 本番 bench (N ∈ {14, 16, 18, 20} sweep) の結果次第で
+/// tuning する方針 (issue #127 判定 gate: N=18 で per-step wall 10%+ 改善 +
+/// N=12 で 5% 未満劣化 → full merge).
+///
+/// const なので tuning には release rebuild が必要.
+#[cfg(feature = "rayon")]
+const MIN_RAYON_DIM_CHEB: usize = 1 << 17;
+
+/// chebyshev rayon chunk の **最小** 要素数. closure / scheduling overhead を
+/// 償却するため 64 要素以上を保証する. matvec の `RAYON_CHUNK_MIN` と同値.
+#[cfg(feature = "rayon")]
+const RAYON_CHUNK_MIN_CHEB: usize = 1 << 6;
+
+/// chebyshev rayon chunk の **最大** 要素数. L2 fit を狙う上限. matvec の
+/// `RAYON_CHUNK_MAX` と同値.
+#[cfg(feature = "rayon")]
+const RAYON_CHUNK_MAX_CHEB: usize = 1 << 14;
 
 // ============================================================================
 // SIMD + fusion kernel (issue #126 PoC)
@@ -276,11 +307,88 @@ mod simd_kernels {
     }
 }
 
+/// `chebyshev_recurrence_fused` の **rayon 並列実装** (issue #127 PoC).
+///
+/// `scratch` / `psi_acc` を `par_chunks_mut(chunk_size)` で並列分割し, 各
+/// chunk 内で既存 SIMD (or scalar) fused kernel を呼ぶ 2 段構造. matvec.rs の
+/// `apply_h_kryanneal_rayon` と同じ chunking 戦略 (`(dim / (nth * 4)).clamp(
+/// MIN, MAX)`) を踏襲する.
+///
+/// # chunk_size の align
+///
+/// SIMD kernel は `n >= 2 && n % 2 == 0` (2 Complex64 = 4 f64 = 1 f64x4 単位)
+/// を要求する. chunk_size を 2 の倍数に揃えれば
+///
+///   * 通常 chunk: `chunk_size` (= 偶数) → OK
+///   * 末尾 chunk: `dim - (n_chunks - 1) · chunk_size`. `dim = 2^n` は常に
+///     偶数, `chunk_size` も偶数なので末尾 chunk_len も偶数.
+///
+/// となり SIMD 前提が満たされる. `RAYON_CHUNK_MIN_CHEB` (=64) と
+/// `RAYON_CHUNK_MAX_CHEB` (=16384) は共に偶数なので, 偶数化丸めは min/max
+/// invariant を破らない.
+///
+/// # 4 slice の borrow
+///
+/// `scratch` (RW) と `psi_acc` (RW) は呼出側で disjoint な `Vec<Complex64>`
+/// 由来. `par_chunks_mut` を 2 本独立に取って `.zip()` し, `enumerate()` で
+/// 取った `base` から `phi_curr` / `phi_prev` (R) を共有 sub-slice として
+/// 切り出す. mut / immut borrow が rayon の closure 内で disjoint に閉じる
+/// ため aliasing なし.
+#[cfg(feature = "rayon")]
+fn chebyshev_recurrence_fused_rayon(
+    scratch: &mut [Complex64],
+    phi_curr: &[Complex64],
+    phi_prev: &[Complex64],
+    psi_acc: &mut [Complex64],
+    e_c: f64,
+    inv_r: f64,
+    c_k: Complex64,
+) {
+    let dim = scratch.len();
+    debug_assert_eq!(phi_curr.len(), dim);
+    debug_assert_eq!(phi_prev.len(), dim);
+    debug_assert_eq!(psi_acc.len(), dim);
+
+    let nth = rayon::current_num_threads().max(1);
+    let mut chunk_size = (dim / (nth * 4)).clamp(RAYON_CHUNK_MIN_CHEB, RAYON_CHUNK_MAX_CHEB);
+    // SIMD kernel の偶数長前提を満たすため 2 倍数に揃える.
+    chunk_size -= chunk_size % 2;
+
+    scratch
+        .par_chunks_mut(chunk_size)
+        .zip(psi_acc.par_chunks_mut(chunk_size))
+        .enumerate()
+        .for_each(|(idx, (s_chunk, pa_chunk))| {
+            let base = idx * chunk_size;
+            let chunk_len = s_chunk.len();
+            let pc_chunk = &phi_curr[base..base + chunk_len];
+            let pp_chunk = &phi_prev[base..base + chunk_len];
+
+            #[cfg(feature = "simd")]
+            {
+                if chunk_len >= 2 && chunk_len.is_multiple_of(2) {
+                    simd_kernels::chebyshev_recurrence_fused(
+                        s_chunk, pc_chunk, pp_chunk, pa_chunk, e_c, inv_r, c_k,
+                    );
+                    return;
+                }
+            }
+            // SIMD OFF, または退化ケース (実用上発生しないが防御的) の fallback.
+            chebyshev_recurrence_fused_scalar(
+                s_chunk, pc_chunk, pp_chunk, pa_chunk, e_c, inv_r, c_k,
+            );
+        });
+}
+
 /// Chebyshev 3 項漸化 inner-loop の fused 更新を dispatch する wrapper.
 ///
-/// `feature = "simd"` ON では [`simd_kernels::chebyshev_recurrence_fused`] に,
-/// OFF または退化ケース (`n < 2` / 奇数長; 実用上発生しないが防御的) では
-/// [`chebyshev_recurrence_fused_scalar`] にフォールバックする.
+/// 3 段 dispatch (issue #127 PoC で rayon 段を追加):
+/// 1. `feature = "rayon"` ON かつ `dim >= MIN_RAYON_DIM_CHEB` →
+///    [`chebyshev_recurrence_fused_rayon`] (内側で SIMD or scalar fused kernel).
+/// 2. `feature = "simd"` ON かつ `n >= 2 && n % 2 == 0` →
+///    [`simd_kernels::chebyshev_recurrence_fused`] (single-thread SIMD).
+/// 3. それ以外 (`--no-default-features`, 退化ケース) →
+///    [`chebyshev_recurrence_fused_scalar`].
 #[inline]
 fn chebyshev_recurrence_fused(
     scratch: &mut [Complex64],
@@ -291,6 +399,13 @@ fn chebyshev_recurrence_fused(
     inv_r: f64,
     c_k: Complex64,
 ) {
+    #[cfg(feature = "rayon")]
+    {
+        if scratch.len() >= MIN_RAYON_DIM_CHEB {
+            chebyshev_recurrence_fused_rayon(scratch, phi_curr, phi_prev, psi_acc, e_c, inv_r, c_k);
+            return;
+        }
+    }
     #[cfg(feature = "simd")]
     {
         let n = scratch.len();
@@ -1024,6 +1139,111 @@ mod tests {
                 "iter {iter}: psi_acc rel = {rel_p:e} (n={n}, e_c={e_c}, inv_r={inv_r}, c_k={c_k})"
             );
         }
+    }
+
+    /// rayon path (`chebyshev_recurrence_fused_rayon`) と single-thread SIMD
+    /// kernel が `rel < 1e-13` で一致する (issue #127 PoC).
+    ///
+    /// rayon path に確実に乗せるため `dim = MIN_RAYON_DIM_CHEB = 1 << 17` で
+    /// 走らせる. 1 vector あたり 2 MB Complex64, 4 vector + clones で per-iter
+    /// 16-32 MB なので iter 数は控えめ (10).
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn chebyshev_recurrence_fused_rayon_matches_serial() {
+        let mut rng = Xor64::new(0xBEEF_CAFE_DEAD_FACE);
+        let dim = MIN_RAYON_DIM_CHEB;
+        for iter in 0..10 {
+            let scratch_in = random_complex_vec(dim, rng.next_u64());
+            let phi_curr = random_complex_vec(dim, rng.next_u64());
+            let phi_prev = random_complex_vec(dim, rng.next_u64());
+            let psi_acc_in = random_complex_vec(dim, rng.next_u64());
+            let e_c = rng.signed() * 3.0;
+            let inv_r = 0.1 + rng.signed().abs();
+            let c_k = rng.complex_signed();
+
+            // single-thread baseline: SIMD ON では SIMD kernel, OFF では scalar
+            // fused. これが rayon path の "内側 kernel" と完全一致するため,
+            // 演算順序の差は **rayon の chunking 起因のみ** に絞られる.
+            let mut scratch_s = scratch_in.clone();
+            let mut psi_acc_s = psi_acc_in.clone();
+            #[cfg(feature = "simd")]
+            simd_kernels::chebyshev_recurrence_fused(
+                &mut scratch_s,
+                &phi_curr,
+                &phi_prev,
+                &mut psi_acc_s,
+                e_c,
+                inv_r,
+                c_k,
+            );
+            #[cfg(not(feature = "simd"))]
+            chebyshev_recurrence_fused_scalar(
+                &mut scratch_s,
+                &phi_curr,
+                &phi_prev,
+                &mut psi_acc_s,
+                e_c,
+                inv_r,
+                c_k,
+            );
+
+            // rayon path.
+            let mut scratch_r = scratch_in.clone();
+            let mut psi_acc_r = psi_acc_in.clone();
+            chebyshev_recurrence_fused_rayon(
+                &mut scratch_r,
+                &phi_curr,
+                &phi_prev,
+                &mut psi_acc_r,
+                e_c,
+                inv_r,
+                c_k,
+            );
+
+            // 各 chunk が独立に同じ kernel を呼ぶので, 同じ chunk 内では bit-
+            // identical, chunk 境界の有無で順序差は出ない. よって理論上は
+            // bit-identical だが, safety margin で 1e-13 を要求する.
+            let rel_s = relative_error(&scratch_r, &scratch_s);
+            let rel_p = relative_error(&psi_acc_r, &psi_acc_s);
+            assert!(
+                rel_s < 1e-13,
+                "iter {iter}: scratch rel = {rel_s:e} (dim={dim}, e_c={e_c}, inv_r={inv_r}, c_k={c_k})"
+            );
+            assert!(
+                rel_p < 1e-13,
+                "iter {iter}: psi_acc rel = {rel_p:e} (dim={dim}, e_c={e_c}, inv_r={inv_r}, c_k={c_k})"
+            );
+        }
+    }
+
+    /// `chebyshev_propagate` end-to-end で rayon 経路と single-thread 経路が
+    /// `rel < 1e-13` で一致することの間接確認 (issue #127). dim < MIN_RAYON_DIM_CHEB
+    /// では single-thread 経路, dim ≥ MIN_RAYON_DIM_CHEB では rayon 経路に乗る.
+    /// N=17 で 2^17 = 131072 dim を 1 step だけ走らせる (heavy だが回数 1 で 抑制).
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn chebyshev_propagate_rayon_path_smoke() {
+        let n = 17_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xDEAD_BEEF_BABE_CAFE);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let psi = random_complex_vec(dim, 17);
+        let dt = 0.1_f64;
+        let a_t = 0.6_f64;
+        let b_t = 0.4_f64;
+        let tol = 1e-10;
+
+        let (result, k_used, _) = chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, tol, n);
+        assert!(k_used >= 1, "K_used = {k_used} should be >= 1");
+        // unitarity: ‖ψ_new‖ ≈ ‖ψ‖.
+        let psi_norm: f64 = psi.iter().map(|p| p.norm_sqr()).sum::<f64>().sqrt();
+        let new_norm: f64 = result.iter().map(|p| p.norm_sqr()).sum::<f64>().sqrt();
+        let rel = (new_norm - psi_norm).abs() / psi_norm.max(1.0);
+        assert!(
+            rel < 1e-10,
+            "norm rel = {rel:e} (before = {psi_norm}, after = {new_norm}, K_used = {k_used})"
+        );
     }
 
     /// Gershgorin bounds の sanity: 真の eigenvalue 範囲を含む.

@@ -543,5 +543,37 @@ Phase B で Chebyshev `chebyshev_propagate` の per-step wall は N=18 で 116 m
   `perf_cfm4_richardson_chebyshev 18 100 full` (Richardson 統合経路) の 2 軸.
 - 詳細: `docs/design/05-3-propagator.md` "Chebyshev recurrence の SIMD + fusion".
 
+### Phase B follow-up: Chebyshev non-matvec inner loop の rayon 並列化 (#127)
+
+#126 の SIMD + fusion 完了後の直交最適化。#124 perf archive で **Chebyshev の
+parallel efficiency が 64 thread で 44%** (Lanczos 27% より良いが理想 100%
+には程遠い) と判明。`apply_h_kryanneal` は #62 で rayon 並列化済だが,
+`chebyshev_recurrence_fused` (k_ord ≥ 2 hot loop) が **scalar single-thread**
+で走っており, ここがスケーリング bottleneck の一部。
+
+- 期待値: parallel efficiency 44% → 55-65% (1.25-1.5×), per-step wall (N=18)
+  116 ms → 90-105 ms (1.10-1.30×). dim 小では fork/join overhead で不変 or
+  微悪化が出る可能性あり, dispatch 閾値で safety net を張る。
+- 実装: `src/chebyshev.rs::chebyshev_recurrence_fused_rayon` (rayon path) +
+  3 段 dispatch wrapper (rayon → SIMD → scalar). chunk_size は matvec と同じ
+  式で動的決定 (`MIN_RAYON_DIM_CHEB = 1 << 17` 初期値). `scratch` / `psi_acc`
+  の 2 RW slice を `par_chunks_mut` 2 本独立に取って `zip()`, `enumerate()` で
+  base offset から `phi_curr` / `phi_prev` (R) を共有 sub-slice 切り出し。
+  `cfm4_step_chebyshev_*` 経由でも自動で乗る。
+- 数値同等性: rayon path と single-thread SIMD/scalar fused の random fuzz
+  10-iter テスト (`chebyshev_recurrence_fused_rayon_matches_serial`,
+  `rel < 1e-13`). dim ≥ MIN_RAYON_DIM_CHEB で rayon 経路に乗ることを
+  `chebyshev_propagate_rayon_path_smoke` (N=17 end-to-end unitarity) で間接確認。
+- bench acceptance (Linux 本番サーバー, perf binary 計測; **本番計算環境とは
+  別マシンで CPU 性能は本番より低い**点に注意): N=18 で per-step wall 10%+
+  改善 + N=12 (or N=14) で 5% 未満劣化 → full merge / N=18 改善 5-10% + dim 小
+  劣化 5-15% → `MIN_RAYON_DIM_CHEB` を上げる方向で閾値 tuning 継続 / N=18 改善
+  5% 未満 → 中止 + archive (matvec が memory-bound すぎて non-matvec 並列化
+  gain が出ない結論)。計測は `perf_chebyshev N 100` と
+  `perf_cfm4_richardson_chebyshev N 100 full` を N ∈ {14, 16, 18, 20} ×
+  RAYON_NUM_THREADS ∈ {1, 8, 16, 32, 64} で sweep。
+- 詳細: `docs/design/05-3-propagator.md` "Chebyshev non-matvec inner loop の
+  rayon 並列化".
+
 ---
 
