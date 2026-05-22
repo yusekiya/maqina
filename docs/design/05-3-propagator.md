@@ -160,6 +160,58 @@ Lanczos 経路の iter-0 cache (#100) と同型の memoization も Chebyshev で
 可能だが per-stage K_used ~ 20 個の matvec のうち 1 個と削減比小なので Phase B
 スコープ外 (follow-up).
 
+##### Chebyshev recurrence の SIMD + fusion (issue #126, Phase B follow-up)
+
+Phase B 完了直後の直交最適化。`chebyshev_propagate` の k ≥ 2 hot loop は
+旧実装で 3 つの dim-walk を発生させていた:
+
+```
+walk 1: scratch := H · phi_curr                      (matvec, apply_h_kryanneal)
+walk 2: scratch := 2·(scratch - E_c·phi_curr)/R - phi_prev  (scalar)
+walk 3: psi_acc += c_k · scratch                     (scalar)
+```
+
+このうち walk 2 / walk 3 を **1 dim-walk + `wide::f64x4` SIMD** に fuse する:
+
+```rust
+chebyshev_recurrence_fused(
+    &mut scratch, &phi_curr, &phi_prev, &mut psi_acc, e_c, inv_r, c_k,
+)
+// 1 ループ内で:
+//   tilde = (scratch - e_c · phi_curr) · inv_r
+//   scratch <- 2 · tilde - phi_prev
+//   psi_acc += c_k · scratch
+```
+
+各 lane (f64x4 = 2 Complex64) で実 scalar (e_c, inv_r) は splat × 普通の積で
+処理し, complex scalar `c_k` は `single_mode_iN` (issue #71) と同じ
+**broadcast + swap** pattern (`c_k · x = c_re_v · x + c_im_signed_v · swap(x)`)
+で計算する。
+
+実装:
+
+- `src/chebyshev.rs::simd_kernels::chebyshev_recurrence_fused`
+  (`#[cfg(feature = "simd")]`, scalar tail なし: dim = 2^N で常に偶数長保証).
+- `chebyshev_recurrence_fused_scalar` (`--no-default-features` ビルド / 退化
+  ケース用フォールバック).
+- `chebyshev_recurrence_fused` dispatch wrapper (上記 2 経路を SIMD feature と
+  長さで切り分け).
+- `chebyshev_propagate` の k ≥ 2 hot loop だけ差し替え. k = 1 step は one-shot
+  なので scalar のまま (per-call 1 回, overhead 無視可).
+- f64x4 helpers (`as_f64_slice` / `load/store_f64x4_unaligned` / `swap_reim`)
+  は localize duplication で chebyshev module 内に持つ. `matvec.rs::simd_kernels`
+  と同じ実装パターン (visibility 経路を跨いだ変更を避ける).
+
+数値同等性: `simd_kernels::chebyshev_recurrence_fused` ↔ `_scalar` の random
+fuzz 100-iter テスト (`chebyshev_recurrence_fused_simd_matches_scalar`,
+`rel < 1e-13`). FMA 折りたたみと lane 演算順序差で ulp 差は出るが ≤ 1e-13.
+`cfm4_step_chebyshev_*_py` 経由は既存 `test_blas_consistency.py` の Chebyshev
+artifact dump (`rel < 1e-13`) で end-to-end カバー.
+
+bench acceptance (Linux AMD EPYC 7713P, NT=64): per-step wall 10%+ で full
+merge / 5-10% で marginal accept / < 5% で 中止. 詳細は `12-release-plan.md`
+"Phase B follow-up: Chebyshev 3 項漸化 inner loop の SIMD + fusion (#126)".
+
 #### Trotter (Strang 2 次 / Suzuki 4 次) — `trotter_step`
 
 横磁場 driver の `[X_i, X_j] = 0` を活用し、`exp(-i dt H_drv)` を

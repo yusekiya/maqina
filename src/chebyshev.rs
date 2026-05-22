@@ -76,6 +76,234 @@ use num_complex::Complex64;
 
 use crate::matvec::apply_h_kryanneal;
 
+// ============================================================================
+// SIMD + fusion kernel (issue #126 PoC)
+// ============================================================================
+//
+// k ≥ 2 の 3 項漸化 inner loop で `scratch` / `phi_curr` / `phi_prev` /
+// `psi_acc` の 4 vector を **1 dim-walk** で処理するための fused kernel.
+// 旧実装は 2 scalar loop (recurrence scaling + accumulate) で計 3 dim-walk
+// (matvec walk 1 + scalar walk 2) を回していた. 本 kernel は scalar walk 2
+// を fuse して 2 dim-walk に削減 + `wide::f64x4` SIMD で並列化する.
+//
+// dispatch: [`chebyshev_recurrence_fused`] が `feature = "simd"` ON では SIMD
+// 経路, OFF では [`chebyshev_recurrence_fused_scalar`] にフォールバック.
+// `cfm4_step_chebyshev_*` 経由でも自動で乗る (同じ `chebyshev_propagate` を
+// 呼ぶため).
+
+/// Chebyshev 3 項漸化 inner-loop の fused 更新を **scalar** で実行する.
+///
+/// 1 ループ内で:
+/// * `scratch[j] = 2 · (scratch[j] - e_c · phi_curr[j]) · inv_r - phi_prev[j]`
+/// * `psi_acc[j] += c_k · scratch[j]`
+///
+/// を 1 pass で計算する. `feature = "simd"` OFF (`--no-default-features`
+/// ビルド) で呼ばれる基準実装. SIMD 経路との数値同一性検証にも使う.
+#[inline]
+fn chebyshev_recurrence_fused_scalar(
+    scratch: &mut [Complex64],
+    phi_curr: &[Complex64],
+    phi_prev: &[Complex64],
+    psi_acc: &mut [Complex64],
+    e_c: f64,
+    inv_r: f64,
+    c_k: Complex64,
+) {
+    let n = scratch.len();
+    debug_assert_eq!(phi_curr.len(), n);
+    debug_assert_eq!(phi_prev.len(), n);
+    debug_assert_eq!(psi_acc.len(), n);
+    let e_c_c = Complex64::new(e_c, 0.0);
+    let inv_r_c = Complex64::new(inv_r, 0.0);
+    let two_c = Complex64::new(2.0, 0.0);
+    for j in 0..n {
+        let tilde = (scratch[j] - e_c_c * phi_curr[j]) * inv_r_c;
+        let new_s = two_c * tilde - phi_prev[j];
+        scratch[j] = new_s;
+        psi_acc[j] += c_k * new_s;
+    }
+}
+
+/// Chebyshev 3 項漸化 inner-loop の fused 更新を `wide::f64x4` で実行する
+/// SIMD 特化版 (issue #126 PoC, Phase 9+).
+///
+/// 1 SIMD iter = 1 × f64x4 = 4 f64 = 2 Complex64. 入力 dim は `2^N` (N ≥ 1)
+/// で必ず 2 の倍数になるため scalar tail は発生しない (debug_assert で確認).
+///
+/// # 命令計画 (AVX2 + FMA target)
+///
+/// 各 lane の operation:
+/// 1. `tilde = (scratch - e_c · phi_curr) · inv_r`
+///    (`e_c`, `inv_r` が real scalar なので f64x4 splat + 普通の `*` で OK.
+///    各 Complex の re / im 両方が同係数でスケールされる).
+/// 2. `new_s = 2 · tilde - phi_prev`
+/// 3. `psi_acc += c_k · new_s`
+///    (`c_k` は complex scalar なので broadcast + swap pattern:
+///    `c_k · x_pair = c_re_v · x_pair + c_im_signed_v · swap_reim(x_pair)`,
+///    `matvec.rs::simd_kernels::single_mode_iN` と同じ. 詳細は同モジュール
+///    の docstring 参照).
+///
+/// 4 個の input slice (scratch RW / phi_curr R / phi_prev R / psi_acc RW) を
+/// `chunks_exact_mut(4 f64)` / `chunks_exact(4 f64)` のロックステップ走査で
+/// 取り出す. `scratch` と `psi_acc` は呼出側で disjoint な `Vec<Complex64>`
+/// から来ているので, 2 本の `&mut [f64]` が同時に生きていても aliasing なし.
+///
+/// # 数値同一性
+///
+/// SIMD / scalar 経路の演算順序は理論的に各 `scratch[j]` / `psi_acc[j]` への
+/// 単一値生成と等価. FMA 折りたたみ ON/OFF や lane の演算順序差で ulp 差が
+/// 出うるため `rel < 1e-13` で比較する (テスト
+/// `chebyshev_recurrence_fused_simd_matches_scalar`).
+#[cfg(feature = "simd")]
+mod simd_kernels {
+    use num_complex::Complex64;
+    use wide::f64x4;
+
+    /// 4 連続 f64 を 256-bit unaligned load で `f64x4` に取り込む.
+    /// `matvec.rs::simd_kernels::load_f64x4_unaligned` と同じパターン. localize
+    /// duplication で chebyshev module 内に閉じる (matvec の private mod 経路を
+    /// 跨いだ visibility 変更を避ける).
+    ///
+    /// # Safety
+    /// `ptr` は少なくとも 32 bytes (4 f64) が連続して読み出せる領域を指していること.
+    #[inline(always)]
+    unsafe fn load_f64x4_unaligned(ptr: *const f64) -> f64x4 {
+        // SAFETY: caller が 4 f64 readable を保証. wide::f64x4 は repr(C, align(32)),
+        // size 32, 内容は f64×4 と同じビットパターン.
+        unsafe { std::ptr::read_unaligned(ptr as *const f64x4) }
+    }
+
+    /// `f64x4` を 4 連続 f64 へ 256-bit unaligned store する.
+    ///
+    /// # Safety
+    /// `ptr` は少なくとも 32 bytes が書き込み可能であること.
+    #[inline(always)]
+    unsafe fn store_f64x4_unaligned(ptr: *mut f64, val: f64x4) {
+        // SAFETY: caller が 4 f64 writable を保証.
+        unsafe { std::ptr::write_unaligned(ptr as *mut f64x4, val) }
+    }
+
+    /// `&[Complex64]` を `&[f64]` (長さ 2 倍) として view する.
+    /// `Complex64 = num_complex::Complex<f64>` は `#[repr(C)]` で `(re, im) =
+    /// (f64, f64)` レイアウト, align 8. `[Complex64]` ↔ `[f64; 2N]` の bit-
+    /// equivalent な解釈は sound (matvec.rs と同じ前提).
+    #[inline]
+    fn as_f64_slice(v: &[Complex64]) -> &[f64] {
+        // SAFETY: 上記コメント参照.
+        unsafe { std::slice::from_raw_parts(v.as_ptr() as *const f64, v.len() * 2) }
+    }
+
+    /// `&mut [Complex64]` を `&mut [f64]` として view する.
+    #[inline]
+    fn as_f64_slice_mut(y: &mut [Complex64]) -> &mut [f64] {
+        // SAFETY: 上記コメント参照.
+        unsafe { std::slice::from_raw_parts_mut(y.as_mut_ptr() as *mut f64, y.len() * 2) }
+    }
+
+    /// `[x0.re, x0.im, x1.re, x1.im] -> [x0.im, x0.re, x1.im, x1.re]`.
+    /// LLVM は AVX target で `vpermilpd` 1 命令に折り畳む.
+    #[inline(always)]
+    fn swap_reim(x: f64x4) -> f64x4 {
+        let a = x.to_array();
+        f64x4::new([a[1], a[0], a[3], a[2]])
+    }
+
+    /// fused Chebyshev recurrence + accumulation kernel. 詳細は module 外の
+    /// [`super::chebyshev_recurrence_fused`] docstring 参照.
+    #[inline]
+    pub(super) fn chebyshev_recurrence_fused(
+        scratch: &mut [Complex64],
+        phi_curr: &[Complex64],
+        phi_prev: &[Complex64],
+        psi_acc: &mut [Complex64],
+        e_c: f64,
+        inv_r: f64,
+        c_k: Complex64,
+    ) {
+        let n = scratch.len();
+        debug_assert_eq!(phi_curr.len(), n);
+        debug_assert_eq!(phi_prev.len(), n);
+        debug_assert_eq!(psi_acc.len(), n);
+        debug_assert!(n >= 2, "len must be >= 2 (SIMD fused kernel)");
+        debug_assert!(
+            n.is_multiple_of(2),
+            "len must be a multiple of 2 (SIMD fused kernel)"
+        );
+
+        let e_c_v = f64x4::splat(e_c);
+        let inv_r_v = f64x4::splat(inv_r);
+        let two_v = f64x4::splat(2.0);
+        // c_k · x_pair = c_re_v · x_pair + c_im_signed_v · swap_reim(x_pair).
+        let c_re_v = f64x4::splat(c_k.re);
+        let c_im_signed_v = f64x4::new([-c_k.im, c_k.im, -c_k.im, c_k.im]);
+
+        let scratch_f64 = as_f64_slice_mut(scratch);
+        let phi_curr_f64 = as_f64_slice(phi_curr);
+        let phi_prev_f64 = as_f64_slice(phi_prev);
+        let psi_acc_f64 = as_f64_slice_mut(psi_acc);
+
+        // 1 chunk = 4 f64 = 2 Complex64 = 1 × f64x4.
+        scratch_f64
+            .chunks_exact_mut(4)
+            .zip(psi_acc_f64.chunks_exact_mut(4))
+            .zip(phi_curr_f64.chunks_exact(4))
+            .zip(phi_prev_f64.chunks_exact(4))
+            .for_each(|(((s_ch, pa_ch), pc_ch), pp_ch)| {
+                // SAFETY: chunks_exact{,_mut}(4) は各 chunk 長 4 f64 = 32 bytes
+                // を保証. load_f64x4_unaligned / store_f64x4_unaligned の
+                // precondition (4 f64 readable / writable) を満たす. scratch と
+                // psi_acc は disjoint な &mut [Complex64] 由来なので, それぞれ
+                // 派生した &mut [f64] view も disjoint で aliasing なし.
+                unsafe {
+                    let s = load_f64x4_unaligned(s_ch.as_ptr());
+                    let pc = load_f64x4_unaligned(pc_ch.as_ptr());
+                    let pp = load_f64x4_unaligned(pp_ch.as_ptr());
+                    let pa = load_f64x4_unaligned(pa_ch.as_ptr());
+
+                    // tilde = (s - e_c · pc) · inv_r.
+                    let tilde = (s - e_c_v * pc) * inv_r_v;
+                    // new_s = 2 · tilde - pp. AVX2+FMA target では LLVM が
+                    // mul + sub を vfmsub に折り畳む.
+                    let new_s = two_v * tilde - pp;
+                    // psi_acc += c_k · new_s.
+                    let new_s_swap = swap_reim(new_s);
+                    let new_pa = pa + c_re_v * new_s + c_im_signed_v * new_s_swap;
+
+                    store_f64x4_unaligned(s_ch.as_mut_ptr(), new_s);
+                    store_f64x4_unaligned(pa_ch.as_mut_ptr(), new_pa);
+                }
+            });
+    }
+}
+
+/// Chebyshev 3 項漸化 inner-loop の fused 更新を dispatch する wrapper.
+///
+/// `feature = "simd"` ON では [`simd_kernels::chebyshev_recurrence_fused`] に,
+/// OFF または退化ケース (`n < 2` / 奇数長; 実用上発生しないが防御的) では
+/// [`chebyshev_recurrence_fused_scalar`] にフォールバックする.
+#[inline]
+fn chebyshev_recurrence_fused(
+    scratch: &mut [Complex64],
+    phi_curr: &[Complex64],
+    phi_prev: &[Complex64],
+    psi_acc: &mut [Complex64],
+    e_c: f64,
+    inv_r: f64,
+    c_k: Complex64,
+) {
+    #[cfg(feature = "simd")]
+    {
+        let n = scratch.len();
+        if n >= 2 && n.is_multiple_of(2) {
+            simd_kernels::chebyshev_recurrence_fused(
+                scratch, phi_curr, phi_prev, psi_acc, e_c, inv_r, c_k,
+            );
+            return;
+        }
+    }
+    chebyshev_recurrence_fused_scalar(scratch, phi_curr, phi_prev, psi_acc, e_c, inv_r, c_k);
+}
+
 /// Gershgorin の行和上界 / 下界による `H = a_t · H_drv + b_t · diag(h_p_diag)`
 /// のスペクトル境界推定 `(E_min, E_max)` を返す (E_min ≤ λ_min(H), λ_max(H) ≤ E_max).
 ///
@@ -346,19 +574,16 @@ pub fn chebyshev_propagate(
         }
     }
 
-    // 6. k ≥ 2 の漸化. k_ord は jvals[k_ord] と `k_ord % 4` 両方で必要
-    // (前者は coefficient, 後者は `(-i)^k` の 4 周期 dispatch) なので
-    // iterator chain への書き換えは可読性を下げる. needless_range_loop を allow.
+    // 6. k ≥ 2 の漸化. issue #126 PoC で walk 2 (recurrence scaling) と walk 3
+    // (accumulate) を `chebyshev_recurrence_fused` で 1 walk + SIMD に fuse.
+    // walk 1 (matvec) は `apply_h_kryanneal` のまま. 計 3 walk → 2 walk + SIMD.
+    // k_ord は jvals[k_ord] と `k_ord % 4` の両方で必要 (前者は coefficient,
+    // 後者は `(-i)^k` の 4 周期 dispatch) なので iterator chain への書き換えは
+    // 可読性を下げる. needless_range_loop を allow.
     #[allow(clippy::needless_range_loop)]
     for k_ord in 2..=k_used {
-        // scratch := H · phi_curr.
+        // walk 1: scratch := H · phi_curr.
         apply_h_kryanneal(&phi_curr, &mut scratch, h_x, h_p_diag, a_t, b_t, n);
-        // scratch := 2 · (scratch - E_c · phi_curr) / R - phi_prev = φ_{k_ord}.
-        for j in 0..dim {
-            let tilde_h_phi =
-                (scratch[j] - Complex64::new(e_c, 0.0) * phi_curr[j]) * Complex64::new(inv_r, 0.0);
-            scratch[j] = Complex64::new(2.0, 0.0) * tilde_h_phi - phi_prev[j];
-        }
         // c_{k_ord} = 2 · (-i)^{k_ord} · J_{k_ord}(z). (-i)^k は 4 周期で循環.
         let pow_minus_i = match k_ord % 4 {
             0 => Complex64::new(1.0, 0.0),
@@ -368,9 +593,17 @@ pub fn chebyshev_propagate(
             _ => unreachable!(),
         };
         let ck = Complex64::new(2.0 * jvals[k_ord], 0.0) * pow_minus_i;
-        for j in 0..dim {
-            psi_acc[j] += ck * scratch[j];
-        }
+        // walk 2 (fused, SIMD): scratch <- 2·(scratch - e_c·phi_curr)·inv_r - phi_prev;
+        //                       psi_acc += ck · scratch.
+        chebyshev_recurrence_fused(
+            &mut scratch,
+            &phi_curr,
+            &phi_prev,
+            &mut psi_acc,
+            e_c,
+            inv_r,
+            ck,
+        );
         // rotation: phi_prev <- phi_curr, phi_curr <- scratch (= φ_{k_ord}).
         // 旧 phi_prev は scratch 用の使い回しバッファになる.
         std::mem::swap(&mut phi_prev, &mut phi_curr);
@@ -679,6 +912,118 @@ mod tests {
         }
         let rel = relative_error(&result, &expected);
         assert!(rel < 1e-12, "diagonal H rel = {rel:e}");
+    }
+
+    /// `chebyshev_recurrence_fused_scalar` が scalar 2-loop 旧実装と
+    /// machine-epsilon オーダで一致する (= fusion で再現される演算順序の
+    /// sanity check).
+    #[test]
+    fn chebyshev_recurrence_fused_scalar_matches_legacy_two_loop() {
+        let mut rng = Xor64::new(0xFEED_FACE_F00D_BABE);
+        for _ in 0..20 {
+            let n = 2 + (rng.next_u64() as usize % 5);
+            let dim = 1usize << n;
+            let scratch_in = random_complex_vec(dim, rng.next_u64());
+            let phi_curr = random_complex_vec(dim, rng.next_u64());
+            let phi_prev = random_complex_vec(dim, rng.next_u64());
+            let psi_acc_in = random_complex_vec(dim, rng.next_u64());
+            let e_c = rng.signed() * 3.0;
+            let inv_r = 0.1 + rng.signed().abs();
+            let c_k = rng.complex_signed();
+
+            // Legacy two-loop reference.
+            let mut scratch_l = scratch_in.clone();
+            let mut psi_acc_l = psi_acc_in.clone();
+            for j in 0..dim {
+                let tilde = (scratch_l[j] - Complex64::new(e_c, 0.0) * phi_curr[j])
+                    * Complex64::new(inv_r, 0.0);
+                scratch_l[j] = Complex64::new(2.0, 0.0) * tilde - phi_prev[j];
+            }
+            for j in 0..dim {
+                psi_acc_l[j] += c_k * scratch_l[j];
+            }
+
+            // Fused scalar.
+            let mut scratch_f = scratch_in.clone();
+            let mut psi_acc_f = psi_acc_in.clone();
+            chebyshev_recurrence_fused_scalar(
+                &mut scratch_f,
+                &phi_curr,
+                &phi_prev,
+                &mut psi_acc_f,
+                e_c,
+                inv_r,
+                c_k,
+            );
+
+            let rel_s = relative_error(&scratch_f, &scratch_l);
+            let rel_p = relative_error(&psi_acc_f, &psi_acc_l);
+            assert!(
+                rel_s < 1e-14,
+                "scratch rel = {rel_s:e} (n={n}, e_c={e_c}, inv_r={inv_r}, c_k={c_k})"
+            );
+            assert!(
+                rel_p < 1e-14,
+                "psi_acc rel = {rel_p:e} (n={n}, e_c={e_c}, inv_r={inv_r}, c_k={c_k})"
+            );
+        }
+    }
+
+    /// SIMD fused kernel と scalar fused kernel が rel < 1e-13 で一致する
+    /// (issue #126). 浮動小数演算順序差で ulp 差は出るが ≤ 1e-13 を要求.
+    /// random inputs 100 iter で fuzz する.
+    #[cfg(feature = "simd")]
+    #[test]
+    fn chebyshev_recurrence_fused_simd_matches_scalar() {
+        let mut rng = Xor64::new(0xCAFE_BABE_DEAD_BEEF);
+        for iter in 0..100 {
+            let n = 2 + (rng.next_u64() as usize % 5);
+            let dim = 1usize << n;
+            let scratch_in = random_complex_vec(dim, rng.next_u64());
+            let phi_curr = random_complex_vec(dim, rng.next_u64());
+            let phi_prev = random_complex_vec(dim, rng.next_u64());
+            let psi_acc_in = random_complex_vec(dim, rng.next_u64());
+            let e_c = rng.signed() * 3.0;
+            let inv_r = 0.1 + rng.signed().abs();
+            let c_k = rng.complex_signed();
+
+            // scalar baseline.
+            let mut scratch_s = scratch_in.clone();
+            let mut psi_acc_s = psi_acc_in.clone();
+            chebyshev_recurrence_fused_scalar(
+                &mut scratch_s,
+                &phi_curr,
+                &phi_prev,
+                &mut psi_acc_s,
+                e_c,
+                inv_r,
+                c_k,
+            );
+
+            // SIMD kernel.
+            let mut scratch_v = scratch_in.clone();
+            let mut psi_acc_v = psi_acc_in.clone();
+            simd_kernels::chebyshev_recurrence_fused(
+                &mut scratch_v,
+                &phi_curr,
+                &phi_prev,
+                &mut psi_acc_v,
+                e_c,
+                inv_r,
+                c_k,
+            );
+
+            let rel_s = relative_error(&scratch_v, &scratch_s);
+            let rel_p = relative_error(&psi_acc_v, &psi_acc_s);
+            assert!(
+                rel_s < 1e-13,
+                "iter {iter}: scratch rel = {rel_s:e} (n={n}, e_c={e_c}, inv_r={inv_r}, c_k={c_k})"
+            );
+            assert!(
+                rel_p < 1e-13,
+                "iter {iter}: psi_acc rel = {rel_p:e} (n={n}, e_c={e_c}, inv_r={inv_r}, c_k={c_k})"
+            );
+        }
     }
 
     /// Gershgorin bounds の sanity: 真の eigenvalue 範囲を含む.

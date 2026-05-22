@@ -516,5 +516,32 @@ spill 回避) + Gram-Schmidt 消滅** から来ている.
   per-stage K_used ~ 20 個の matvec のうち 1 個と削減比小. Phase B では
   scope 外, 必要なら follow-up.
 
+### Phase B follow-up: Chebyshev 3 項漸化 inner loop の SIMD + fusion (#126)
+
+Phase B で Chebyshev `chebyshev_propagate` の per-step wall は N=18 で 116 ms
+(Lanczos の 5.49× 高速; #124 perf archive). per-step の内訳は **matvec ~70%**
++ **非 matvec inner loop ~22%** で, 非 matvec 部分は当初 scalar 2-loop
+(recurrence scaling + accumulate) として書かれていた. これを **1 dim-walk +
+`wide::f64x4` SIMD** に fuse する直交最適化 (#126).
+
+- 削減量見積もり: 1 K iteration あたり 3 dim-walk → 2 dim-walk (DRAM traffic 33%
+  削減) + SIMD で残り walk の throughput 1.7-2.5×. per-step wall 10-22% 改善が
+  期待値 (matvec wall は不変).
+- 実装: `src/chebyshev.rs::simd_kernels::chebyshev_recurrence_fused` (SIMD) /
+  `chebyshev_recurrence_fused_scalar` (scalar fallback) + dispatch wrapper.
+  `chebyshev_propagate` の k_ord ≥ 2 hot loop だけ差し替え. k = 1 step は
+  one-shot で scalar のまま (overhead 無視可). `cfm4_step_chebyshev_*` 経由でも
+  自動で乗る (同じ `chebyshev_propagate` を呼ぶため別途実装不要).
+- 数値同等性: `simd_kernels::chebyshev_recurrence_fused` ↔ `_scalar` の
+  100-iter fuzz テスト (`chebyshev_recurrence_fused_simd_matches_scalar`,
+  `rel < 1e-13`). `cfm4_step_chebyshev_*_py` 経由の end-to-end は既存
+  `test_blas_consistency.py::test_blas_consistency_chebyshev_artifact_dump`
+  artifact (rel < 1e-13) でカバー.
+- bench acceptance (Linux AMD EPYC 7713P, NT=64): per-step wall 10%+ で
+  full merge / 5-10% で marginal accept / < 5% で 中止 archive. 計測は
+  `perf_chebyshev 18 100` (Chebyshev 単体) +
+  `perf_cfm4_richardson_chebyshev 18 100 full` (Richardson 統合経路) の 2 軸.
+- 詳細: `docs/design/05-3-propagator.md` "Chebyshev recurrence の SIMD + fusion".
+
 ---
 

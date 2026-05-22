@@ -643,6 +643,32 @@ per-call 29 ms / 4.45× Lanczos 高速 (Linux AMD EPYC 7713P) を達成したこ
   adaptive driver の dt 履歴分岐を避けるため Rust step 関数を fixed schedule
   係数で直接呼ぶ).
 
+## Phase B follow-up (issue #126): Chebyshev 3 項漸化 inner loop の SIMD + fusion
+
+Phase B 完了直後の直交最適化. `chebyshev_propagate` の k ≥ 2 hot loop は旧実装
+で 3 つの dim-walk (walk 1: matvec, walk 2: recurrence scaling scalar, walk 3:
+accumulate scalar) を発生させていたが, walk 2 / walk 3 を **1 dim-walk +
+`wide::f64x4` SIMD** に fuse する.
+
+- `src/chebyshev.rs::simd_kernels::chebyshev_recurrence_fused` (SIMD) /
+  `chebyshev_recurrence_fused_scalar` (scalar fallback) + dispatch wrapper.
+  `chebyshev_propagate` の k ≥ 2 hot loop だけ差し替え, k = 1 step は one-shot で
+  scalar のまま (overhead 無視可).
+- `cfm4_step_chebyshev_*` 経由でも自動で乗る (同じ `chebyshev_propagate` を
+  呼ぶため).
+- f64x4 helpers (`as_f64_slice` / `load/store_f64x4_unaligned` / `swap_reim`)
+  は localize duplication で chebyshev module 内に持つ (`matvec.rs::simd_kernels`
+  と同じパターンを再実装; visibility 経路を跨いだ変更を避ける).
+- 数値同等性: `simd_kernels::chebyshev_recurrence_fused` ↔ `_scalar` の
+  100-iter fuzz テスト (`chebyshev_recurrence_fused_simd_matches_scalar`,
+  `rel < 1e-13`). FMA 折りたたみと lane 演算順序差で ulp 差は出るが ≤ 1e-13.
+- bench acceptance (Linux AMD EPYC 7713P, NT=64): per-step wall 10%+ で full
+  merge / 5-10% で marginal accept / < 5% で 中止. 計測は `perf_chebyshev 18 100`
+  + `perf_cfm4_richardson_chebyshev 18 100 full` の 2 軸.
+- 詳細: `docs/design/05-3-propagator.md` "Chebyshev recurrence の SIMD + fusion" /
+  `docs/design/12-release-plan.md` "Phase B follow-up: Chebyshev 3 項漸化 inner
+  loop の SIMD + fusion (#126)".
+
 ## 設計判断の出典 (cv_ising 流用箇所)
 
 - CFM4:2 係数: `cv_ising/rust/src/cfm4.rs` の `a_high = 1/4 + √3/6` 等
