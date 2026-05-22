@@ -511,6 +511,7 @@ spill 回避) + Gram-Schmidt 消滅** から来ている.
 - **Default method 切替**: `cfm4_adaptive_richardson_krylov` →
   `cfm4_adaptive_richardson_chebyshev` への default 切替は bench 結果 archive
   後の **別 issue** で判断 (semantic 変更で minor bump が必要なため切り分け).
+  → **#124 で確定** (下記 follow-up 節参照, `0.10.0 → 0.11.0` で minor bump).
 - **iter-0 cache (Lanczos 経路の #100 流用)**: Chebyshev 経路で full_step /
   half_1 の入口が同じ ψ なので原理的に同型の memoization が可能だが,
   per-stage K_used ~ 20 個の matvec のうち 1 個と削減比小. Phase B では
@@ -574,6 +575,72 @@ parallel efficiency が 64 thread で 44%** (Lanczos 27% より良いが理想 1
   RAYON_NUM_THREADS ∈ {1, 8, 16, 32, 64} で sweep。
 - 詳細: `docs/design/05-3-propagator.md` "Chebyshev non-matvec inner loop の
   rayon 並列化".
+
+### Phase B follow-up: Default method を Chebyshev variant に切替 + atol 仕様明文化 (#124)
+
+Phase B 完了後の **判断系 follow-up** (semantic 変更で minor bump 必要)。
+Phase B では新 method `cfm4_adaptive_richardson_chebyshev` を opt-in として
+追加するに留め, default 切替は「bench 結果 archive 後の別 issue で判断」と
+していた (Out of scope 節)。issue #124 で perf binary 直接比較 (N=18, Linux
+AMD EPYC 7713P) により **Lanczos 比 5.49× wall 高速** が確認され, 切替方針が
+確定した。
+
+#### 判断結果
+
+1. **Default method 切替 (Scope 1, 候補 B)**: 以下の default を
+   `cfm4_adaptive_richardson_chebyshev` に切替。
+   - `QuantumAnnealer.run(method=...)`: 旧 `"m2"` → 新 default
+   - `QuantumAnnealer.create_simulator(method=...)`: 旧 `"cfm4"` → 新 default
+     (ついでに `Literal` から欠落していた `_chebyshev` を追加, Phase B
+     #122 取りこぼし fixup)
+   - `AnnealingSimulator(method=...)`: 旧 `"cfm4"` → 新 default
+   - `docs/quickstart.md` の主例: `method` 指定を削除 (default を使う形)
+   - `bench_qutip_large.py --solvers` default は **両 method を含む**
+     `_VALID_SOLVERS` 全列挙のまま (Pareto 比較用なので default で両者走らせ
+     る方が有用)。`_krylov` は literal として永続的に残す。
+2. **"Accidental 高精度" 仕様 (Scope 2, 候補 (a) + (d))**: Chebyshev では
+   `atol` を **upper bound** として運用し, K_used 動的拡張で実際の精度が
+   それより良くなることを feature として受け入れる。`QuantumAnnealer.run` /
+   `AnnealingSimulator` / `docs/design/05-3-propagator.md` /
+   `docs/quickstart.md` の docstring/MD に明文化。`chebyshev_tol` の
+   auto-coupling 係数 (`_KRYLOV_TOL_ATOL_RATIO = 1e-3`) は変更しない。
+
+#### Definition of Done (#124)
+
+- [x] **`annealer.py` / `simulator.py` の default 切替**.
+  `QuantumAnnealer.run` / `create_simulator` / `AnnealingSimulator` の
+  `method` Literal default を `cfm4_adaptive_richardson_chebyshev` に変更.
+  `create_simulator` の `Literal` に欠落していた `_chebyshev` を追加.
+- [x] **Scope 2(d) docstring 明文化**.
+  `QuantumAnnealer.run` の `atol` docstring に "Chebyshev variant の
+  atol 振舞い" 注を追加。`AnnealingSimulator.__init__` も同様。
+  `result.py::QuantumResult.method` の docstring に新 method 名を追加。
+- [x] **`bench_qutip_large.py` の `--adaptive-tols` / `--krylov-tols`
+  ヘルプ文を両 adaptive 経路に対応**.
+- [x] **`docs/quickstart.md` の例を default 経路に切替** (method 指定を削除し
+  Chebyshev variant の atol upper bound 注も追記).
+- [x] **`docs/design/05-3-propagator.md` "Chebyshev variant" 節に
+  "`chebyshev_tol` と `atol` の関係 — accidental 高精度" 小節を追加**.
+- [x] **`docs/design/12-release-plan.md` Phase B Out of scope の
+  "Default method 切替" 行に "#124 で確定" マーカー追加 + 本 follow-up 節**.
+- [x] **`CLAUDE.md` Phase B follow-up 節に #124 を追加** (運用ガイド更新).
+- [x] **Version bump**: `0.10.0 → 0.11.0` (`Cargo.toml` / `pyproject.toml`,
+  default の semantic 変更を伴うため minor bump).
+- [x] **API stub 再生成** (`tools/gen_api_stubs.py`).
+- [x] **既存テスト緑** (全 test は既に `method=` 明示なので default 切替で
+  壊れるテストなし; 念のため `uv run pytest` で確認).
+
+#### Bench acceptance
+
+本 follow-up は **判断系のみで perf 変更を伴わない** (default 切替と
+docstring 更新のみ)。Phase B 本体 (#122) と #126 / #127 の merge 済 bench
+結果が perf 上の根拠として既に存在するため, 再計測不要。pre-merge bench
+cycle (CLAUDE.md `bench を伴う issue の運用` 節) は適用外。
+
+旧 default (`method="m2"` / `"cfm4"`) を使っていたユーザー向けの
+migration note: 新 default 経路は **adaptive PI controller** を走らせるので
+`n_steps` の代わりに `atol` で精度を制御する。旧挙動を維持したい場合は
+`method="m2"` / `"cfm4"` を明示する。
 
 ---
 

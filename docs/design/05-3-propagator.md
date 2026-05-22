@@ -160,6 +160,43 @@ Lanczos 経路の iter-0 cache (#100) と同型の memoization も Chebyshev で
 可能だが per-stage K_used ~ 20 個の matvec のうち 1 個と削減比小なので Phase B
 スコープ外 (follow-up).
 
+##### `chebyshev_tol` と `atol` の関係 — accidental 高精度 (issue #124)
+
+PI controller の `atol` (= `tol_step`) と `chebyshev_tol` (= 短時間プロパゲータ
+の内部精度) の関係は Lanczos 経路と **構造的に同型** だが, Chebyshev の K_used
+動的拡張により「実際の精度が atol よりも遥かに良くなる」現象 (issue #124 Scope 2)
+が起きやすい:
+
+- default では `chebyshev_tol = tol_step · 1e-3` (`_KRYLOV_TOL_ATOL_RATIO`,
+  Lanczos 経路の auto-coupling と同一)。
+- K_used は per-stage で 3 項漸化を進めながら部分和の収束を見て **動的に決まる**
+  ため, `chebyshev_tol` を超えるまで自動的に拡張される。結果として
+  per-stage の Chebyshev 切り捨て誤差は `tol_step` より遥かに小さくなる。
+- PI controller が step doubling で計測する `err = ‖ψ_full - ψ_h2‖` は Magnus 4 次
+  誤差 (`O(dt^5)`) と Chebyshev 切り捨て誤差の和だが, Chebyshev 側が無視可能に
+  小さくなるため **Magnus 誤差のみが PI 駆動量となる**。
+- 観測される現象 (bench_qutip_large の実測, n=10/12, `atol=1e-3` cell): `n_steps`
+  は ~1250 step (`atol=1e-3` 相当の Magnus 誤差で許容される大きさ) でありながら,
+  infidelity は machine precision (`< 1e-16`) に達する。
+
+**仕様としての解釈 (issue #124 Scope 2 (a) + (d), 確定)**: これは "bug" ではなく
+"feature" として受け入れる:
+
+- `atol` は **予防的な upper bound** として機能する (`atol` で要求した精度を
+  下回ることはない)。
+- 速度を取りたいときは `atol` を大きくして PI step 数を減らす運用が正しい。
+  `chebyshev_tol` (= `krylov_tol`) を直接緩めても per-step matvec 数 (K_used) が
+  数個減るだけで Wall-time effect は限定的。
+- default の auto-coupling 係数 `1e-3` (`_KRYLOV_TOL_ATOL_RATIO`) は変更しない。
+  係数を緩めると K_used が `chebyshev_tol` 近傍で打ち切られ accidental 高精度
+  が薄まるが, `atol` 増大で同じ効果が得られるため二重 knob を作る価値が低い。
+
+Lanczos 経路でも同様の "accidental 高精度" は理論的に起こるが, Lanczos a posteriori
+推定子 `β · |c_last| · |dt| / m_eff` が `chebyshev_tol`-相当の閾値を達成するまでに
+m_eff を伸ばしきらないケースが多い (TFIM の β は ~‖H‖ で大きく, |c_last| が
+急減しないと早期打切が発火しない) ため, default 設定下では Chebyshev ほど顕著では
+ない。
+
 ##### Chebyshev recurrence の SIMD + fusion (issue #126, Phase B follow-up)
 
 Phase B 完了直後の直交最適化。`chebyshev_propagate` の k ≥ 2 hot loop は

@@ -15,14 +15,17 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
 で生成するのが簡便 (現 instance の ``problem`` / ``schedule`` / ``m`` /
 ``krylov_tol`` を引き継ぐ).
 
-仕様 (Phase 1 + Phase 2 + Phase 3 + Phase 4)
---------------------------------------------
+仕様 (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase B)
+------------------------------------------------------
 * サポート ``method``: ``"m2"`` (固定 dt M2 中点則, Phase 1), ``"trotter"``
   (固定 dt Strang 2 次 Trotter, Phase 2), ``"trotter_suzuki4"`` (固定 dt
   Suzuki S_4 4 次 Trotter, Phase 2 末), ``"cfm4"`` (固定 dt CFM4:2
   commutator-free Magnus, Phase 3), ``"cfm4_adaptive_richardson_krylov"`` (Phase 4
-  C3, step-doubling Richardson + PI controller). それ以外は
-  ``NotImplementedError``.
+  C3, step-doubling Richardson + PI controller, Lanczos 短時間プロパゲータ),
+  ``"cfm4_adaptive_richardson_chebyshev"`` (Phase B / issue #122, 同じ
+  Richardson + PI controller で短時間プロパゲータを Chebyshev 3 項漸化に
+  差し替えた variant; **issue #124 で `run` の default に採用**, N=18 で
+  Lanczos 比 5.49× wall 高速). それ以外は ``NotImplementedError``.
 * ``save_tlist`` 引数は **API 互換性のために予約済み** だが本リリースでは
   ``None`` のみ受け付ける (非 ``None`` で ``NotImplementedError``).
   Phase 5 の ``QuantumResult.times`` / ``states`` 拡張と一緒に有効化する.
@@ -64,7 +67,10 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
 L2-normalize) を本クラスで集中させ, krylov 層は数値計算に専念させる.
 ``m`` / ``krylov_tol`` は ``"m2"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"``
 経路でのみ意味を持ち, ``"trotter"`` / ``"trotter_suzuki4"`` 経路は Lanczos を
-使わないため両パラメータは無視される.
+使わないため両パラメータは無視される. ``"cfm4_adaptive_richardson_chebyshev"``
+経路では ``m`` (Lanczos 部分空間次元) は使われず, 代わりに
+``krylov_tol`` が ``chebyshev_tol`` (Chebyshev 切り捨て次数 K_used を決める
+許容誤差) として機能する.
 """
 from __future__ import annotations as annotations
 from typing import TYPE_CHECKING as TYPE_CHECKING, Literal as Literal, cast as cast
@@ -114,6 +120,12 @@ class QuantumAnnealer:
           ``run`` 時の ``atol`` (実効 ``tol_step``) に対し
           ``effective_krylov_tol = tol_step · _KRYLOV_TOL_ATOL_RATIO``
           (既定 ``1e-3``). atol=1e-8 default で ``1e-11``.
+        * ``cfm4_adaptive_richardson_chebyshev`` (adaptive Richardson,
+          Chebyshev variant): 同じ式で ``chebyshev_tol`` を auto-resolve する.
+          ``chebyshev_tol`` は Chebyshev 切り捨て次数 ``K_used`` を決める
+          許容誤差 (詳細は ``docs/design/05-3-propagator.md`` "Chebyshev
+          variant" 節). atol との関係については本 docstring の ``atol`` 項
+          "upper bound" 注を参照.
         * 固定 dt 経路 (``m2`` / ``cfm4``): ``atol`` を取らないため
           ``1e-12`` フォールバック (``_KRYLOV_TOL_FIXED_DEFAULT``).
 
@@ -142,7 +154,7 @@ class QuantumAnnealer:
     def __init__(self, problem: IsingProblem, schedule: Schedule, *, m: int=24, krylov_tol: float | None=None) -> None:
         ...
 
-    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='m2', n_steps: int | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None, observables: dict[str, Observable] | None=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> QuantumResult:
+    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', n_steps: int | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None, observables: dict[str, Observable] | None=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> QuantumResult:
         """``[t0, t1]`` 区間で時間発展を実行し ``QuantumResult`` を返す.
 
         Parameters
@@ -157,11 +169,18 @@ class QuantumAnnealer:
             ``"trotter"`` (固定 dt Strang 2 次 Trotter, Phase 2),
             ``"trotter_suzuki4"`` (固定 dt Suzuki S_4 4 次 Trotter, Phase 2 末),
             ``"cfm4"`` (固定 dt CFM4:2 commutator-free Magnus, Phase 3),
-            または ``"cfm4_adaptive_richardson_krylov"`` (Phase 4 C3,
-            step-doubling Richardson + PI controller). Trotter 系経路は
-            Lanczos を呼ばないため ``m`` / ``krylov_tol`` は無視される.
-            ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"`` は M2 と同じく
-            Lanczos を介すので ``m`` / ``krylov_tol`` が有効.
+            ``"cfm4_adaptive_richardson_krylov"`` (Phase 4 C3, step-doubling
+            Richardson + PI controller, Lanczos 短時間プロパゲータ), または
+            ``"cfm4_adaptive_richardson_chebyshev"`` (**default**, Phase B /
+            issue #122, 同じ Richardson + PI controller で短時間プロパゲータ
+            を Chebyshev 3 項漸化に差し替えた variant). default を Chebyshev に
+            しているのは issue #124 の判断による (N=18 で Lanczos 比 5.49× wall
+            高速の Pareto win). Trotter 系経路は Lanczos を呼ばないため
+            ``m`` / ``krylov_tol`` は無視される. ``"cfm4"`` /
+            ``"cfm4_adaptive_richardson_krylov"`` は M2 と同じく Lanczos を
+            介すので ``m`` / ``krylov_tol`` が有効. Chebyshev variant では
+            ``m`` は使われず, ``krylov_tol`` が ``chebyshev_tol`` として機能
+            する.
         n_steps
             固定 dt 経路の step 数 (``n_steps >= 1``). 等間隔 ``dt =
             (t1 - t0) / n_steps`` で進める. adaptive 経路では渡さない
@@ -178,6 +197,20 @@ class QuantumAnnealer:
             ``krylov_tol = None`` ならば Lanczos 早期打切 (`atol · 1e-3`)
             も自動的に緩んで二重に高速化される. 詳細は
             ``docs/design/05-3-propagator.md`` §5.3 PI controller defaults 表のノート.
+
+            **Note (Chebyshev variant の atol 振舞い, issue #124)**:
+            ``method="cfm4_adaptive_richardson_chebyshev"`` では ``atol`` は
+            実際の精度ではなく **upper bound** として機能する. Chebyshev は
+            切り捨て次数 ``K_used`` を ``chebyshev_tol`` (auto-resolve で
+            ``tol_step · 1e-3``) から動的決定するため, ``tol_step`` より遥かに
+            小さい per-stage 誤差を生む. その結果 PI controller が見る誤差は
+            Magnus 4 次誤差 (``O(dt^5)``) のみとなり, dt は ``atol`` 制約下で
+            大きく取れる一方で実際の精度は machine precision 近くを維持する
+            (例: ``atol=1e-3`` 設定で n=10 の infidelity ``< 1e-16``). これは
+            "feature" であり (atol で要求した精度を上回ることはあっても下回る
+            ことはない), 速度を取りたい場合は ``atol`` を大きくして PI step
+            数を減らすのが正しい使い方. 詳細は
+            ``docs/design/05-3-propagator.md`` "Chebyshev variant" 節.
         dt_init
             adaptive 経路の初期 dt 提案. driver の ``dt0`` に map される.
             ``None`` (既定) のとき
@@ -279,7 +312,7 @@ class QuantumAnnealer:
         """
         ...
 
-    def create_simulator(self, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov']='cfm4', atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> AnnealingSimulator:
+    def create_simulator(self, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> AnnealingSimulator:
         """``AnnealingSimulator`` (step-wise stateful API) を生成する.
 
         ``QuantumAnnealer`` と同じ ``problem`` / ``schedule`` / ``m`` /
@@ -295,10 +328,15 @@ class QuantumAnnealer:
         method
             プロパゲータ. ``run`` と同じ集合をサポート (``m2`` /
             ``trotter`` / ``trotter_suzuki4`` / ``cfm4`` /
-            ``cfm4_adaptive_richardson_krylov``).
+            ``cfm4_adaptive_richardson_krylov`` /
+            ``cfm4_adaptive_richardson_chebyshev``). default は ``run`` と同じ
+            ``"cfm4_adaptive_richardson_chebyshev"`` (issue #124).
         atol, dt_init, dt_max, m_max
-            adaptive method (``cfm4_adaptive_richardson_krylov``) 専用パラメータ.
-            固定 dt method で指定すると ``ValueError``. 詳細は
+            adaptive method (``cfm4_adaptive_richardson_krylov`` /
+            ``cfm4_adaptive_richardson_chebyshev``) 専用パラメータ.
+            固定 dt method で指定すると ``ValueError``. ``m_max`` は
+            Chebyshev variant では追加で ``ValueError`` (K_used 動的決定の
+            ため Krylov 部分空間次元の概念がない). 詳細は
             ``AnnealingSimulator.__init__`` の docstring.
 
         Returns

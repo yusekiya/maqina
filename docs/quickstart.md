@@ -33,8 +33,11 @@ uv run maturin develop --uv --release   # 性能計測時
 ## 1. 最小例: 時間発展して基底状態への重なりを見る
 
 `IsingProblem` (TFIM の定義) と `Schedule.linear` (線形アニーリング
-schedule) を組み合わせて `QuantumAnnealer.run(method="cfm4_adaptive_richardson_krylov")`
-を回し, ``[t0, t1]`` 区間の時間発展を 1 回で取得する最小サンプル。
+schedule) を組み合わせて `QuantumAnnealer.run()` を回し,
+``[t0, t1]`` 区間の時間発展を 1 回で取得する最小サンプル。
+``method`` を指定しなければ default の
+``"cfm4_adaptive_richardson_chebyshev"`` (issue #124, Phase B Pareto win に
+基づく adaptive 経路) が使われる。
 ``H_problem`` は ``Z`` のみで書ける任意の k-local 多項式を Z 基底で
 対角化した ``(2^N,)`` ベクトルで渡す (本パッケージは k-local 表現を
 扱わない; 詳細は [`docs/design/02-physics.md`](design/02-physics.md))。
@@ -69,9 +72,8 @@ result = ann.run(
     psi0,
     t0=0.0,
     t1=sched.T,
-    method="cfm4_adaptive_richardson_krylov",
     atol=1e-8,
-)
+)  # method 未指定 → default "cfm4_adaptive_richardson_chebyshev"
 
 # H_p の基底状態 (古典イジング解) との重なりを確認する.
 gs_index = int(np.argmin(prob.H_p_diag))
@@ -84,6 +86,13 @@ print(f"n_steps     = {result.n_steps_actual}")
 を使う場合は `atol` の代わりに `n_steps=N` を渡す。adaptive 経路の
 `atol` 既定値・`dt_init` の auto resolution などの詳細は
 [`docs/design/05-3-propagator.md`](design/05-3-propagator.md) §5.3 を参照。
+
+**Note** (Chebyshev variant の atol 振舞い, issue #124): default の
+`cfm4_adaptive_richardson_chebyshev` では `atol` は **upper bound** として
+機能し, K_used 動的拡張により実際の精度がそれより良くなる場合がある
+(例: `atol=1e-3` 設定でも n=10 で `infidelity < 1e-16`)。速度を取りたいときは
+`atol` を大きくして PI step 数を減らす運用が正しい。Lanczos 経路を明示したい
+場合は `method="cfm4_adaptive_richardson_krylov"` を渡す。
 
 ## 2. Observable を `save_tlist` で時系列計測
 
@@ -114,11 +123,10 @@ result = ann.run(
     psi0,
     t0=0.0,
     t1=sched.T,
-    method="cfm4_adaptive_richardson_krylov",
     atol=1e-8,
     observables={"M_z": m_z},
     save_tlist=save_tlist,
-)
+)  # method 未指定 → default "cfm4_adaptive_richardson_chebyshev"
 
 # 各 save_tlist 時刻での <M_z> 期待値を表示する.
 for t, value in zip(result.times, result.observables_history["M_z"], strict=True):
@@ -152,7 +160,8 @@ psi0 = uniform_superposition(n)
 m_z = Observable.magnetization(n)
 
 ann = QuantumAnnealer(prob, sched)
-sim = ann.create_simulator(psi0, t0=0.0, method="cfm4_adaptive_richardson_krylov", atol=1e-8)
+sim = ann.create_simulator(psi0, t0=0.0, atol=1e-8)
+# method 未指定 → default "cfm4_adaptive_richardson_chebyshev"
 
 sim.advance_to(sched.T / 2)
 mid = sim.measure(m_z)
@@ -247,11 +256,10 @@ for T in (1.0, 100.0):
         psi0,
         t0=0.0,
         t1=sched.T,
-        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
         save_tlist=save_tlist,
         store_states=True,
-    )
+    )  # method 未指定 → default "cfm4_adaptive_richardson_chebyshev"
 
     print(f"T = {T}")
     for t, psi_t in zip(result.times, result.states, strict=True):
