@@ -224,3 +224,133 @@ def test_blas_consistency_artifact_dump(tmp_path: Path) -> None:
     assert len(bundle) == expected, (
         f"unexpected artifact key count: got {len(bundle)}, expected {expected}"
     )
+
+
+# ============================================================================
+# Chebyshev variant (issue #122 Phase B)
+# ============================================================================
+#
+# adaptive Richardson 経路は PI controller の accept/reject 境界で dt 履歴が
+# 分岐しうるため (上記 _METHODS から除外している), Chebyshev 経路の BLAS
+# on/off 数値一致は **PI controller を介さず Rust step 関数を直接呼ぶ** ことで
+# 検証する. fixed schedule 係数を渡し ``cfm4_step_chebyshev_py`` (1 step) と
+# ``cfm4_step_chebyshev_with_richardson_estimate_py`` (full + half×2 = 3 step
+# の constellation) の出力 ψ / err / k_used を artifact に dump する.
+
+_CHEBYSHEV_SAMPLES: tuple[tuple[str, int, int], ...] = _SAMPLE_INPUTS
+
+
+def _run_chebyshev_direct(n: int, seed: int) -> dict[str, np.ndarray]:
+    """fixed schedule 係数で ``cfm4_step_chebyshev_*`` を直接呼んで結果を dict 化.
+
+    PI controller を介さないため BLAS on/off 間で「呼出回数 / dt 履歴」は完全
+    同一. 内部の BLAS-1 演算順序差で出る数値差のみが diff の対象.
+    """
+    rng = np.random.default_rng(seed)
+    dim = 1 << n
+    h_x = np.ascontiguousarray(rng.uniform(0.5, 1.5, size=n).astype(np.float64))
+    h_p_diag = np.ascontiguousarray(rng.uniform(-1.0, 1.0, size=dim).astype(np.float64))
+    psi0_arr = np.ascontiguousarray(uniform_superposition(n))
+
+    # 固定 schedule 係数. linear schedule の `t = 0.25 · T, T = 0.5` に近い
+    # 中盤を模した値. CFM4:2 の 2 stage ノードはランダムに振ってある.
+    a_s1, b_s1 = 0.55, 0.45
+    a_s2, b_s2 = 0.45, 0.55
+    dt = 0.05
+    cheb_tol = 1e-12
+
+    out: dict[str, np.ndarray] = {}
+
+    # 1) single step (cfm4_step_chebyshev_py).
+    psi_step, k_step, err_step = _rust.cfm4_step_chebyshev_py(
+        psi0_arr, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, cheb_tol
+    )
+    out["step_psi"] = np.ascontiguousarray(psi_step)
+    out["step_k_used"] = np.array([int(k_step)], dtype=np.int64)
+    out["step_err_cheb"] = np.array([float(err_step)], dtype=np.float64)
+
+    # 2) Richardson constellation (full + half×2). half ノードはダミー.
+    a_s1_h1, b_s1_h1 = 0.54, 0.46
+    a_s2_h1, b_s2_h1 = 0.48, 0.52
+    a_s1_h2, b_s1_h2 = 0.52, 0.48
+    a_s2_h2, b_s2_h2 = 0.46, 0.54
+
+    psi_rich, err_rich, k_rich, err_cheb_rich = (
+        _rust.cfm4_step_chebyshev_with_richardson_estimate_py(
+            psi0_arr,
+            h_x,
+            h_p_diag,
+            a_s1,
+            b_s1,
+            a_s2,
+            b_s2,
+            a_s1_h1,
+            b_s1_h1,
+            a_s2_h1,
+            b_s2_h1,
+            a_s1_h2,
+            b_s1_h2,
+            a_s2_h2,
+            b_s2_h2,
+            dt,
+            cheb_tol,
+            False,
+        )
+    )
+    out["rich_psi"] = np.ascontiguousarray(psi_rich)
+    out["rich_err"] = np.array([float(err_rich)], dtype=np.float64)
+    out["rich_k_used_total"] = np.array([int(k_rich)], dtype=np.int64)
+    out["rich_err_cheb_total"] = np.array([float(err_cheb_rich)], dtype=np.float64)
+    return out
+
+
+def test_blas_consistency_chebyshev_artifact_dump(tmp_path: Path) -> None:
+    """Chebyshev 経路の BLAS on/off 数値一致 artifact dump (issue #122).
+
+    PI controller を介さない direct Rust call で fixed schedule 係数を
+    渡し, 出力 ψ / err / k_used を artifact 化する. ``diff_blas_artifacts.py``
+    で同じ key 列を BLAS on/off 間で diff し ``rel < 1e-13`` を要求する.
+    artifact ファイル名は ``blas_chebyshev_{on,off}.npz``.
+    """
+    _check_expected_blas()
+
+    has_blas = bool(_rust.__has_blas__)
+    suffix = "on" if has_blas else "off"
+
+    artifact_dir = _resolve_artifact_dir()
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = artifact_dir / f"blas_chebyshev_{suffix}.npz"
+
+    bundle: dict[str, np.ndarray] = {}
+    for label, n, seed in _CHEBYSHEV_SAMPLES:
+        res_dict = _run_chebyshev_direct(n, seed)
+        for field, arr in res_dict.items():
+            bundle[f"{label}__chebyshev__{field}"] = arr
+        psi_step = res_dict["step_psi"]
+        norm = float(np.linalg.norm(psi_step))
+        assert abs(norm - 1.0) < 1e-9, (
+            f"{label} / chebyshev step: ‖psi‖ - 1 = {norm - 1.0:.3e}"
+        )
+        assert np.all(np.isfinite(psi_step)), (
+            f"{label} / chebyshev: psi_step has NaN/inf"
+        )
+
+    bundle["_meta_has_blas"] = np.array([1 if has_blas else 0], dtype=np.int8)
+    bundle["_meta_has_rayon"] = np.array(
+        [1 if bool(getattr(_rust, "__has_rayon__", False)) else 0], dtype=np.int8
+    )
+    bundle["_meta_has_simd"] = np.array(
+        [1 if bool(getattr(_rust, "__has_simd__", False)) else 0], dtype=np.int8
+    )
+
+    np.savez(artifact_path, **bundle)
+    tmp_copy = tmp_path / f"blas_chebyshev_{suffix}.npz"
+    np.savez(tmp_copy, **bundle)
+
+    # key 数: 各 sample 7 field (step_psi / step_k_used / step_err_cheb /
+    # rich_psi / rich_err / rich_k_used_total / rich_err_cheb_total) × samples
+    # + 3 meta.
+    expected = len(_CHEBYSHEV_SAMPLES) * 7 + 3
+    assert len(bundle) == expected, (
+        f"unexpected chebyshev artifact key count: got {len(bundle)}, expected {expected}"
+    )

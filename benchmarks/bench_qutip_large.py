@@ -7,7 +7,7 @@
 
 * 各 solver は固有の **「精度つまみ」** を持ち, 独自 sweep する.
   - kryanneal m2 / trotter / cfm4 (固定 dt): ``dt``
-  - kryanneal cfm4_adaptive_richardson: ``atol``
+  - kryanneal cfm4_adaptive_richardson_krylov: ``atol``
   - QuTiP: ``tol`` (内部で ``atol = rtol = tol`` として渡す.
     TFIM の量子状態は |ψ_k| ≤ 1/√dim 級なので atol/rtol の影響は同オーダ,
     1 軸 sweep で十分捕らえられる)
@@ -164,7 +164,8 @@ _VALID_SOLVERS: tuple[str, ...] = (
     "m2",
     "trotter",
     "cfm4",
-    "cfm4_adaptive_richardson",
+    "cfm4_adaptive_richardson_krylov",
+    "cfm4_adaptive_richardson_chebyshev",
 )
 
 # 各 solver の sweep 既定値. kryanneal 固定 dt 経路は **dt** で sweep する
@@ -178,7 +179,7 @@ _DEFAULT_CFM4_DTS: list[float] = [0.005, 0.02, 0.05, 0.2, 0.5]
 _DEFAULT_ADAPTIVE_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-11]
 _DEFAULT_QUTIP_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-12]
 
-# cfm4_adaptive_richardson の krylov_tol sweep 既定値. ``None`` は
+# cfm4_adaptive_richardson_krylov の krylov_tol sweep 既定値. ``None`` は
 # QuantumAnnealer 内部の auto-coupling (= ``tol_step * 1e-3``) を意味する.
 # 既定では 1 値 (= None) のみで sweep 無し → 既存 bench 挙動と等価. Phase 7
 # (#93) の "krylov_tol 緩和の安全性" を検証する際は CLI ``--krylov-tols
@@ -298,7 +299,7 @@ def _run_kryanneal_adaptive(
     atol: float,
     krylov_tol: float | None,
 ) -> tuple[float, np.ndarray, int]:
-    """kryanneal ``cfm4_adaptive_richardson`` 経路を ``atol`` 指定で走らせる.
+    """kryanneal ``cfm4_adaptive_richardson_krylov`` 経路を ``atol`` 指定で走らせる.
 
     PI controller が実際に踏んだ step 数を ``n_steps_actual`` として返す.
     ``krylov_tol = None`` のとき ``QuantumAnnealer`` の auto-coupling
@@ -310,11 +311,42 @@ def _run_kryanneal_adaptive(
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=atol,
     )
     elapsed = time.perf_counter() - t_start
-    assert res.n_steps_actual is not None  # cfm4_adaptive_richardson は必ず populated
+    assert (
+        res.n_steps_actual is not None
+    )  # cfm4_adaptive_richardson_krylov は必ず populated
+    return elapsed, np.ascontiguousarray(res.psi_final), int(res.n_steps_actual)
+
+
+def _run_kryanneal_adaptive_chebyshev(
+    prob: IsingProblem,
+    sched: Schedule,
+    psi0: np.ndarray,
+    T: float,
+    atol: float,
+    chebyshev_tol: float | None,
+) -> tuple[float, np.ndarray, int]:
+    """kryanneal ``cfm4_adaptive_richardson_chebyshev`` 経路 (issue #122 Phase B).
+
+    Lanczos 版と同じ PI controller 構造で短時間プロパゲータだけが Chebyshev
+    3 項漸化に置き換わる. ``chebyshev_tol = None`` で ``QuantumAnnealer`` の
+    auto-coupling (``krylov_tol = tol_step · 1e-3``) を流用 (Chebyshev では
+    K_used 切り捨て閾値の意味).
+    """
+    ann = QuantumAnnealer(prob, sched, krylov_tol=chebyshev_tol)
+    t_start = time.perf_counter()
+    res = ann.run(
+        psi0,
+        0.0,
+        T,
+        method="cfm4_adaptive_richardson_chebyshev",
+        atol=atol,
+    )
+    elapsed = time.perf_counter() - t_start
+    assert res.n_steps_actual is not None
     return elapsed, np.ascontiguousarray(res.psi_final), int(res.n_steps_actual)
 
 
@@ -355,7 +387,7 @@ class _CellRecord:
     fidelity は後段 (reference 確定後) に計算するため, この段階では
     ``psi_final`` と ``wall_sec`` と ``n_steps_effective`` を保持する.
 
-    ``knob2_name`` / ``knob2_value`` は cfm4_adaptive_richardson の
+    ``knob2_name`` / ``knob2_value`` は cfm4_adaptive_richardson_krylov の
     ``krylov_tol`` のような **副次的な sweep 軸** を表す optional 拡張 (Phase 7
     / #93). 単軸 sweep cell では ``knob2_name = None``. ``knob2_value = None``
     かつ ``knob2_name != None`` は "auto" (自動結合) を表す sentinel.
@@ -597,7 +629,7 @@ def _sweep_one_scenario_n(
                 )
             )
 
-    if "cfm4_adaptive_richardson" in solvers:
+    if "cfm4_adaptive_richardson_krylov" in solvers:
         # Phase 7 (#93): krylov_tols sweep. 既定 ([None]) では knob2 を伏せ
         # (CSV/MD で空欄), 明示 sweep (len > 1 か 1 値だが非 None) のときに
         # secondary knob "kry" を MD/CSV に出す.
@@ -606,7 +638,7 @@ def _sweep_one_scenario_n(
         )
         kry_repr = ["auto" if k is None else f"{k:.1e}" for k in krylov_tols]
         print(
-            f"  cfm4_adaptive_richardson sweep atols={adaptive_atols} × "
+            f"  cfm4_adaptive_richardson_krylov sweep atols={adaptive_atols} × "
             f"krylov_tols={kry_repr} ...",
             flush=True,
         )
@@ -627,11 +659,53 @@ def _sweep_one_scenario_n(
                     _CellRecord(
                         scenario=scenario.name,
                         n=n,
-                        solver="cfm4_adaptive_richardson",
+                        solver="cfm4_adaptive_richardson_krylov",
                         knob_name="atol",
                         knob_value=atol,
                         knob2_name=knob2_name,
                         knob2_value=knob2_value,
+                        n_steps_effective=n_steps_actual,
+                        wall_sec=wall,
+                        psi_final=psi,
+                    )
+                )
+
+    if "cfm4_adaptive_richardson_chebyshev" in solvers:
+        # issue #122 (Phase B): Chebyshev variant. ``krylov_tols`` を共有して
+        # sweep する (semantically ``chebyshev_tol`` = Krylov 近似の許容誤差
+        # 規約を流用; krylov.py の Phase 8 設計参照). knob 構造は Lanczos 版と
+        # 完全に同じため emit_kry_knob 判定もそのまま使い回す.
+        emit_kry_knob_cheb = (len(krylov_tols) > 1) or (
+            len(krylov_tols) == 1 and krylov_tols[0] is not None
+        )
+        kry_repr_cheb = ["auto" if k is None else f"{k:.1e}" for k in krylov_tols]
+        print(
+            f"  cfm4_adaptive_richardson_chebyshev sweep atols={adaptive_atols} × "
+            f"krylov_tols={kry_repr_cheb} ...",
+            flush=True,
+        )
+        for atol in adaptive_atols:
+            for cheb_tol in krylov_tols:
+                wall, psi, n_steps_actual = _run_kryanneal_adaptive_chebyshev(
+                    prob, sched, psi0, T, atol, cheb_tol
+                )
+                if emit_kry_knob_cheb:
+                    knob2_name_c: str | None = "kry"
+                    knob2_value_c: float | None = (
+                        float(cheb_tol) if cheb_tol is not None else None
+                    )
+                else:
+                    knob2_name_c = None
+                    knob2_value_c = None
+                records.append(
+                    _CellRecord(
+                        scenario=scenario.name,
+                        n=n,
+                        solver="cfm4_adaptive_richardson_chebyshev",
+                        knob_name="atol",
+                        knob_value=atol,
+                        knob2_name=knob2_name_c,
+                        knob2_value=knob2_value_c,
                         n_steps_effective=n_steps_actual,
                         wall_sec=wall,
                         psi_final=psi,
@@ -845,10 +919,12 @@ def _write_md(
     lines.append(
         f"- **cfm4 dt sweep**: `{args.cfm4_dts}` (dt_min={args.cfm4_dt_min:g})"
     )
-    lines.append(f"- **cfm4_adaptive_richardson atol sweep**: `{args.adaptive_tols}`")
+    lines.append(
+        f"- **cfm4_adaptive_richardson_krylov atol sweep**: `{args.adaptive_tols}`"
+    )
     kry_repr_list = ["auto" if k is None else f"{k:.1e}" for k in args.krylov_tols]
     lines.append(
-        f"- **cfm4_adaptive_richardson krylov_tol sweep**: `{kry_repr_list}` "
+        f"- **cfm4_adaptive_richardson_krylov krylov_tol sweep**: `{kry_repr_list}` "
         "(`auto` = `tol_step * 1e-3` 自動結合; Phase 7 / #93)"
     )
     lines.append(f"- **qutip tol sweep**: `{args.qutip_tols}`")
@@ -924,12 +1000,12 @@ def _write_md(
                     diff_str = "(★ reference)"
                 lines.append(f"| {tol:.1e} | {wall:.3f} | {diff_str} |")
             lines.append("")
-            # Cross-check: kryanneal cfm4_adaptive_richardson の最 tightest atol cell
+            # Cross-check: kryanneal cfm4_adaptive_richardson_krylov の最 tightest atol cell
             # の infidelity (= 既存 sweep に含まれている).
             kry_adaptive_cells = [
                 (r, infids[k])
                 for k, r in enumerate(records)
-                if r.solver == "cfm4_adaptive_richardson"
+                if r.solver == "cfm4_adaptive_richardson_krylov"
             ]
             if kry_adaptive_cells:
                 # infid 最小 cell (= 最も accurate) を pick. krylov_tols sweep が
@@ -941,7 +1017,7 @@ def _write_md(
                 psi_diff_est = float(np.sqrt(max(infid_tight, 0.0)))
                 tight_knob_str = _format_combined_knob(r_tight)
                 lines.append(
-                    f"**Cross-check**: kryanneal cfm4_adaptive_richardson at "
+                    f"**Cross-check**: kryanneal cfm4_adaptive_richardson_krylov at "
                     f"{tight_knob_str} (independent algorithm family) "
                     f"reproduces reference with 1-fid="
                     f"{('<1e-16' if infid_tight == 0.0 else f'{infid_tight:.3e}')} "
@@ -1188,7 +1264,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=_parse_float_list,
         default=list(_DEFAULT_ADAPTIVE_TOLS),
         help=(
-            f"cfm4_adaptive_richardson の atol sweep "
+            f"cfm4_adaptive_richardson_krylov の atol sweep "
             f"(default: {_DEFAULT_ADAPTIVE_TOLS})."
         ),
     )
@@ -1197,7 +1273,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=_parse_krylov_tol_list,
         default=list(_DEFAULT_KRYLOV_TOLS),
         help=(
-            "cfm4_adaptive_richardson の krylov_tol sweep. comma-separated; "
+            "cfm4_adaptive_richardson_krylov の krylov_tol sweep. comma-separated; "
             "'auto' で QuantumAnnealer の自動結合 (= tol_step * 1e-3) を選ぶ. "
             f"default: {['auto' if k is None else f'{k:.1e}' for k in _DEFAULT_KRYLOV_TOLS]}. "
             "Phase 7 (#93) 評価例: --krylov-tols auto,1e-8,1e-6 で atol × "

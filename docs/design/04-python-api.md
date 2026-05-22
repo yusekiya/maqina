@@ -139,7 +139,7 @@ class QuantumAnnealer:
         t0: float,
         t1: float,
         *,
-        method: Literal["m2", "cfm4", "cfm4_adaptive_richardson"] = "m2",
+        method: Literal["m2", "cfm4", "cfm4_adaptive_richardson_krylov"] = "m2",
         n_steps: int | None = None,    # 固定ステップ時 (m2 / cfm4)
         atol: float | None = None,     # adaptive 時の local error 許容値
         rtol: float | None = None,
@@ -150,7 +150,7 @@ class QuantumAnnealer:
     ) -> QuantumResult: ...
 
     def create_simulator(
-        self, method: Literal["m2", "cfm4", "cfm4_adaptive_richardson"] = "cfm4",
+        self, method: Literal["m2", "cfm4", "cfm4_adaptive_richardson_krylov"] = "cfm4",
         **method_kwargs
     ) -> "AnnealingSimulator": ...
 ```
@@ -163,7 +163,7 @@ Phase 1 では `method="m2"` のみサポート, Phase 2 で `method="trotter"`
 (固定 dt Strang 2 次 Trotter, §5.3) と `method="trotter_suzuki4"` (固定
 dt Suzuki S_4 4 次 Trotter, §5.3) を追加, Phase 3 で `method="cfm4"`
 (固定 dt CFM4:2 commutator-free Magnus, §5.3) を追加, Phase 4 で
-`method="cfm4_adaptive_richardson"` (step-doubling Richardson 推定子 +
+`method="cfm4_adaptive_richardson_krylov"` (step-doubling Richardson 推定子 +
 PI controller, §5.3) を追加. それ以外は `NotImplementedError`.
 `observables` / `save_tlist` / `store_states` 引数は Phase 5 (issue #47)
 で有効化された. 仕様:
@@ -186,8 +186,8 @@ PI controller, §5.3) を追加. それ以外は `NotImplementedError`.
 
 `method="trotter"` / `method="trotter_suzuki4"` は Lanczos を使わないため,
 コンストラクタ引数 `m` / `krylov_tol` は無視される (`"m2"` / `"cfm4"` /
-`"cfm4_adaptive_richardson"` 経路でのみ意味を持つ). adaptive 経路の
-`atol` / `dt_init` は `method="cfm4_adaptive_richardson"` でのみ参照され,
+`"cfm4_adaptive_richardson_krylov"` 経路でのみ意味を持つ). adaptive 経路の
+`atol` / `dt_init` は `method="cfm4_adaptive_richardson_krylov"` でのみ参照され,
 固定 dt 経路では無視される.
 
 返り値 `QuantumResult`:
@@ -273,11 +273,11 @@ class AnnealingSimulator:
         t0: float,
         *,
         method: Literal[
-            "m2", "trotter", "trotter_suzuki4", "cfm4", "cfm4_adaptive_richardson"
+            "m2", "trotter", "trotter_suzuki4", "cfm4", "cfm4_adaptive_richardson_krylov"
         ] = "cfm4",
         m: int = 24,                  # Lanczos 部分空間次元 (QuantumAnnealer と統一)
         krylov_tol: float | None = None,
-        # ↓ adaptive (`cfm4_adaptive_richardson`) 専用; 固定 dt method で
+        # ↓ adaptive (`cfm4_adaptive_richardson_krylov`) 専用; 固定 dt method で
         #   非 None 指定すると ValueError
         atol: float | None = None,
         dt_init: float | None = None,

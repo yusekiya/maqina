@@ -210,6 +210,7 @@ __all__ = [
     "SnapshotData",
     "evolve_schedule_adaptive_m2",
     "evolve_schedule_adaptive_richardson",
+    "evolve_schedule_adaptive_richardson_chebyshev",
     "evolve_schedule_cfm4",
     "evolve_schedule_m2",
     "evolve_schedule_trotter",
@@ -1818,7 +1819,7 @@ def evolve_schedule_adaptive_m2(
     if save_tlist is not None:
         raise NotImplementedError(
             "save_tlist is not supported on the adaptive M2 driver; "
-            "use evolve_schedule_adaptive_richardson or method='cfm4_adaptive_richardson'."
+            "use evolve_schedule_adaptive_richardson or method='cfm4_adaptive_richardson_krylov'."
         )
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
@@ -2240,5 +2241,342 @@ def evolve_schedule_adaptive_richardson(
         np.asarray(err_lanczos_hist, dtype=np.float64),
         np.asarray(err_magnus_hist, dtype=np.float64),
         int(n_krylov_insufficient),
+        snapshot,
+    )
+
+
+def _adaptive_dispatch_richardson_estimate_chebyshev(
+    rust_mod: ModuleType | None,
+    psi: np.ndarray,
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    a_s1_full: float,
+    b_s1_full: float,
+    a_s2_full: float,
+    b_s2_full: float,
+    a_s1_h1: float,
+    b_s1_h1: float,
+    a_s2_h1: float,
+    b_s2_h1: float,
+    a_s1_h2: float,
+    b_s1_h2: float,
+    a_s2_h2: float,
+    b_s2_h2: float,
+    dt: float,
+    chebyshev_tol: float,
+    extrapolate: bool,
+) -> tuple[np.ndarray, float, int, float]:
+    """Chebyshev 経路 Richardson 推定子のディスパッチ.
+
+    issue #122 (Phase B). Chebyshev 経路は Python リファレンス実装を
+    持たない (chebyshev_propagate は Rust 側のみ). ``rust_mod`` が ``None``
+    なら ``NotImplementedError`` を上げる. これは "Rust 拡張 (BLAS / rayon /
+    SIMD 経路) が必須" を意味し, Lanczos 経路のような silent fallback は
+    提供しない (Chebyshev の数値挙動 + 性能特性の評価が Rust 側を前提と
+    しているため; Python ref 化は scope 外).
+    """
+    if rust_mod is None:
+        raise NotImplementedError(
+            "method='cfm4_adaptive_richardson_chebyshev' requires the Rust "
+            "extension (kryanneal._rust). Install with 'uv run maturin develop "
+            "--uv' or fall back to method='cfm4_adaptive_richardson_krylov' (Lanczos)."
+        )
+    psi_new, err, k_used_total, err_cheb_total = (
+        rust_mod.cfm4_step_chebyshev_with_richardson_estimate_py(
+            psi,
+            h_x,
+            h_p_diag,
+            a_s1_full,
+            b_s1_full,
+            a_s2_full,
+            b_s2_full,
+            a_s1_h1,
+            b_s1_h1,
+            a_s2_h1,
+            b_s2_h1,
+            a_s1_h2,
+            b_s1_h2,
+            a_s2_h2,
+            b_s2_h2,
+            dt,
+            chebyshev_tol,
+            extrapolate,
+        )
+    )
+    return psi_new, float(err), int(k_used_total), float(err_cheb_total)
+
+
+def evolve_schedule_adaptive_richardson_chebyshev(
+    h_x: np.ndarray,
+    h_p_diag: np.ndarray,
+    schedule: Schedule,
+    psi0: np.ndarray,
+    t0: float,
+    t1: float,
+    *,
+    chebyshev_tol: float = 1e-12,
+    tol_step: float = 1e-8,
+    dt0: float = 0.5,
+    dt_min: float = 1e-4,
+    dt_max: float | None = None,
+    safety: float = 0.9,
+    growth_max: float = 4.0,
+    max_rejects: int = 50,
+    richardson_extrapolate: bool = False,
+    observables: "dict[str, Observable] | None" = None,
+    save_tlist: np.ndarray | None = None,
+    store_states: bool = False,
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    SnapshotData | None,
+]:
+    """CFM4:2 + step-doubling Richardson + Chebyshev propagator (issue #122).
+
+    既存 :func:`evolve_schedule_adaptive_richardson` (Lanczos 経路) と
+    **同じ PI controller 構造** を維持したまま, 各 stage の短時間プロパゲータ
+    を Lanczos から Chebyshev 3 項漸化に差し替えた variant. アルゴリズム軸
+    での V matrix (dim × m_max) cache stall 回避 + Gram-Schmidt 消滅を
+    狙う (Phase A POC #120 / PR #121 で per-call 4.45× を実測).
+
+    Rust 拡張 (``_rust.cfm4_step_chebyshev_with_richardson_estimate_py``) が
+    必須. Python リファレンス fallback は提供しない (詳細は
+    :func:`_adaptive_dispatch_richardson_estimate_chebyshev`).
+
+    PI controller の Magnus 起因駆動量は Lanczos 版と同型:
+
+    .. code-block:: text
+
+        err_magnus = max(0, err - err_chebyshev_total)
+
+    ここで ``err_chebyshev_total`` は full + half×2 の 3 軌道分の Chebyshev
+    切り捨て残差 (``2·|J_{K+1}(z)|·‖ψ‖``) を triangle inequality で集約した
+    上界. Lanczos 版の ``err_lanczos_total`` と同じ役割.
+
+    Parameters
+    ----------
+    h_x, h_p_diag, schedule, psi0, t0, t1
+        :func:`evolve_schedule_adaptive_richardson` と同じ.
+    chebyshev_tol
+        Chebyshev 切り捨て次数 ``K_used`` の決定閾値
+        (``|J_{K+1}(z)| < chebyshev_tol / 2``). semantics は Lanczos 版の
+        ``krylov_tol`` 同等で, "Krylov 近似の許容誤差" 規約 (issue #98 Phase 8).
+        新パラメータは導入せず本 driver 内では ``chebyshev_tol`` 命名のみ
+        使う. 既定 ``1e-12``.
+    tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects,
+    richardson_extrapolate, observables, save_tlist, store_states
+        :func:`evolve_schedule_adaptive_richardson` と同じ.
+
+    Returns
+    -------
+    psi_final, t_history, dt_history, n_rejects
+        :func:`evolve_schedule_adaptive_richardson` と同じ.
+    k_used_history : np.ndarray
+        shape ``(K-1,)`` int64. 各 accept された step の Chebyshev
+        ``K_used`` 合計 (full + half×2 = 6 chebyshev_propagate 呼出の K_used
+        合計). Lanczos 版の ``m_eff_history`` に相当 (ただし上界 ``6m`` は
+        無く, K_used は ``z = R·dt`` に応じて動的に決まる).
+    beta_m_history : np.ndarray
+        shape ``(K-1,)`` float64. Chebyshev には β_m に相当する量がないため
+        本 driver では常に 0.0 を埋める (型互換のため). Lanczos 版との
+        コンシステンシのみ目的.
+    err_chebyshev_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の
+        ``err_chebyshev_total`` (Chebyshev 切り捨て残差の triangle inequality
+        和). Lanczos 版の ``err_lanczos_history`` に相当.
+    err_magnus_history : np.ndarray
+        shape ``(K-1,)`` float64. 各 accept された step の
+        ``err_magnus = max(0, err - err_chebyshev_total)`` (Magnus 起因の dt
+        誤差成分). PI controller の駆動量に使われた値.
+    n_chebyshev_insufficient : int
+        累積で ``err_chebyshev_total > tol_step`` を検出した step 数. Lanczos
+        版の ``n_krylov_insufficient`` に相当する診断指標.
+    snapshot
+        :func:`evolve_schedule_adaptive_richardson` と同じ.
+
+    Raises
+    ------
+    ValueError, RuntimeError
+        :func:`evolve_schedule_adaptive_richardson` と同様.
+    NotImplementedError
+        Rust 拡張 ``kryanneal._rust`` が import できなかった場合.
+    """
+    if not (t1 > t0):
+        raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
+    if not (dt0 > 0.0 and dt_min > 0.0 and dt_min <= dt0):
+        raise ValueError(
+            f"require 0 < dt_min <= dt0; got dt0={dt0!r}, dt_min={dt_min!r}"
+        )
+    if not (safety > 0.0):
+        raise ValueError(f"safety must be > 0, got {safety!r}")
+    if not (growth_max > 1.0):
+        raise ValueError(f"growth_max must be > 1, got {growth_max!r}")
+    if max_rejects < 1:
+        raise ValueError(f"max_rejects must be >= 1, got {max_rejects!r}")
+
+    dt_max_eff = float(dt_max) if dt_max is not None else 10.0 * float(dt0)
+    if not (dt_max_eff >= dt0):
+        raise ValueError(
+            f"dt_max must be >= dt0; got dt_max={dt_max_eff!r}, dt0={dt0!r}"
+        )
+
+    psi = np.ascontiguousarray(psi0, dtype=np.complex128)
+    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
+    h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
+    dim = int(psi.shape[0])
+
+    recorder = (
+        _SnapshotRecorder(save_tlist, observables, store_states, dim)
+        if save_tlist is not None
+        else None
+    )
+    save_targets = (
+        np.ascontiguousarray(save_tlist, dtype=np.float64)
+        if save_tlist is not None
+        else None
+    )
+    next_save_idx = 0
+
+    rust_mod = _rust_mod
+    if rust_mod is None:
+        # 駆動開始前に明示的に検知してわかりやすいエラーを出す
+        # (dispatcher 内でも同じ raise だが driver 入口で fail-fast).
+        raise NotImplementedError(
+            "evolve_schedule_adaptive_richardson_chebyshev requires the Rust "
+            "extension (kryanneal._rust). Build with 'uv run maturin develop "
+            "--uv' or fall back to evolve_schedule_adaptive_richardson "
+            "(Lanczos)."
+        )
+    t = float(t0)
+    t_end = float(t1)
+    dt = float(dt0)
+    n_rejects = 0
+    n_consecutive_rejects = 0
+    t_hist: list[float] = [t]
+    dt_hist: list[float] = []
+    k_used_hist: list[int] = []
+    beta_m_hist: list[float] = []
+    err_cheb_hist: list[float] = []
+    err_magnus_hist: list[float] = []
+    n_cheb_insufficient = 0
+    if recorder is not None and save_targets is not None:
+        recorder.record(t, psi)
+        while (
+            next_save_idx < save_targets.shape[0]
+            and abs(t - float(save_targets[next_save_idx])) <= _MERGE_TOL
+        ):
+            next_save_idx += 1
+    while t < t_end:
+        dt_try = min(dt, t_end - t)
+        clamped_to_target = False
+        if save_targets is not None and next_save_idx < save_targets.shape[0]:
+            target = float(save_targets[next_save_idx])
+            remaining = target - t
+            if 0.0 < remaining <= dt_try + _MERGE_TOL:
+                dt_try = remaining
+                clamped_to_target = True
+        half_dt = 0.5 * dt_try
+        t_s1_full = t + _CFM4_C1 * dt_try
+        t_s2_full = t + _CFM4_C2 * dt_try
+        t_s1_h1 = t + _CFM4_C1 * half_dt
+        t_s2_h1 = t + _CFM4_C2 * half_dt
+        t_s1_h2 = t + half_dt + _CFM4_C1 * half_dt
+        t_s2_h2 = t + half_dt + _CFM4_C2 * half_dt
+        a_s1_full, b_s1_full = schedule.coeffs_at(t_s1_full)
+        a_s2_full, b_s2_full = schedule.coeffs_at(t_s2_full)
+        a_s1_h1, b_s1_h1 = schedule.coeffs_at(t_s1_h1)
+        a_s2_h1, b_s2_h1 = schedule.coeffs_at(t_s2_h1)
+        a_s1_h2, b_s1_h2 = schedule.coeffs_at(t_s1_h2)
+        a_s2_h2, b_s2_h2 = schedule.coeffs_at(t_s2_h2)
+
+        psi_new, err, k_used_total, err_chebyshev_total = (
+            _adaptive_dispatch_richardson_estimate_chebyshev(
+                rust_mod,
+                psi,
+                h_x_arr,
+                h_p_diag_arr,
+                a_s1_full,
+                b_s1_full,
+                a_s2_full,
+                b_s2_full,
+                a_s1_h1,
+                b_s1_h1,
+                a_s2_h1,
+                b_s2_h1,
+                a_s1_h2,
+                b_s1_h2,
+                a_s2_h2,
+                b_s2_h2,
+                dt_try,
+                chebyshev_tol,
+                richardson_extrapolate,
+            )
+        )
+        err_magnus = max(0.0, err - err_chebyshev_total)
+        if err_chebyshev_total > tol_step:
+            n_cheb_insufficient += 1
+
+        accept = (err_magnus <= tol_step) or (dt_try <= dt_min)
+        if accept:
+            psi = psi_new
+            t = t + dt_try
+            t_hist.append(t)
+            dt_hist.append(dt_try)
+            k_used_hist.append(int(k_used_total))
+            err_cheb_hist.append(float(err_chebyshev_total))
+            err_magnus_hist.append(float(err_magnus))
+            # Chebyshev には β_m 相当の量がない. 型互換のため 0.0 で埋める.
+            beta_m_hist.append(0.0)
+            n_consecutive_rejects = 0
+            if recorder is not None and save_targets is not None:
+                if clamped_to_target:
+                    recorder.record(t, psi)
+                    while (
+                        next_save_idx < save_targets.shape[0]
+                        and abs(t - float(save_targets[next_save_idx])) <= _MERGE_TOL
+                    ):
+                        next_save_idx += 1
+            err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+            dt = _pi_dt_next(
+                dt_try,
+                err_for_pi,
+                tol_step=tol_step,
+                safety=safety,
+                growth_max=growth_max,
+                dt_max=dt_max_eff,
+                dt_min=dt_min,
+                p=4,
+            )
+        else:
+            n_rejects += 1
+            n_consecutive_rejects += 1
+            if n_consecutive_rejects > max_rejects:
+                raise RuntimeError(
+                    f"adaptive Chebyshev driver: exceeded max_rejects={max_rejects} "
+                    f"consecutive rejects at t={t}, dt={dt_try}, "
+                    f"err={err}, err_magnus={err_magnus}, "
+                    f"err_chebyshev={err_chebyshev_total}; "
+                    f"consider relaxing tol_step or tightening chebyshev_tol."
+                )
+            dt = max(dt_try * 0.5, dt_min)
+
+    snapshot = recorder.finalize() if recorder is not None else None
+    return (
+        psi,
+        np.asarray(t_hist, dtype=np.float64),
+        np.asarray(dt_hist, dtype=np.float64),
+        int(n_rejects),
+        np.asarray(k_used_hist, dtype=np.int64),
+        np.asarray(beta_m_hist, dtype=np.float64),
+        np.asarray(err_cheb_hist, dtype=np.float64),
+        np.asarray(err_magnus_hist, dtype=np.float64),
+        int(n_cheb_insufficient),
         snapshot,
     )

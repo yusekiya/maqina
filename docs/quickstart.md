@@ -33,7 +33,7 @@ uv run maturin develop --uv --release   # 性能計測時
 ## 1. 最小例: 時間発展して基底状態への重なりを見る
 
 `IsingProblem` (TFIM の定義) と `Schedule.linear` (線形アニーリング
-schedule) を組み合わせて `QuantumAnnealer.run(method="cfm4_adaptive_richardson")`
+schedule) を組み合わせて `QuantumAnnealer.run(method="cfm4_adaptive_richardson_krylov")`
 を回し, ``[t0, t1]`` 区間の時間発展を 1 回で取得する最小サンプル。
 ``H_problem`` は ``Z`` のみで書ける任意の k-local 多項式を Z 基底で
 対角化した ``(2^N,)`` ベクトルで渡す (本パッケージは k-local 表現を
@@ -69,7 +69,7 @@ result = ann.run(
     psi0,
     t0=0.0,
     t1=sched.T,
-    method="cfm4_adaptive_richardson",
+    method="cfm4_adaptive_richardson_krylov",
     atol=1e-8,
 )
 
@@ -114,7 +114,7 @@ result = ann.run(
     psi0,
     t0=0.0,
     t1=sched.T,
-    method="cfm4_adaptive_richardson",
+    method="cfm4_adaptive_richardson_krylov",
     atol=1e-8,
     observables={"M_z": m_z},
     save_tlist=save_tlist,
@@ -152,7 +152,7 @@ psi0 = uniform_superposition(n)
 m_z = Observable.magnetization(n)
 
 ann = QuantumAnnealer(prob, sched)
-sim = ann.create_simulator(psi0, t0=0.0, method="cfm4_adaptive_richardson", atol=1e-8)
+sim = ann.create_simulator(psi0, t0=0.0, method="cfm4_adaptive_richardson_krylov", atol=1e-8)
 
 sim.advance_to(sched.T / 2)
 mid = sim.measure(m_z)
@@ -247,7 +247,7 @@ for T in (1.0, 100.0):
         psi0,
         t0=0.0,
         t1=sched.T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
         save_tlist=save_tlist,
         store_states=True,

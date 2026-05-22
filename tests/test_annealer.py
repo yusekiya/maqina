@@ -11,7 +11,7 @@ issue #8 / #21 / #22 / #32 / #39 の acceptance:
   ``n_matvec = n_steps * 5 * (N + 1)`` の見積もりが返る.
 * ``method="cfm4"`` 経路 (Phase 3 C2) でも同じ smoke を満たし,
   ``n_matvec = n_steps * 2 * m`` の見積もりが返る.
-* ``method="cfm4_adaptive_richardson"`` 経路 (Phase 4 C3) でも同じ smoke
+* ``method="cfm4_adaptive_richardson_krylov"`` 経路 (Phase 4 C3) でも同じ smoke
   を満たし, ``n_matvec = n_steps_actual * 6 * m`` の見積もりと
   ``result.success`` / ``result.method`` / ``result.n_steps_actual``
   の新フィールドが正しく返る.
@@ -214,7 +214,7 @@ def test_run_cfm4_smoke_and_ground_state() -> None:
 
 
 def test_run_cfm4_adaptive_richardson_smoke_and_ground_state() -> None:
-    """``method="cfm4_adaptive_richardson"`` smoke + GS 到達確率 (Phase 4 C3).
+    """``method="cfm4_adaptive_richardson_krylov"`` smoke + GS 到達確率 (Phase 4 C3).
 
     n=4, T=10 linear schedule の強磁性 chain (縮退基底 ``|0000⟩`` /
     ``|1111⟩``) で adaptive 経路を実行し, 終端波動関数の基底状態
@@ -223,7 +223,7 @@ def test_run_cfm4_adaptive_richardson_smoke_and_ground_state() -> None:
     あわせて Phase 4 規約を検証:
 
     * ``n_matvec = n_steps_actual * 6 * m`` (full 2m + half×2 4m).
-    * ``result.success == True``, ``result.method == "cfm4_adaptive_richardson"``,
+    * ``result.success == True``, ``result.method == "cfm4_adaptive_richardson_krylov"``,
       ``result.n_steps_actual is not None``.
     """
     n = 4
@@ -239,7 +239,7 @@ def test_run_cfm4_adaptive_richardson_smoke_and_ground_state() -> None:
         psi0,
         0.0,
         sched.T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
         dt_init=0.1,
     )
@@ -248,7 +248,7 @@ def test_run_cfm4_adaptive_richardson_smoke_and_ground_state() -> None:
     assert res.psi_final.shape == (1 << n,)
     assert res.psi_final.dtype == np.complex128
     assert res.success is True
-    assert res.method == "cfm4_adaptive_richardson"
+    assert res.method == "cfm4_adaptive_richardson_krylov"
     assert res.n_steps_actual is not None
     assert res.n_steps_actual >= 1
     # adaptive 経路は要求 step 数を持たないので n_steps = n_steps_actual.
@@ -263,14 +263,14 @@ def test_run_cfm4_adaptive_richardson_smoke_and_ground_state() -> None:
 
     p_gs = _ground_state_probability(res.psi_final, prob.H_p_diag)
     assert p_gs > 0.95, (
-        f"ground state probability too low (cfm4_adaptive_richardson): {p_gs}"
+        f"ground state probability too low (cfm4_adaptive_richardson_krylov): {p_gs}"
     )
 
 
 def test_run_rejects_unsupported_method() -> None:
     """サポート対象外の ``method`` で ``NotImplementedError``.
 
-    Phase 4 で ``cfm4_adaptive_richardson`` が追加されたため, 旧仕様の
+    Phase 4 で ``cfm4_adaptive_richardson_krylov`` が追加されたため, 旧仕様の
     sentinel ``"adaptive_m2"`` (本リリースでは API 表面に出さない) を
     試して raise を確認する.
     """
@@ -474,7 +474,7 @@ def test_create_simulator_supports_same_methods_as_run() -> None:
         "trotter",
         "trotter_suzuki4",
         "cfm4",
-        "cfm4_adaptive_richardson",
+        "cfm4_adaptive_richardson_krylov",
     ]
     for method in methods_supported:
         sim = ann.create_simulator(psi0, 0.0, method=method)  # type: ignore[arg-type]

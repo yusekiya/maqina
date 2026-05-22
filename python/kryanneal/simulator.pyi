@@ -6,7 +6,7 @@
 設計詳細は ``docs/design/04-python-api.md`` §4.5 を一次資料とする.
 
 ``QuantumAnnealer.run`` と同じプロパゲータ集合 (``m2`` / ``trotter`` /
-``trotter_suzuki4`` / ``cfm4`` / ``cfm4_adaptive_richardson``) を内部で使うが,
+``trotter_suzuki4`` / ``cfm4`` / ``cfm4_adaptive_richardson_krylov``) を内部で使うが,
 1 step または部分区間ごとに状態を取り出して ``Observable`` で測れる
 step-wise stateful API. 用途は中間時刻で diagnostic / observable history を
 取りつつ続きを発展させる workflow.
@@ -24,7 +24,7 @@ step-wise stateful API. 用途は中間時刻で diagnostic / observable history
   ``rel < 1e-13``) させるため, 内部では同じ ``evolve_schedule_*`` driver
   を呼ぶ. ``step`` は ``n_steps=1`` の薄いラッパ, ``advance_to`` は
   fixed-dt なら ``run`` と同じ driver call.
-* adaptive 経路 (``cfm4_adaptive_richardson``) の ``step(dt)`` は
+* adaptive 経路 (``cfm4_adaptive_richardson_krylov``) の ``step(dt)`` は
   ``dt`` を PI controller の proposal として渡し, driver 側で reject が
   起これば dt を縮めて再試行 (``dt_max=dt`` で growth を禁じ, ``dt0=dt``
   で初回試行). 結果として ``_t`` は exactly ``+dt`` 進む (1 step(dt) 内に
@@ -35,7 +35,7 @@ from __future__ import annotations as annotations
 from typing import Literal as Literal
 import numpy as np
 from kryanneal._helpers import _KRYLOV_TOL_ATOL_RATIO as _KRYLOV_TOL_ATOL_RATIO, _KRYLOV_TOL_FIXED_DEFAULT as _KRYLOV_TOL_FIXED_DEFAULT, _resolve_dt_init_auto as _resolve_dt_init_auto, _resolve_dt_max_auto as _resolve_dt_max_auto, _validate_psi0 as _validate_psi0
-from kryanneal.krylov import evolve_schedule_adaptive_richardson as evolve_schedule_adaptive_richardson, evolve_schedule_cfm4 as evolve_schedule_cfm4, evolve_schedule_m2 as evolve_schedule_m2, evolve_schedule_trotter as evolve_schedule_trotter, evolve_schedule_trotter_suzuki4 as evolve_schedule_trotter_suzuki4
+from kryanneal.krylov import evolve_schedule_adaptive_richardson as evolve_schedule_adaptive_richardson, evolve_schedule_adaptive_richardson_chebyshev as evolve_schedule_adaptive_richardson_chebyshev, evolve_schedule_cfm4 as evolve_schedule_cfm4, evolve_schedule_m2 as evolve_schedule_m2, evolve_schedule_trotter as evolve_schedule_trotter, evolve_schedule_trotter_suzuki4 as evolve_schedule_trotter_suzuki4
 from kryanneal.observable import Observable as Observable
 from kryanneal.problem import IsingProblem as IsingProblem
 from kryanneal.schedule import Schedule as Schedule
@@ -59,7 +59,7 @@ class AnnealingSimulator:
     method
         プロパゲータ. ``QuantumAnnealer.run`` と同じ集合をサポート
         (``m2`` / ``trotter`` / ``trotter_suzuki4`` / ``cfm4`` /
-        ``cfm4_adaptive_richardson``). default ``"cfm4"``.
+        ``cfm4_adaptive_richardson_krylov``). default ``"cfm4"``.
     m
         Lanczos / Krylov 部分空間次元. ``m >= 1``. default ``24``.
         ``trotter`` / ``trotter_suzuki4`` 経路では無視される (Lanczos
@@ -78,7 +78,7 @@ class AnnealingSimulator:
           は ``atol`` で決まる; default ``atol=1e-8`` → ``1e-11``).
         * 固定 dt 経路: ``1e-12`` (static fallback).
     atol
-        adaptive 経路 (``cfm4_adaptive_richardson``) 専用. PI controller
+        adaptive 経路 (``cfm4_adaptive_richardson_krylov``) 専用. PI controller
         の局所誤差閾値 ``tol_step``. ``None`` (default) で driver default
         ``1e-8`` を使う. 固定 dt method で指定すると ``ValueError``.
     dt_init
@@ -143,7 +143,7 @@ class AnnealingSimulator:
     _psi: Any
     _n_matvec: Any
 
-    def __init__(self, problem: IsingProblem, schedule: Schedule, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='cfm4', m: int=24, krylov_tol: float | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> None:
+    def __init__(self, problem: IsingProblem, schedule: Schedule, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4', m: int=24, krylov_tol: float | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> None:
         ...
 
     @property
@@ -175,7 +175,7 @@ class AnnealingSimulator:
 
         固定 dt 経路 (``m2`` / ``trotter`` / ``trotter_suzuki4`` /
         ``cfm4``) では文字通り 1 step (``n_steps=1`` の driver call).
-        adaptive 経路 (``cfm4_adaptive_richardson``) では ``dt`` を PI
+        adaptive 経路 (``cfm4_adaptive_richardson_krylov``) では ``dt`` を PI
         controller の proposal として渡し, driver 側で reject が起きれば
         dt を縮めて再試行する. いずれの場合も呼出後の ``_t`` は exactly
         ``+dt`` 進む (adaptive 経路で 1 step(dt) 内に複数 internal accept

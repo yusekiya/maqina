@@ -3,7 +3,7 @@
 設計詳細は ``docs/design/04-python-api.md`` §4.5 を一次資料とする.
 
 ``QuantumAnnealer.run`` と同じプロパゲータ集合 (``m2`` / ``trotter`` /
-``trotter_suzuki4`` / ``cfm4`` / ``cfm4_adaptive_richardson``) を内部で使うが,
+``trotter_suzuki4`` / ``cfm4`` / ``cfm4_adaptive_richardson_krylov``) を内部で使うが,
 1 step または部分区間ごとに状態を取り出して ``Observable`` で測れる
 step-wise stateful API. 用途は中間時刻で diagnostic / observable history を
 取りつつ続きを発展させる workflow.
@@ -21,7 +21,7 @@ step-wise stateful API. 用途は中間時刻で diagnostic / observable history
   ``rel < 1e-13``) させるため, 内部では同じ ``evolve_schedule_*`` driver
   を呼ぶ. ``step`` は ``n_steps=1`` の薄いラッパ, ``advance_to`` は
   fixed-dt なら ``run`` と同じ driver call.
-* adaptive 経路 (``cfm4_adaptive_richardson``) の ``step(dt)`` は
+* adaptive 経路 (``cfm4_adaptive_richardson_krylov``) の ``step(dt)`` は
   ``dt`` を PI controller の proposal として渡し, driver 側で reject が
   起これば dt を縮めて再試行 (``dt_max=dt`` で growth を禁じ, ``dt0=dt``
   で初回試行). 結果として ``_t`` は exactly ``+dt`` 進む (1 step(dt) 内に
@@ -44,6 +44,7 @@ from kryanneal._helpers import (
 )
 from kryanneal.krylov import (
     evolve_schedule_adaptive_richardson,
+    evolve_schedule_adaptive_richardson_chebyshev,
     evolve_schedule_cfm4,
     evolve_schedule_m2,
     evolve_schedule_trotter,
@@ -59,7 +60,9 @@ __all__ = ["AnnealingSimulator"]
 _FIXED_DT_METHODS: frozenset[str] = frozenset(
     {"m2", "trotter", "trotter_suzuki4", "cfm4"}
 )
-_ADAPTIVE_METHODS: frozenset[str] = frozenset({"cfm4_adaptive_richardson"})
+_ADAPTIVE_METHODS: frozenset[str] = frozenset(
+    {"cfm4_adaptive_richardson_krylov", "cfm4_adaptive_richardson_chebyshev"}
+)
 _VALID_METHODS: frozenset[str] = _FIXED_DT_METHODS | _ADAPTIVE_METHODS
 
 # adaptive driver の ``tol_step`` default. QuantumAnnealer.run と同一値.
@@ -83,7 +86,7 @@ class AnnealingSimulator:
     method
         プロパゲータ. ``QuantumAnnealer.run`` と同じ集合をサポート
         (``m2`` / ``trotter`` / ``trotter_suzuki4`` / ``cfm4`` /
-        ``cfm4_adaptive_richardson``). default ``"cfm4"``.
+        ``cfm4_adaptive_richardson_krylov``). default ``"cfm4"``.
     m
         Lanczos / Krylov 部分空間次元. ``m >= 1``. default ``24``.
         ``trotter`` / ``trotter_suzuki4`` 経路では無視される (Lanczos
@@ -102,7 +105,7 @@ class AnnealingSimulator:
           は ``atol`` で決まる; default ``atol=1e-8`` → ``1e-11``).
         * 固定 dt 経路: ``1e-12`` (static fallback).
     atol
-        adaptive 経路 (``cfm4_adaptive_richardson``) 専用. PI controller
+        adaptive 経路 (``cfm4_adaptive_richardson_krylov``) 専用. PI controller
         の局所誤差閾値 ``tol_step``. ``None`` (default) で driver default
         ``1e-8`` を使う. 固定 dt method で指定すると ``ValueError``.
     dt_init
@@ -163,7 +166,12 @@ class AnnealingSimulator:
         t0: float,
         *,
         method: Literal[
-            "m2", "trotter", "trotter_suzuki4", "cfm4", "cfm4_adaptive_richardson"
+            "m2",
+            "trotter",
+            "trotter_suzuki4",
+            "cfm4",
+            "cfm4_adaptive_richardson_krylov",
+            "cfm4_adaptive_richardson_chebyshev",
         ] = "cfm4",
         m: int = 24,
         krylov_tol: float | None = None,
@@ -195,7 +203,7 @@ class AnnealingSimulator:
                 if val is not None:
                     raise ValueError(
                         f"{name} is only valid for adaptive method "
-                        f"'cfm4_adaptive_richardson'; got method={method!r} "
+                        f"'cfm4_adaptive_richardson_krylov'; got method={method!r} "
                         f"with {name}={val!r}"
                     )
 
@@ -209,6 +217,15 @@ class AnnealingSimulator:
             not isinstance(m_max, (int, np.integer)) or m_max < 1
         ):
             raise ValueError(f"m_max must be a positive integer or None, got {m_max!r}")
+        # issue #122 (Phase B): Chebyshev variant は ``m_max`` を取らない
+        # (K_used は ``chebyshev_tol`` から動的決定; Krylov 部分空間次元の概念
+        # 自体が無い). silent 無視は debug 罠なので明示的に弾く.
+        if method == "cfm4_adaptive_richardson_chebyshev" and m_max is not None:
+            raise ValueError(
+                "m_max is not supported for method="
+                "'cfm4_adaptive_richardson_chebyshev' "
+                "(Chebyshev uses dynamic K_used, not Krylov subspace dimension)."
+            )
 
         psi0_arr = _validate_psi0(problem, psi0)
 
@@ -268,7 +285,7 @@ class AnnealingSimulator:
 
         固定 dt 経路 (``m2`` / ``trotter`` / ``trotter_suzuki4`` /
         ``cfm4``) では文字通り 1 step (``n_steps=1`` の driver call).
-        adaptive 経路 (``cfm4_adaptive_richardson``) では ``dt`` を PI
+        adaptive 経路 (``cfm4_adaptive_richardson_krylov``) では ``dt`` を PI
         controller の proposal として渡し, driver 側で reject が起きれば
         dt を縮めて再試行する. いずれの場合も呼出後の ``_t`` は exactly
         ``+dt`` 進む (adaptive 経路で 1 step(dt) 内に複数 internal accept
@@ -494,30 +511,58 @@ class AnnealingSimulator:
         # err_lanczos / err_magnus / n_krylov_insufficient は使わない
         # (simulator は per-step API なので diagnostic 集計は QuantumAnnealer
         # 経由で行う). 全て discard.
-        (
-            psi_new,
-            _t_hist,
-            _dt_hist,
-            _n_rej,
-            m_eff_hist,
-            _beta_m_hist,
-            _err_lanczos_hist,
-            _err_magnus_hist,
-            _n_krylov_insufficient,
-            _snapshot,
-        ) = evolve_schedule_adaptive_richardson(
-            h_x=self.problem.h_x,
-            h_p_diag=self.problem.H_p_diag,
-            schedule=self.schedule,
-            psi0=self._psi,
-            t0=self._t,
-            t1=t_next,
-            m=m_eff_param,
-            krylov_tol=krylov_tol,
-            tol_step=tol_step,
-            dt0=dt0,
-            dt_max=dt_max_resolved,
-        )
+        # issue #122 (Phase B): Chebyshev variant も 10-tuple 互換で,
+        # 4 番目の要素は m_eff_hist の代わりに k_used_hist (用途は同じ:
+        # per-step propagator 評価コスト統計).
+        if self._method == "cfm4_adaptive_richardson_chebyshev":
+            (
+                psi_new,
+                _t_hist,
+                _dt_hist,
+                _n_rej,
+                m_eff_hist,
+                _beta_m_hist,
+                _err_lanczos_hist,
+                _err_magnus_hist,
+                _n_krylov_insufficient,
+                _snapshot,
+            ) = evolve_schedule_adaptive_richardson_chebyshev(
+                h_x=self.problem.h_x,
+                h_p_diag=self.problem.H_p_diag,
+                schedule=self.schedule,
+                psi0=self._psi,
+                t0=self._t,
+                t1=t_next,
+                chebyshev_tol=krylov_tol,
+                tol_step=tol_step,
+                dt0=dt0,
+                dt_max=dt_max_resolved,
+            )
+        else:
+            (
+                psi_new,
+                _t_hist,
+                _dt_hist,
+                _n_rej,
+                m_eff_hist,
+                _beta_m_hist,
+                _err_lanczos_hist,
+                _err_magnus_hist,
+                _n_krylov_insufficient,
+                _snapshot,
+            ) = evolve_schedule_adaptive_richardson(
+                h_x=self.problem.h_x,
+                h_p_diag=self.problem.H_p_diag,
+                schedule=self.schedule,
+                psi0=self._psi,
+                t0=self._t,
+                t1=t_next,
+                m=m_eff_param,
+                krylov_tol=krylov_tol,
+                tol_step=tol_step,
+                dt0=dt0,
+                dt_max=dt_max_resolved,
+            )
         self._psi = psi_new
         self._t = t_next
         if m_eff_hist.size > 0:

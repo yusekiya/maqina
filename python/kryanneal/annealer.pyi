@@ -20,7 +20,7 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
 * サポート ``method``: ``"m2"`` (固定 dt M2 中点則, Phase 1), ``"trotter"``
   (固定 dt Strang 2 次 Trotter, Phase 2), ``"trotter_suzuki4"`` (固定 dt
   Suzuki S_4 4 次 Trotter, Phase 2 末), ``"cfm4"`` (固定 dt CFM4:2
-  commutator-free Magnus, Phase 3), ``"cfm4_adaptive_richardson"`` (Phase 4
+  commutator-free Magnus, Phase 3), ``"cfm4_adaptive_richardson_krylov"`` (Phase 4
   C3, step-doubling Richardson + PI controller). それ以外は
   ``NotImplementedError``.
 * ``save_tlist`` 引数は **API 互換性のために予約済み** だが本リリースでは
@@ -62,7 +62,7 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
 ``evolve_schedule_cfm4`` (固定 dt driver) / ``evolve_schedule_adaptive_richardson``
 (adaptive driver) を内部で呼ぶ薄いラッパ. 入力検証 (shape / dtype /
 L2-normalize) を本クラスで集中させ, krylov 層は数値計算に専念させる.
-``m`` / ``krylov_tol`` は ``"m2"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson"``
+``m`` / ``krylov_tol`` は ``"m2"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"``
 経路でのみ意味を持ち, ``"trotter"`` / ``"trotter_suzuki4"`` 経路は Lanczos を
 使わないため両パラメータは無視される.
 """
@@ -80,7 +80,7 @@ from kryanneal._helpers import _gershgorin_norm_upper_bound as _gershgorin_norm_
 from kryanneal._helpers import _resolve_dt_init_auto as _resolve_dt_init_auto
 from kryanneal._helpers import _resolve_dt_max_auto as _resolve_dt_max_auto
 from kryanneal._helpers import _validate_psi0 as _validate_psi0
-from kryanneal.krylov import evolve_schedule_adaptive_richardson as evolve_schedule_adaptive_richardson, evolve_schedule_cfm4 as evolve_schedule_cfm4, evolve_schedule_m2 as evolve_schedule_m2, evolve_schedule_trotter as evolve_schedule_trotter, evolve_schedule_trotter_suzuki4 as evolve_schedule_trotter_suzuki4
+from kryanneal.krylov import evolve_schedule_adaptive_richardson as evolve_schedule_adaptive_richardson, evolve_schedule_adaptive_richardson_chebyshev as evolve_schedule_adaptive_richardson_chebyshev, evolve_schedule_cfm4 as evolve_schedule_cfm4, evolve_schedule_m2 as evolve_schedule_m2, evolve_schedule_trotter as evolve_schedule_trotter, evolve_schedule_trotter_suzuki4 as evolve_schedule_trotter_suzuki4
 from kryanneal.observable import Observable as Observable
 from kryanneal.problem import IsingProblem as IsingProblem
 from kryanneal.result import QuantumResult as QuantumResult
@@ -110,7 +110,7 @@ class QuantumAnnealer:
 
         ``None`` (既定) のとき経路ごとに自動解決する (issue #54):
 
-        * ``cfm4_adaptive_richardson`` (adaptive Richardson):
+        * ``cfm4_adaptive_richardson_krylov`` (adaptive Richardson):
           ``run`` 時の ``atol`` (実効 ``tol_step``) に対し
           ``effective_krylov_tol = tol_step · _KRYLOV_TOL_ATOL_RATIO``
           (既定 ``1e-3``). atol=1e-8 default で ``1e-11``.
@@ -142,7 +142,7 @@ class QuantumAnnealer:
     def __init__(self, problem: IsingProblem, schedule: Schedule, *, m: int=24, krylov_tol: float | None=None) -> None:
         ...
 
-    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='m2', n_steps: int | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None, observables: dict[str, Observable] | None=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> QuantumResult:
+    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='m2', n_steps: int | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None, observables: dict[str, Observable] | None=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> QuantumResult:
         """``[t0, t1]`` 区間で時間発展を実行し ``QuantumResult`` を返す.
 
         Parameters
@@ -157,10 +157,10 @@ class QuantumAnnealer:
             ``"trotter"`` (固定 dt Strang 2 次 Trotter, Phase 2),
             ``"trotter_suzuki4"`` (固定 dt Suzuki S_4 4 次 Trotter, Phase 2 末),
             ``"cfm4"`` (固定 dt CFM4:2 commutator-free Magnus, Phase 3),
-            または ``"cfm4_adaptive_richardson"`` (Phase 4 C3,
+            または ``"cfm4_adaptive_richardson_krylov"`` (Phase 4 C3,
             step-doubling Richardson + PI controller). Trotter 系経路は
             Lanczos を呼ばないため ``m`` / ``krylov_tol`` は無視される.
-            ``"cfm4"`` / ``"cfm4_adaptive_richardson"`` は M2 と同じく
+            ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"`` は M2 と同じく
             Lanczos を介すので ``m`` / ``krylov_tol`` が有効.
         n_steps
             固定 dt 経路の step 数 (``n_steps >= 1``). 等間隔 ``dt =
@@ -256,7 +256,7 @@ class QuantumAnnealer:
               × Strang per-step コスト).
             * ``"cfm4"``: ``n_steps × 2m`` (CFM4:2 は 1 step あたり Lanczos
               を 2 回呼ぶため M2 の 2 倍).
-            * ``"cfm4_adaptive_richardson"``: ``n_steps_actual × 6m``
+            * ``"cfm4_adaptive_richardson_krylov"``: ``n_steps_actual × 6m``
               (full CFM4:2 ``2m`` + half×2 CFM4:2 ``4m`` = ``6m``,
               ``docs/design/05-3-propagator.md`` §5.3).
 
@@ -279,7 +279,7 @@ class QuantumAnnealer:
         """
         ...
 
-    def create_simulator(self, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson']='cfm4', atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> AnnealingSimulator:
+    def create_simulator(self, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov']='cfm4', atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> AnnealingSimulator:
         """``AnnealingSimulator`` (step-wise stateful API) を生成する.
 
         ``QuantumAnnealer`` と同じ ``problem`` / ``schedule`` / ``m`` /
@@ -295,9 +295,9 @@ class QuantumAnnealer:
         method
             プロパゲータ. ``run`` と同じ集合をサポート (``m2`` /
             ``trotter`` / ``trotter_suzuki4`` / ``cfm4`` /
-            ``cfm4_adaptive_richardson``).
+            ``cfm4_adaptive_richardson_krylov``).
         atol, dt_init, dt_max, m_max
-            adaptive method (``cfm4_adaptive_richardson``) 専用パラメータ.
+            adaptive method (``cfm4_adaptive_richardson_krylov``) 専用パラメータ.
             固定 dt method で指定すると ``ValueError``. 詳細は
             ``AnnealingSimulator.__init__`` の docstring.
 

@@ -396,7 +396,7 @@ def test_dt_init_none_facade_smoke() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
         dt_init=None,
     )
@@ -415,7 +415,7 @@ def test_dt_init_none_facade_smoke() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
         dt_init=dt0_resolved,
     )
@@ -443,7 +443,7 @@ def test_dt_init_none_small_T_completes() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
         dt_init=None,
     )
@@ -522,7 +522,7 @@ def test_dt_max_none_facade_caps_dt_history() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-6,
         dt_init=0.5,
         dt_max=None,
@@ -531,7 +531,7 @@ def test_dt_max_none_facade_caps_dt_history() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-6,
         dt_init=0.5,
         dt_max=expected_cap,
@@ -598,7 +598,7 @@ def test_m_max_facade_smoke() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
         m_max=16,
     )
@@ -632,7 +632,7 @@ def test_m_max_overrides_self_m() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
         m_max=16,
     )
@@ -642,7 +642,7 @@ def test_m_max_overrides_self_m() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
     )
 
@@ -668,7 +668,7 @@ def test_m_eff_stats_in_adaptive_result() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
     )
     assert res.m_eff_stats is not None
@@ -734,7 +734,7 @@ def test_m_max_32_matches_m_24_when_early_termination() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
     )
     ann_24_with_max32 = QuantumAnnealer(prob, sched, m=24)
@@ -742,7 +742,7 @@ def test_m_max_32_matches_m_24_when_early_termination() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=1e-8,
         m_max=32,
     )
@@ -773,7 +773,7 @@ def test_m_max_invalid_raises() -> None:
             psi0,
             0.0,
             1.0,
-            method="cfm4_adaptive_richardson",
+            method="cfm4_adaptive_richardson_krylov",
             m_max=0,
         )
     with pytest.raises(ValueError, match="m_max"):
@@ -781,7 +781,7 @@ def test_m_max_invalid_raises() -> None:
             psi0,
             0.0,
             1.0,
-            method="cfm4_adaptive_richardson",
+            method="cfm4_adaptive_richardson_krylov",
             m_max=-5,
         )
     with pytest.raises(ValueError, match="m_max"):
@@ -789,7 +789,7 @@ def test_m_max_invalid_raises() -> None:
             psi0,
             0.0,
             1.0,
-            method="cfm4_adaptive_richardson",
+            method="cfm4_adaptive_richardson_krylov",
             m_max=3.5,  # type: ignore[arg-type]
         )
 
@@ -896,7 +896,7 @@ def test_krylov_tol_none_resolves_to_atol_ratio_bit_exact() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=atol,
     )
 
@@ -905,7 +905,7 @@ def test_krylov_tol_none_resolves_to_atol_ratio_bit_exact() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=atol,
     )
 
@@ -938,7 +938,7 @@ def test_krylov_tol_none_vs_explicit_1e12_same_accuracy() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=atol,
     )
 
@@ -947,7 +947,7 @@ def test_krylov_tol_none_vs_explicit_1e12_same_accuracy() -> None:
         psi0,
         0.0,
         T,
-        method="cfm4_adaptive_richardson",
+        method="cfm4_adaptive_richardson_krylov",
         atol=atol,
     )
 
@@ -988,7 +988,7 @@ def test_dt_init_invalid_string_still_raises_at_runtime() -> None:
             psi0,
             0.0,
             1.0,
-            method="cfm4_adaptive_richardson",
+            method="cfm4_adaptive_richardson_krylov",
             dt_init="auto",  # type: ignore[arg-type]
         )
 
@@ -1010,6 +1010,6 @@ def test_dt_max_invalid_string_still_raises_at_runtime() -> None:
             psi0,
             0.0,
             1.0,
-            method="cfm4_adaptive_richardson",
+            method="cfm4_adaptive_richardson_krylov",
             dt_max="auto",  # type: ignore[arg-type]
         )

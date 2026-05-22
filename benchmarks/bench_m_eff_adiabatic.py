@@ -1,4 +1,4 @@
-"""kryanneal cfm4_adaptive_richardson の Krylov 部分空間縮退 (m_eff) 計測.
+"""kryanneal cfm4_adaptive_richardson_krylov の Krylov 部分空間縮退 (m_eff) 計測.
 
 issue #65 review 中の議論: 量子断熱領域 (T 大, ψ が瞬時 H の固有状態に近い)
 では Krylov 基底 {ψ, Hψ, H²ψ, ...} が縮退し, Lanczos の β_k 早期打切で
@@ -324,7 +324,7 @@ def _parse_float_list(text: str) -> list[float]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "kryanneal cfm4_adaptive_richardson の m_eff (Krylov 部分空間実効次元) "
+            "kryanneal cfm4_adaptive_richardson_krylov の m_eff (Krylov 部分空間実効次元) "
             "T 依存性 bench. 量子断熱領域での Krylov 縮退検証 (issue #65 review)."
         )
     )
@@ -463,7 +463,7 @@ def _write_md(
     lines.append("# bench_m_eff_adiabatic.py")
     lines.append("")
     lines.append(
-        "kryanneal ``cfm4_adaptive_richardson`` の Krylov 部分空間実効次元 "
+        "kryanneal ``cfm4_adaptive_richardson_krylov`` の Krylov 部分空間実効次元 "
         "``m_eff`` を T 依存で計測 (issue #65 review). 量子断熱領域 (T 大) で "
         "ψ が瞬時 H の固有状態に近づき Lanczos β_k 早期打切で m_eff が default "
         "``m_max=24`` から縮むことを実測で示す."
