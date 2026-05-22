@@ -89,15 +89,22 @@ use crate::matvec::apply_h_kryanneal;
 ///
 /// # アルゴリズム
 ///
-/// shifted operator `M = H - E_c·I` に対する標準 power iteration. 対称 H
-/// なので Rayleigh quotient が単調に `|λ_max(M)|` に **下から** 収束する.
+/// shifted operator `M = H - E_c·I` に対する標準 power iteration. eigenvalue
+/// 推定子は **operator norm `‖M v‖`** (= `sqrt(<v, M^2 v>)`) を使う:
 ///
 /// 1. 初期ベクトル `v_0` を xorshift64 (seed) で複素一様サンプリング + L2 正規化
 /// 2. 各 iter:
 ///    * `w = H v - E_c v`
-///    * `λ_k = <v, w> / <v, v> = <v, w>` (v は正規化済みなので分母 = 1)
+///    * `λ_est ← ‖w‖` (v は正規化済み, ‖v‖ = 1 なので `‖M v‖` がそのまま値)
 ///    * `v ← w / ‖w‖`
-/// 3. 最後の |λ_k| を返す
+/// 3. 最後の `λ_est` を返す
+///
+/// Rayleigh quotient `<v, M v>` を使わない理由: TFIM 構造で **spectrum が 0 周りに
+/// ±λ 対称** な scenario (= 本 perf bench の `a_t = b_t = 0.5`, `h_p_diag` 0 中心)
+/// では `<v, M v> = Σ |c_λ|² λ` の符号付き総和で **±λ projection が cancel** し
+/// `λ_est ≈ 0` を誤って返す. 一方 `‖M v‖² = Σ |c_λ|² λ²` は各項非負なので
+/// cancel しない (古典的 power iter の symmetric spectrum 弱点を回避する標準手法,
+/// issue #125 PoC Linux bench で確認).
 ///
 /// # 戻り値
 ///
@@ -181,17 +188,18 @@ pub fn power_iter_spectral_radius(
     for _ in 0..n_iter {
         // w := H v (apply_h_kryanneal は overwrite 形なので out-buffer reuse OK).
         apply_h_kryanneal(&v, &mut w, h_x, h_p_diag, a_t, b_t, n);
-        // w := H v - E_c v.
+        // w := H v - E_c v = M v.
         for k in 0..dim {
             w[k] -= Complex64::new(e_c, 0.0) * v[k];
         }
-        // λ = <v, w> = Σ conj(v_k) w_k. H が実対称なので λ は虚部 ~0; abs を取る.
-        let inner: Complex64 = v.iter().zip(w.iter()).map(|(vi, wi)| vi.conj() * wi).sum();
-        lambda_abs = inner.norm();
-
-        // v <- w / ‖w‖. ‖w‖ ~ 0 (M v が直交固有空間にしか乗らない pathological) は
-        // power iter が動かなくなる極端ケースだが, 1 iter で抜けるのが安全.
+        // λ_est := ‖M v‖ = ‖w‖. v は正規化済み (‖v‖=1) なので, これがそのまま
+        // |λ_max(M)| への下界推定値となる. Rayleigh quotient `<v, M v>` を使わない
+        // 理由は docstring 参照 (symmetric spectrum での ±λ cancel 回避).
         let w_norm: f64 = w.iter().map(|c| c.norm_sqr()).sum::<f64>().sqrt();
+        lambda_abs = w_norm;
+
+        // v <- w / ‖w‖. ‖w‖ ~ 0 (M v が零空間にしか乗らない pathological) は
+        // power iter が動かなくなる極端ケースだが, 1 iter で抜けるのが安全.
         if w_norm < 1e-300 {
             break;
         }
@@ -999,6 +1007,57 @@ mod tests {
         assert!(
             k_used <= k_g,
             "K_used (power_iter) = {k_used} should be ≤ K_used (gershgorin) = {k_g}",
+        );
+    }
+
+    /// `b_t = 0` で H = -a_t·Σ h_x_i X_i (TFIM driver 単独, 純 bit-flip 構造)
+    /// は **0 周りに完全 ±対称な spectrum** を持つ. Rayleigh quotient ベースの
+    /// 旧実装は ±λ projection cancel で `λ_est ≈ 0` を誤って返す (issue #125
+    /// Linux N=18 bench で確認). 現実装は ‖M v‖ ベースで cancel 不要なので
+    /// この case でも R_true に収束することを検証する.
+    #[test]
+    fn power_iter_handles_symmetric_spectrum() {
+        let n = 5_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(2024);
+        let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let h_p_diag = vec![0.0_f64; dim]; // 純 driver: H = -a_t · Σ h_x_i X_i.
+        let a_t = 0.7_f64;
+        let b_t = 0.0_f64; // 対角寄与なし → spectrum は ±対称.
+
+        // 真値: H の固有値は ±a_t Σ ε_i h_x_i for ε_i ∈ {±1}.
+        // dense diag で確認.
+        let (e_min_g, e_max_g) = gershgorin_bounds(&h_x, &h_p_diag, a_t, b_t);
+        let e_c_g = 0.5 * (e_max_g + e_min_g);
+        let h_dense = build_dense_h_real(n, &h_x, &h_p_diag, a_t, b_t);
+        let eig = SymmetricEigen::new(h_dense);
+        let r_true = eig
+            .eigenvalues
+            .iter()
+            .map(|l| (l - e_c_g).abs())
+            .fold(0.0_f64, f64::max);
+
+        // E_c_g = 0 が期待されるが gershgorin の round noise で完全 0 ではない場合も
+        // 許容. R_true は λ_max(H) = a_t · Σ |h_x_i| になるはず.
+        let expected_r = a_t * h_x.iter().map(|h| h.abs()).sum::<f64>();
+        assert!(
+            (r_true - expected_r).abs() < 1e-12,
+            "r_true sanity: dense = {r_true}, expected = {expected_r}",
+        );
+
+        let r_pi = power_iter_spectral_radius(&h_x, &h_p_diag, a_t, b_t, e_c_g, n, 20, 4242);
+
+        // symmetric spectrum でも R_pi が R_true に有意に到達 (≥ 80%) する.
+        // 旧 Rayleigh quotient 実装ではここで ~0 が返り fail する設計.
+        assert!(
+            r_pi > 0.8 * r_true,
+            "symmetric spectrum: r_pi = {r_pi} should be ≥ 80% of r_true = {r_true}",
+        );
+
+        // from-below 性質も維持.
+        assert!(
+            r_pi <= r_true * (1.0 + 1e-10),
+            "from-below violated: r_pi = {r_pi} > r_true = {r_true}",
         );
     }
 
