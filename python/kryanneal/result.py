@@ -89,7 +89,10 @@ class QuantumResult:
         ``False`` を返す余地を残すための signal).
     method
         Phase 4 追加. 実行された propagator 名 (``"m2"`` / ``"trotter"``
-        / ``"trotter_suzuki4"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"``).
+        / ``"trotter_suzuki4"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"``
+        / ``"cfm4_adaptive_richardson_chebyshev"``). Phase B (#122) で
+        Chebyshev variant 追加. ``m_eff_stats`` のキー意味は Lanczos /
+        Chebyshev で「per-step propagator 評価コスト統計」として共用.
     n_steps_actual
         Phase 4 追加. adaptive 経路で実際に accept された step 数.
         固定 dt 経路では ``n_steps`` と一致する整数値を返し,

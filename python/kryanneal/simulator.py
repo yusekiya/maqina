@@ -3,10 +3,11 @@
 設計詳細は ``docs/design/04-python-api.md`` §4.5 を一次資料とする.
 
 ``QuantumAnnealer.run`` と同じプロパゲータ集合 (``m2`` / ``trotter`` /
-``trotter_suzuki4`` / ``cfm4`` / ``cfm4_adaptive_richardson_krylov``) を内部で使うが,
-1 step または部分区間ごとに状態を取り出して ``Observable`` で測れる
-step-wise stateful API. 用途は中間時刻で diagnostic / observable history を
-取りつつ続きを発展させる workflow.
+``trotter_suzuki4`` / ``cfm4`` / ``cfm4_adaptive_richardson_krylov`` /
+``cfm4_adaptive_richardson_chebyshev``) を内部で使うが, 1 step または部分
+区間ごとに状態を取り出して ``Observable`` で測れる step-wise stateful API.
+用途は中間時刻で diagnostic / observable history を取りつつ続きを発展させる
+workflow.
 
 設計判断
 --------
@@ -21,12 +22,13 @@ step-wise stateful API. 用途は中間時刻で diagnostic / observable history
   ``rel < 1e-13``) させるため, 内部では同じ ``evolve_schedule_*`` driver
   を呼ぶ. ``step`` は ``n_steps=1`` の薄いラッパ, ``advance_to`` は
   fixed-dt なら ``run`` と同じ driver call.
-* adaptive 経路 (``cfm4_adaptive_richardson_krylov``) の ``step(dt)`` は
-  ``dt`` を PI controller の proposal として渡し, driver 側で reject が
-  起これば dt を縮めて再試行 (``dt_max=dt`` で growth を禁じ, ``dt0=dt``
-  で初回試行). 結果として ``_t`` は exactly ``+dt`` 進む (1 step(dt) 内に
-  複数 internal accept step が発生する可能性あり; その場合 ``n_matvec``
-  は累積 m_eff_sum で加算される).
+* adaptive 経路 (``cfm4_adaptive_richardson_krylov`` /
+  ``cfm4_adaptive_richardson_chebyshev``) の ``step(dt)`` は ``dt`` を PI
+  controller の proposal として渡し, driver 側で reject が起これば dt を
+  縮めて再試行 (``dt_max=dt`` で growth を禁じ, ``dt0=dt`` で初回試行).
+  結果として ``_t`` は exactly ``+dt`` 進む (1 step(dt) 内に複数 internal
+  accept step が発生する可能性あり; その場合 ``n_matvec`` は累積
+  m_eff_sum / K_used_sum で加算される).
 """
 
 from __future__ import annotations
@@ -86,28 +88,42 @@ class AnnealingSimulator:
     method
         プロパゲータ. ``QuantumAnnealer.run`` と同じ集合をサポート
         (``m2`` / ``trotter`` / ``trotter_suzuki4`` / ``cfm4`` /
-        ``cfm4_adaptive_richardson_krylov``). default ``"cfm4"``.
+        ``cfm4_adaptive_richardson_krylov`` /
+        ``cfm4_adaptive_richardson_chebyshev``). default は
+        ``"cfm4_adaptive_richardson_chebyshev"`` (issue #124,
+        Phase B Pareto win に基づく).
     m
         Lanczos / Krylov 部分空間次元. ``m >= 1``. default ``24``.
-        ``trotter`` / ``trotter_suzuki4`` 経路では無視される (Lanczos
-        非使用).
+        ``trotter`` / ``trotter_suzuki4`` / ``cfm4_adaptive_richardson_chebyshev``
+        経路では無視される (Lanczos 非使用; Chebyshev は K_used 動的決定).
     krylov_tol
         **Krylov 近似の許容誤差** (issue #98 / Phase 8 で意味再定義). 各
         Lanczos iter で a posteriori 推定子
         ``β · |c_last| · |dt| / m < krylov_tol`` を判定して部分空間を切る.
         旧仕様の β 単体閾値ではない. 詳細は ``QuantumAnnealer.krylov_tol``
-        の docstring 参照.
+        の docstring 参照. ``cfm4_adaptive_richardson_chebyshev`` 経路では
+        ``chebyshev_tol`` として機能し, Chebyshev 切り捨て次数 ``K_used`` を
+        動的決定する許容誤差になる.
 
         ``None`` (default) のとき経路ごとに自動解決する (QuantumAnnealer と
         同じポリシー):
 
-        * adaptive 経路: ``effective = tol_step · 1e-3`` (``tol_step``
-          は ``atol`` で決まる; default ``atol=1e-8`` → ``1e-11``).
+        * adaptive 経路 (Krylov / Chebyshev 両方): ``effective = tol_step · 1e-3``
+          (``tol_step`` は ``atol`` で決まる; default ``atol=1e-8`` → ``1e-11``).
         * 固定 dt 経路: ``1e-12`` (static fallback).
     atol
-        adaptive 経路 (``cfm4_adaptive_richardson_krylov``) 専用. PI controller
-        の局所誤差閾値 ``tol_step``. ``None`` (default) で driver default
-        ``1e-8`` を使う. 固定 dt method で指定すると ``ValueError``.
+        adaptive 経路 (``cfm4_adaptive_richardson_krylov`` /
+        ``cfm4_adaptive_richardson_chebyshev``) 専用. PI controller の局所
+        誤差閾値 ``tol_step``. ``None`` (default) で driver default ``1e-8``
+        を使う. 固定 dt method で指定すると ``ValueError``.
+
+        **Note (Chebyshev variant の atol 振舞い, issue #124)**: Chebyshev
+        では ``atol`` は **upper bound** として機能し, 実際の精度がそれより
+        良くなる場合がある (K_used を ``chebyshev_tol`` (auto-resolve で
+        ``tol_step · 1e-3``) から動的決定するため per-stage 誤差が ``tol_step``
+        より遥かに小さくなり, PI controller が見る誤差は Magnus 4 次成分のみ
+        になる). 詳細は ``QuantumAnnealer.run`` の ``atol`` docstring 注 +
+        ``docs/design/05-3-propagator.md`` "Chebyshev variant" 節.
     dt_init
         adaptive 経路専用. ``advance_to`` 時の初期 dt 提案 (driver の
         ``dt0`` に map). ``None`` (default) のとき ``advance_to`` の各
@@ -150,11 +166,15 @@ class AnnealingSimulator:
     ...                     h_x=np.ones(n))
     >>> sched = Schedule.linear(T=10.0)
     >>> psi0 = uniform_superposition(n)
-    >>> sim = AnnealingSimulator(prob, sched, psi0, 0.0, method="cfm4")
+    >>> # default ``method="cfm4_adaptive_richardson_chebyshev"`` を使う場合,
+    >>> # ``advance_to`` には ``n_steps`` を渡さない (PI controller が dt を
+    >>> # 内部決定する). 固定 dt 経路を使いたい場合は ``method="cfm4"`` 等を
+    >>> # 明示し ``advance_to(..., n_steps=N)`` を渡す.
+    >>> sim = AnnealingSimulator(prob, sched, psi0, 0.0)
     >>> obs = Observable.magnetization(n)
-    >>> sim.advance_to(5.0, n_steps=50)
+    >>> sim.advance_to(5.0)
     >>> mz_mid = sim.measure(obs)
-    >>> sim.advance_to(10.0, n_steps=50)
+    >>> sim.advance_to(10.0)
     >>> mz_end = sim.measure(obs)
     """
 
@@ -172,7 +192,7 @@ class AnnealingSimulator:
             "cfm4",
             "cfm4_adaptive_richardson_krylov",
             "cfm4_adaptive_richardson_chebyshev",
-        ] = "cfm4",
+        ] = "cfm4_adaptive_richardson_chebyshev",
         m: int = 24,
         krylov_tol: float | None = None,
         atol: float | None = None,
@@ -203,8 +223,9 @@ class AnnealingSimulator:
                 if val is not None:
                     raise ValueError(
                         f"{name} is only valid for adaptive method "
-                        f"'cfm4_adaptive_richardson_krylov'; got method={method!r} "
-                        f"with {name}={val!r}"
+                        f"('cfm4_adaptive_richardson_krylov' or "
+                        f"'cfm4_adaptive_richardson_chebyshev'); got "
+                        f"method={method!r} with {name}={val!r}"
                     )
 
         if atol is not None and not (atol > 0.0):
@@ -285,12 +306,13 @@ class AnnealingSimulator:
 
         固定 dt 経路 (``m2`` / ``trotter`` / ``trotter_suzuki4`` /
         ``cfm4``) では文字通り 1 step (``n_steps=1`` の driver call).
-        adaptive 経路 (``cfm4_adaptive_richardson_krylov``) では ``dt`` を PI
-        controller の proposal として渡し, driver 側で reject が起きれば
-        dt を縮めて再試行する. いずれの場合も呼出後の ``_t`` は exactly
-        ``+dt`` 進む (adaptive 経路で 1 step(dt) 内に複数 internal accept
-        step が発生する可能性があるが, その合計 m_eff_sum が ``n_matvec``
-        に加算される).
+        adaptive 経路 (``cfm4_adaptive_richardson_krylov`` /
+        ``cfm4_adaptive_richardson_chebyshev``) では ``dt`` を PI controller
+        の proposal として渡し, driver 側で reject が起きれば dt を縮めて
+        再試行する. いずれの場合も呼出後の ``_t`` は exactly ``+dt`` 進む
+        (adaptive 経路で 1 step(dt) 内に複数 internal accept step が発生
+        する可能性があるが, その合計 m_eff_sum / K_used_sum が
+        ``n_matvec`` に加算される).
 
         Parameters
         ----------

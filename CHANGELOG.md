@@ -11,6 +11,88 @@
   (`0.N.0` → `0.N+1.0`) で破壊的変更を吸収する (`docs/conventions.md`
   §2 参照).
 
+## 0.11.0 - 2026-05-22 — Default method を Chebyshev variant に切替 + atol 仕様明文化 (Phase B follow-up, issue #124)
+
+Phase B 本体 (#122) と #126 / #127 の perf 結果 (Linux AMD EPYC 7713P, N=18
+で Lanczos 比 5.49× wall 高速, branch-miss 158× 減, sys time 78× 減,
+parallel efficiency 27% → 44%) を受けて, 判断系 follow-up を確定. default
+method の semantic 変更を伴うため minor bump.
+
+### Breaking
+
+- **`QuantumAnnealer.run(method=...)` の default**: `"m2"` →
+  `"cfm4_adaptive_richardson_chebyshev"`. 旧 default を使っていたユーザーは
+  `method="m2"` を明示するか, 新 default 経路に切替えて `n_steps` の代わりに
+  `atol` で精度を制御する.
+- **`QuantumAnnealer.create_simulator(method=...)` の default**: `"cfm4"` →
+  `"cfm4_adaptive_richardson_chebyshev"`. ついでに `Literal` から欠落していた
+  `_chebyshev` を追加 (Phase B #122 取りこぼし fixup).
+- **`AnnealingSimulator(method=...)` の default**: `"cfm4"` →
+  `"cfm4_adaptive_richardson_chebyshev"`.
+
+`_krylov` literal は永続的に残す (旧 default 互換 + 比較ベンチ用途).
+
+### Changed
+
+- **`QuantumAnnealer.run` / `AnnealingSimulator.__init__` の `atol` docstring**:
+  "Note (Chebyshev variant の atol 振舞い, issue #124)" 注を追加. Chebyshev では
+  `atol` を upper bound として扱い, K_used 動的拡張により実際の精度がそれより
+  良くなる場合があることを明文化 ("feature" 仕様, Scope 2 (a) + (d) 確定).
+- **`docs/design/05-3-propagator.md` "Chebyshev variant" 節**: "`chebyshev_tol`
+  と `atol` の関係 — accidental 高精度 (issue #124)" 小節を追加.
+- **`docs/quickstart.md` の主例**: `method=` 指定を削除して default を使う形に
+  統一. Chebyshev variant の atol upper bound 注を追記.
+- **`bench_qutip_large.py --adaptive-tols` / `--krylov-tols` ヘルプ**: 両 adaptive
+  経路 (`_krylov` / `_chebyshev`) に対応する文言に更新. default solver list
+  (`_VALID_SOLVERS` 全列挙) は変更なし (Pareto 比較目的なので両者走らせる).
+- **`docs/design/12-release-plan.md` / `docs/design/INDEX.md` / `CLAUDE.md`**:
+  Phase B follow-up (#124) 節を追加.
+
+公開 API シグネチャ自体は不変 (default 値のみ変更). 既存 test は全て
+`method=` を明示しているので default 切替で壊れない.
+
+## 0.10.0 - 2026-05-22 — Phase B (Chebyshev propagator を CFM4 adaptive Richardson 経路に統合, issue #122)
+
+Phase A (#120, PR #121) で時間独立 H 単体の `chebyshev_propagate` 3 項漸化が
+**per-call 29 ms / 4.45× Lanczos 高速** を達成したのを受け, 時間依存 H + CFM4
+Magnus + step-doubling Richardson + PI controller 経路に統合した variant を
+公開 API レベルで露出. Phase B 完了で Pareto win を実証
+(`bench_qutip_large` n=8/10/12 で 1.19-1.28×; perf binary 直接比較 N=18 で
+5.49× — `#124` perf archive).
+
+### Breaking
+
+- **`method` literal の hard rename**: `"cfm4_adaptive_richardson"` →
+  `"cfm4_adaptive_richardson_krylov"`. alias なし (pre-1.0 なので破壊的変更
+  OK, `_krylov` / `_chebyshev` で suffix 対称化のため).
+
+### Added
+
+- **`method="cfm4_adaptive_richardson_chebyshev"`**: Phase A の
+  `chebyshev_propagate` を CFM4:2 + step-doubling Richardson + PI controller
+  経路に統合した新 method. `m_max` を渡すと `ValueError` (Chebyshev は
+  K_used 動的決定で Krylov 部分空間次元の概念がない).
+- **Rust 側**: `src/cfm4.rs::cfm4_step_chebyshev` /
+  `cfm4_step_chebyshev_with_richardson_estimate`,
+  `python/kryanneal/krylov.py::evolve_schedule_adaptive_richardson_chebyshev`,
+  `src/bin/perf_cfm4_richardson_chebyshev.rs` (perf 計測 binary).
+- **`tests/test_chebyshev.py`**: QuTiP fidelity + Lanczos 一致 + annealer/simulator
+  smoke + m_max ValueError.
+
+### Performance
+
+- bench_qutip_large (long-T scenario, EPYC 7713P): n=8 で 1.19-1.25×, n=10 で
+  1.19-1.28×, n=12 で 1.09-1.17× wall 高速 (Lanczos 比). infidelity は両者とも
+  `<1e-16` で精度劣化なし.
+
+### Phase B follow-up
+
+- **#126**: Chebyshev 3 項漸化 inner loop の SIMD + fusion (`wide::f64x4`,
+  walk 2/3 を 1 dim-walk に fuse).
+- **#127**: Chebyshev non-matvec inner loop の rayon 並列化
+  (`chebyshev_recurrence_fused_rayon`, parallel efficiency 改善).
+- **#124**: Default method 切替 + atol 仕様明文化 (本 0.11.0 で実施).
+
 ## 0.9.0 - 2026-05-22 — BLAS thread default 方針改訂 (issue #116)
 
 EPYC 7713P perf 実測 (#113 / PR #115) で「rayon 経路では BLAS=1」という

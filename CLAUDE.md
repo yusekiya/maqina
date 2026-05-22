@@ -710,6 +710,54 @@ parallel efficiency が 64 thread で 44%** (Lanczos 27% より良いが理想 1
   rayon 並列化" / `docs/design/12-release-plan.md` "Phase B follow-up:
   Chebyshev non-matvec inner loop の rayon 並列化 (#127)".
 
+## Phase B follow-up (issue #124): Default method を Chebyshev variant に切替 + atol 仕様明文化
+
+Phase B 本体 (#122) + #126 / #127 の perf 結果 (N=18 で Lanczos 比 5.49× wall
+高速, branch-miss 158× 減, sys time 78× 減, parallel efficiency 27% → 44%) を
+受けて, **judgement 系の follow-up** を確定. semantic 変更を伴うため
+`0.10.0 → 0.11.0` で minor bump.
+
+### Default method 切替
+
+- `QuantumAnnealer.run(method=...)`: 旧 `"m2"` → `"cfm4_adaptive_richardson_chebyshev"`.
+- `QuantumAnnealer.create_simulator(method=...)`: 旧 `"cfm4"` → 同上. ついでに
+  `Literal` から欠落していた `_chebyshev` を追加 (Phase B #122 取りこぼし fixup).
+- `AnnealingSimulator(method=...)`: 旧 `"cfm4"` → 同上.
+- `docs/quickstart.md` の主例: `method=` 指定を削除 (default を使う形に統一).
+- `bench_qutip_large.py --solvers` default は両 method を含む `_VALID_SOLVERS`
+  全列挙のまま (Pareto 比較用なので両者走らせる方が有用). `_krylov` は literal
+  として永続的に残す (旧 default 互換 + 比較ベンチ用途).
+
+旧 default (`method="m2"` / `"cfm4"`) を使っていたユーザー向け migration: 新
+default は **adaptive PI controller** を走らせるので `n_steps` の代わりに `atol`
+で精度を制御する. 旧挙動を維持したい場合は `method="m2"` / `"cfm4"` を明示する.
+
+### "Accidental 高精度" 仕様 (Chebyshev での atol の振舞い)
+
+Chebyshev では `atol` (= PI controller の `tol_step`) は **upper bound** として
+機能し, K_used 動的拡張により実際の精度がそれより良くなる場合がある (例:
+`atol=1e-3` 設定で n=10 で `infidelity < 1e-16`). これは "feature" として
+受け入れる方針 (issue #124 Scope 2 (a) + (d) 確定):
+
+- `atol` で要求した精度を下回ることはない (予防的上限として機能).
+- 速度を取りたいときは `atol` を大きくして PI step 数を減らすのが正しい使い方.
+  `chebyshev_tol` を直接緩めても K_used が数個減るだけで wall-time 効果は限定的.
+- default の auto-coupling 係数 `_KRYLOV_TOL_ATOL_RATIO = 1e-3` は変更しない.
+
+明文化先:
+
+- `QuantumAnnealer.run` / `AnnealingSimulator.__init__` の `atol` docstring に
+  "Note (Chebyshev variant の atol 振舞い, issue #124)" 注を追加.
+- `docs/design/05-3-propagator.md` "Chebyshev variant" 節に "`chebyshev_tol` と
+  `atol` の関係 — accidental 高精度 (issue #124)" 小節を追加.
+- `docs/quickstart.md` の主例下に Note を追加.
+
+### 詳細
+
+- `docs/design/12-release-plan.md` "Phase B follow-up: Default method を
+  Chebyshev variant に切替 + atol 仕様明文化 (#124)" 節 (Definition of Done /
+  migration note).
+
 ## 設計判断の出典 (cv_ising 流用箇所)
 
 - CFM4:2 係数: `cv_ising/rust/src/cfm4.rs` の `a_high = 1/4 + √3/6` 等

@@ -179,8 +179,9 @@ _DEFAULT_CFM4_DTS: list[float] = [0.005, 0.02, 0.05, 0.2, 0.5]
 _DEFAULT_ADAPTIVE_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-11]
 _DEFAULT_QUTIP_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-12]
 
-# cfm4_adaptive_richardson_krylov の krylov_tol sweep 既定値. ``None`` は
-# QuantumAnnealer 内部の auto-coupling (= ``tol_step * 1e-3``) を意味する.
+# cfm4_adaptive_richardson_krylov / cfm4_adaptive_richardson_chebyshev の
+# krylov_tol (Chebyshev では chebyshev_tol として機能) sweep 既定値. ``None``
+# は QuantumAnnealer 内部の auto-coupling (= ``tol_step * 1e-3``) を意味する.
 # 既定では 1 値 (= None) のみで sweep 無し → 既存 bench 挙動と等価. Phase 7
 # (#93) の "krylov_tol 緩和の安全性" を検証する際は CLI ``--krylov-tols
 # auto,1e-8,1e-6`` 等を渡して atol × krylov_tol のクロス sweep を有効化する.
@@ -1264,7 +1265,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=_parse_float_list,
         default=list(_DEFAULT_ADAPTIVE_TOLS),
         help=(
-            f"cfm4_adaptive_richardson_krylov の atol sweep "
+            f"cfm4_adaptive_richardson_krylov / "
+            f"cfm4_adaptive_richardson_chebyshev の atol sweep "
             f"(default: {_DEFAULT_ADAPTIVE_TOLS})."
         ),
     )
@@ -1273,8 +1275,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=_parse_krylov_tol_list,
         default=list(_DEFAULT_KRYLOV_TOLS),
         help=(
-            "cfm4_adaptive_richardson_krylov の krylov_tol sweep. comma-separated; "
-            "'auto' で QuantumAnnealer の自動結合 (= tol_step * 1e-3) を選ぶ. "
+            "cfm4_adaptive_richardson_krylov の krylov_tol および "
+            "cfm4_adaptive_richardson_chebyshev の chebyshev_tol を共通の "
+            "Krylov 近似許容誤差として sweep する (semantically どちらも "
+            "短時間プロパゲータの内部精度). comma-separated; 'auto' で "
+            "QuantumAnnealer の自動結合 (= tol_step * 1e-3) を選ぶ. "
             f"default: {['auto' if k is None else f'{k:.1e}' for k in _DEFAULT_KRYLOV_TOLS]}. "
             "Phase 7 (#93) 評価例: --krylov-tols auto,1e-8,1e-6 で atol × "
             "krylov_tol のクロス sweep."
