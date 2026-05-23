@@ -127,6 +127,30 @@ uv run maturin develop --uv                 # Rust 変更後に必須 (--uv は 
 `uv run` を必ず使う (PyO3 の `extension-module` feature とローカル Python の
 ABI を揃える必要があるため、システム Python での実行は避ける)。
 
+### 実行経路 (default: test-runner subagent 経由)
+
+`/solve` 経由か否かに関わらず, **テスト・lint・maturin develop の実行は
+原則 `test-runner` subagent (`.claude/agents/test-runner.md`) に委譲する**.
+本 agent は `Bash` / `Read` のみ持つ read-only ランナーで, pass/fail サマリと
+失敗時の末尾 stdout 抜粋だけを返す. 長い `passed` 列や verbose 出力で
+メイン context を圧迫しないことが目的.
+
+並列実行の方針:
+
+- `cargo test` (BLAS on) と `uv run pytest` は **独立** (前者は `target/`,
+  後者は既存 `_rust.so` を読むだけ) のため, メイン側から 2 つの test-runner
+  agent を **同時起動** して並列化してよい.
+- `cargo test` (BLAS on) と `cargo test --no-default-features` は **同じ
+  `target/` のロックを争うため実質シリアル化** する. 並列起動するメリットは
+  無いので順次実行する.
+- `uv run maturin develop --uv` と `uv run pytest` は **serialize 必須**.
+  `_rust.so` 上書き中に pytest がロードすると ABI 不整合になる. maturin が
+  完了してから pytest を起動する.
+
+直接 Bash で `cargo test` 等を叩くのは, **agent 起動オーバヘッドのほうが
+重い極小タスク** (単一テストの再実行など) や, **失敗の生 stdout を逐次見たい
+デバッグ局面** に限定する.
+
 ### BLAS feature on/off の数値一致検証 (issue #65 Phase 6 C4)
 
 `cargo test --no-default-features` で Rust 内部単体の rel < 1e-13 一致は
