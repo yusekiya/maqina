@@ -3,7 +3,7 @@
 ### 4.1 公開シンボル
 
 ```python
-from kryanneal import (
+from kinema import (
     IsingProblem,        # 問題定義 (n, H_p_diag, h_x)
     Schedule,            # アニーリングスケジュール
     QuantumAnnealer,     # one-shot 実行ドライバ
@@ -11,9 +11,9 @@ from kryanneal import (
     QuantumResult,
     Trajectory,
 )
-from kryanneal.builders import diag_from_pauli_terms, diag_from_J_h
-from kryanneal.initial_states import uniform_superposition
-from kryanneal.eigenstates import instantaneous_eigenstates
+from kinema.builders import diag_from_pauli_terms, diag_from_J_h
+from kinema.initial_states import uniform_superposition
+from kinema.eigenstates import instantaneous_eigenstates
 ```
 
 ### 4.2 `IsingProblem`
@@ -317,7 +317,7 @@ dt_max=..., m_max=...)` は QuantumAnnealer インスタンスから派生させ
 そのまま引き継ぐ (Simulator 側で異なる値を使いたい場合は `AnnealingSimulator`
 を直接構築する).
 
-**実装方針** (`python/kryanneal/simulator.py`): 内部では `evolve_schedule_*`
+**実装方針** (`python/kinema/simulator.py`): 内部では `evolve_schedule_*`
 driver を `[_t, _t + dt]` または `[_t, t_target]` 区間で呼ぶ薄いラッパ.
 `step` は `n_steps=1` の driver call, `advance_to` は `run` と同じ driver
 call で bit-identical な数値を得る (固定 dt 経路で `rel < 1e-13`).
@@ -380,7 +380,7 @@ def instantaneous_eigenstates(
 
 実装方針:
 
-- `method="lanczos"` (default): Python ループから `_rust.apply_h_kryanneal_py`
+- `method="lanczos"` (default): Python ループから `_rust.apply_h_kinema_py`
   を呼んで Krylov 部分空間 (次元 `m`, default 64) を構築し,
   `_rust.tridiag_eigh_py` (`src/tridiag.rs` の hand-rolled QL を thin-wrap)
   で三重対角の完全固有分解を取って下位 `k` 個の Ritz vector を再構築する。
@@ -388,7 +388,7 @@ def instantaneous_eigenstates(
   ループで組み合わせる方針 (固有値計算は時間発展に比べて頻度が低く
   Python 越境のオーバヘッドは無視できる)。`m` は時間発展用 (`m ≈ 24`) より
   大きめのデフォルト (64) を取り, Ritz 値の収束を担保する。
-- `method="exact"`: 小規模問題 (`n <= 12`) 向け、`_rust.apply_h_kryanneal_py`
+- `method="exact"`: 小規模問題 (`n <= 12`) 向け、`_rust.apply_h_kinema_py`
   を standard basis `e_j` に当てて `H(t)` の列を 1 本ずつ抽出 (Kronecker
   product より重複コードが無くビット規約の取り違いも避けられる) → Python
   側で `numpy.linalg.eigh` を呼ぶ参照経路 (Rust 経由で LAPACK を呼ばない)。
@@ -410,13 +410,13 @@ v0.1 では **Python 標準例外のみ** を使う:
 | Rust 拡張のロード失敗 (`_rust` 未ビルド) | `ImportError` + `RuntimeWarning` |
 
 Rust 側からは PyO3 の `PyValueError::new_err(...)` / `PyRuntimeError::new_err(...)`
-で raise する。custom exception hierarchy (`KryannealError` ベース等) は
+で raise する。custom exception hierarchy (`KinemaError` ベース等) は
 **v0.1 では定義しない**。必要性が出てきた場合は、v0.2 以降で
 
 ```python
-class KryannealError(Exception): ...
-class KrySchemaError(KryannealError, ValueError): ...
-class KryConvergenceError(KryannealError, RuntimeError): ...
+class KinemaError(Exception): ...
+class KineSchemaError(KinemaError, ValueError): ...
+class KineConvergenceError(KinemaError, RuntimeError): ...
 ```
 
 のような多重継承で **既存の `except ValueError:` / `except RuntimeError:` を

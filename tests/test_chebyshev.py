@@ -12,7 +12,7 @@
 * ``m_max`` を Chebyshev method で渡すと ``ValueError`` (semantic 不一致を
   silent 無視しない契約).
 
-Rust 拡張 (``kryanneal._rust.cfm4_step_chebyshev_with_richardson_estimate_py``)
+Rust 拡張 (``kinema._rust.cfm4_step_chebyshev_with_richardson_estimate_py``)
 が必須. fallback path は提供しない設計のため, 拡張が無い環境では本テスト
 ファイルは ``importorskip`` で skip.
 """
@@ -22,14 +22,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kryanneal import IsingProblem, Schedule
-from kryanneal.annealer import QuantumAnnealer
-from kryanneal.initial_states import uniform_superposition
-from kryanneal.krylov import (
+from kinema import IsingProblem, Schedule
+from kinema.annealer import QuantumAnnealer
+from kinema.initial_states import uniform_superposition
+from kinema.krylov import (
     evolve_schedule_adaptive_richardson,
     evolve_schedule_adaptive_richardson_chebyshev,
 )
-from kryanneal.simulator import AnnealingSimulator
+from kinema.simulator import AnnealingSimulator
 
 
 qutip = pytest.importorskip("qutip")
@@ -37,10 +37,10 @@ qutip = pytest.importorskip("qutip")
 # Rust 拡張が無いと Chebyshev driver は NotImplementedError を上げる. 本ファイル
 # 全体を skip.
 try:
-    from kryanneal import _rust as _rust_mod  # noqa: F401
+    from kinema import _rust as _rust_mod  # noqa: F401
 except ImportError:  # pragma: no cover - 拡張なし環境
     pytest.skip(
-        "kryanneal._rust extension required for Chebyshev tests",
+        "kinema._rust extension required for Chebyshev tests",
         allow_module_level=True,
     )
 

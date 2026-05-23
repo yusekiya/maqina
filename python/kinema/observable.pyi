@@ -23,7 +23,7 @@ v0.1 では非対応 (future work).
 from __future__ import annotations as annotations
 from typing import TYPE_CHECKING as TYPE_CHECKING, Literal as Literal
 import numpy as np
-from kryanneal.problem import IsingProblem as IsingProblem
+from kinema.problem import IsingProblem as IsingProblem
 from typing import Any
 __all__ = ['Observable']
 

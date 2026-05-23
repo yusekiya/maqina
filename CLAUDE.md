@@ -8,17 +8,18 @@ Claude Code 向けのプロジェクトガイド。
 
 ## プロジェクト概要
 
-`kryanneal` (Krylov + Annealing): 横磁場イジングモデル (TFIM) の量子
-ダイナミクスを matrix-free に計算するシミュレータ。Krylov 法 (Lanczos)
-で短時間プロパゲータを近似し、Magnus 展開 (CFM4:2) で時間依存
-Hamiltonian の時間発展演算子を近似する。adaptive dt ドライバ
-(step-doubling Richardson + PI 制御) も提供。
+`kinema` ((Kine)tic quantum evolution by (Ma)gnus expansion): 横磁場
+イジングモデル (TFIM) の量子ダイナミクスを matrix-free に計算する
+シミュレータ。Krylov 法 (Lanczos) または Chebyshev 多項式展開で短時間
+プロパゲータを近似し、Magnus 展開 (CFM4:2) で時間依存 Hamiltonian の
+時間発展演算子を近似する。adaptive dt ドライバ (step-doubling
+Richardson + PI 制御) も提供。
 
 設計の参照プロジェクト: [`cv-ising-solver`](https://github.com/Shu-Tanaka-Group/cv-ising-solver)
 (同じ Krylov + CFM4:2 カーネルの連続変数版)。
 
 - パッケージマネージャ: `uv` (Python `>=3.13`)
-- ビルドバックエンド: `maturin` (Rust 拡張 `kryanneal._rust` を PyO3 経由でビルド)
+- ビルドバックエンド: `maturin` (Rust 拡張 `kinema._rust` を PyO3 経由でビルド)
 - Lint: `ruff`
 - 型チェック: `ty`
 - 主要依存: `numpy`, `threadpoolctl`
@@ -54,17 +55,17 @@ mixed Rust/Python project 標準形 (`python-source = "python"`, Rust ルート
 直下に `Cargo.toml` + `src/`)。
 
 ```
-kryanneal/
+kinema/
 ├── pyproject.toml
 ├── Cargo.toml                  # Rust crate ルート (maturin 標準位置)
 ├── src/                        # Rust ソース
 │   ├── lib.rs                  # PyO3 #[pymodule] fn _rust エントリポイント
-│   ├── matvec.rs               # apply_h_kryanneal (bit-flip + diag)
+│   ├── matvec.rs               # apply_h_kinema (bit-flip + diag)
 │   ├── krylov.rs               # lanczos_propagate (ndarray ベース)
 │   ├── cfm4.rs                 # CFM4:2 / M2 / Richardson 推定子
 │   ├── tridiag.rs              # 実対称三重対角の implicit QL (hand-rolled)
 │   └── blas.rs                 # 内積 / axpy / nrm2 / scal ラッパ
-├── python/kryanneal/           # Python ソース (python-source = "python")
+├── python/kinema/           # Python ソース (python-source = "python")
 │   ├── __init__.py             # 公開 API
 │   ├── __init__.pyi            # 自動生成 stub (wheel 同梱)
 │   ├── py.typed                # PEP 561 マーカ
@@ -135,27 +136,27 @@ artifact フローで検証する:
 ```bash
 # 1. BLAS on build で artifact 生成
 uv run maturin develop --uv --release
-KRYANNEAL_EXPECT_BLAS=1 uv run pytest tests/test_blas_consistency.py
+KINEMA_EXPECT_BLAS=1 uv run pytest tests/test_blas_consistency.py
 
 # 2. BLAS off build に切り替えて再生成 (scalar fallback; rayon/simd は ON 維持)
 uv run maturin develop --uv --release --no-default-features \
     --features extension-module,rayon,simd
-KRYANNEAL_EXPECT_BLAS=0 uv run pytest tests/test_blas_consistency.py
+KINEMA_EXPECT_BLAS=0 uv run pytest tests/test_blas_consistency.py
 
 # 3. 2 つの artifact を diff
 uv run python tools/diff_blas_artifacts.py \
     tests/artifacts/blas_on.npz tests/artifacts/blas_off.npz
 ```
 
-`KRYANNEAL_EXPECT_BLAS` を渡しておくと「誤った build に対する silent 上書き
+`KINEMA_EXPECT_BLAS` を渡しておくと「誤った build に対する silent 上書き
 保存」を防ぐ (build mode と env var が不一致なら test 自身が skip). diff
 script は default で rel < 1e-13 / atol < 1e-13 を assert. ローカル切替の
 都度 BLAS on/off build を行うため小規模 (n ∈ {4,6,8}) sample のみ.
 
 ## API リファレンス
 
-`python/kryanneal/*.pyi` (per-module PEP 484 stub) に公開 API のシグネチャと
-**full docstring** がダンプされている。**`kryanneal` を使うスクリプトを
+`python/kinema/*.pyi` (per-module PEP 484 stub) に公開 API のシグネチャと
+**full docstring** がダンプされている。**`kinema` を使うスクリプトを
 書く際はまず該当モジュールの `.pyi` を読み、必要に応じてソース実装を
 参照する** (cv_ising と同方式)。`.pyi` は手書きしない。再生成:
 
@@ -166,7 +167,7 @@ uv run python tools/gen_api_stubs.py
 `.pyi` ドリフト防止は二段階:
 
 1. **Claude 編集時 (一次)**: `.claude/rules/api-stubs-sync.md` (path-scoped rule)
-   が `python/kryanneal/**/*.py` または `tools/gen_api_stubs.py` 編集時にロード
+   が `python/kinema/**/*.py` または `tools/gen_api_stubs.py` 編集時にロード
    され、再生成スクリプトを同じコミットに含めるよう Claude 側で運用する。
 2. **コミット時 (セーフティネット)**: `.pre-commit-config.yaml` の `gen-api-stubs`
    フックが人間の手編集も含めて取りこぼしを拾う。
@@ -179,7 +180,7 @@ uv run python tools/gen_api_stubs.py
 uv run python benchmarks/bench_per_step.py
 uv run python benchmarks/bench_blas_compare.py   # BLAS feature on/off 同一マシン比較
 uv run python benchmarks/bench_vs_qutip.py
-uv run python benchmarks/bench_qutip_large.py    # work-precision diagram で QuTiP vs kryanneal を Pareto 比較 (issue #65)
+uv run python benchmarks/bench_qutip_large.py    # work-precision diagram で QuTiP vs kinema を Pareto 比較 (issue #65)
 ```
 
 性能改善の主張をするときの方法 (cv_ising 流):
@@ -242,7 +243,7 @@ thread pool が 2 系統並走するため運用ルール:
     macOS Apple Accelerate は `VECLIB_MAXIMUM_THREADS`, fallback の
     OpenMP 系は `OMP_NUM_THREADS`。複数 pool 同居時は全 env を揃える。
   - **active thread 数** (= 並列 BLAS op で実際に使う thread): Python 側
-    `kryanneal.set_blas_threads(n)` で動的に変えられる
+    `kinema.set_blas_threads(n)` で動的に変えられる
     (`threadpoolctl.threadpool_limits` 経由)。**pool size 自体は縮まらない**
     (sleeping thread の stack / kernel resource は残る) ので, per-process
     thread budget の隔離が要件なら env 設定が必須。
@@ -252,7 +253,7 @@ thread pool が 2 系統並走するため運用ルール:
   実証された。NT=8 で **1.52× speedup** (NT=1 baseline 比), NT=16-32 でも
   +2% 程度の劣化で許容範囲, NT=64 で -9% に明確な劣化という curve。
   **新方針**:
-  - 既定値は `kryanneal.set_blas_threads_auto()` を import 後に 1 度呼ぶ。
+  - 既定値は `kinema.set_blas_threads_auto()` を import 後に 1 度呼ぶ。
     内部で `os.process_cpu_count() // 8` を 1-16 でクランプし
     (EPYC SMT2 で 16, 32-core で 4, 8-core 以下で 1), さらに
     `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS` / `VECLIB_MAXIMUM_THREADS` /
@@ -278,7 +279,7 @@ thread pool が 2 系統並走するため運用ルール:
     independent baseline (= 純シリアル比較) 用途で本番 perf bench とは別の
     意味づけ。
 - **並列ジョブ実行 (multiprocessing / Slurm job array 等)**: 1 プロセス
-  あたりの thread budget を絞るには **`kryanneal` / `numpy` を import する前**
+  あたりの thread budget を絞るには **`kinema` / `numpy` を import する前**
   に上記 env (`RAYON_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS`
   / `VECLIB_MAXIMUM_THREADS` / `OMP_NUM_THREADS`) を一括 set する必要がある
   (BLAS / rayon の pool size は最初の op で確定し以降縮小不可)。具体的な
@@ -292,7 +293,7 @@ thread pool が 2 系統並走するため運用ルール:
 
 ## SIMD 経路 (Phase 6 C2 / C2.5, issue #63 / #71)
 
-Phase 6 C2 (issue #63) で `apply_h_kryanneal` の bit-flip pass の i ∈
+Phase 6 C2 (issue #63) で `apply_h_kinema` の bit-flip pass の i ∈
 {0, 1, 2} を `wide::f64x4` 特化, C2.5 (issue #71) で同じく
 `apply_single_mode_axis_i` (Trotter 経路の 2×2 ユニタリ pair update) の
 i ∈ {0, 1, 2} を SIMD 特化 (`feature = "simd"`, default ON)。
@@ -304,7 +305,7 @@ i ∈ {0, 1, 2} を SIMD 特化 (`feature = "simd"`, default ON)。
     broadcast + in-register swizzle** で f64x4 化
     (`u_k · x_pair = splat(u[k].re) · x_pair + [-u[k].im, u[k].im, ...]
     · x_swap` の 2 Complex64 並列, 詳細は `simd_kernels` モジュール docstring).
-- `bitflip_iN` は `apply_h_kryanneal_{serial,rayon}` の両 path から,
+- `bitflip_iN` は `apply_h_kinema_{serial,rayon}` の両 path から,
   `single_mode_iN` は `apply_single_mode_axis_i_{serial,rayon}` および C3 の
   `apply_fused_axes_to_chunk` (trotter 経路の multi-qubit fusion inner kernel)
   から共通で呼ばれる。per-thread 最適化なので rayon 並列化と直交する。
@@ -328,18 +329,18 @@ i ∈ {0, 1, 2} を SIMD 特化 (`feature = "simd"`, default ON)。
   `__has_avx512f__` / `__has_neon__` (各 bool, `cfg!(target_feature = ...)`
   由来), ビルドターゲットを `_rust.__target_arch__` / `__target_os__`
   (各 str, `std::env::consts` 由来) が expose する (`m.add` 経由, build.rs
-  不要)。ユーザー向けには `kryanneal.show_config()` (numpy.show_config 相当)
+  不要)。ユーザー向けには `kinema.show_config()` (numpy.show_config 相当)
   でこれらを集約 dump できる (issue #103, 詳細は
   `docs/design/11-build-infrastructure.md` §11.1)。bench スクリプト
   (`bench_simd_scaling.py`) はこれで build を識別する。bench は C2 と C2.5 で
-  kernel 軸を分け (`kernel = apply_h_kryanneal / apply_single_mode_axis_i`),
+  kernel 軸を分け (`kernel = apply_h_kinema / apply_single_mode_axis_i`),
   C2.5 の per-axis (`i0/i1/i2`) は `mode` 軸で別カラムに展開する。
 - **`--no-default-features` ビルド**: SIMD 依存も外れ scalar 経路に戻る。
   `wide` クレートはリンクされない。
 
 ## perf 計測用 binary (Phase 6 D follow-up, issue #79 / #82 / #90 / #113 / #120)
 
-`apply_h_kryanneal` / `trotter_step` / `apply_single_mode_axis_i` /
+`apply_h_kinema` / `trotter_step` / `apply_single_mode_axis_i` /
 `cfm4_adaptive_richardson_krylov` / `chebyshev_propagate` の真の bottleneck
 (DRAM bound / L3 contention / barrier / chunk_size 戦略の差 / Lanczos vs GS の
 wall 比率, Lanczos vs Chebyshev のアルゴリズム軸 等のどれか) を Linux
@@ -348,7 +349,7 @@ wall 比率, Lanczos vs Chebyshev のアルゴリズム軸 等のどれか) を 
 
 | binary | 対象 kernel | 主な用途 |
 |---|---|---|
-| `src/bin/perf_apply_h.rs` | `apply_h_kryanneal` (matvec) | #79 Phase D 試行で確立した DRAM/L2 latency 計測 |
+| `src/bin/perf_apply_h.rs` | `apply_h_kinema` (matvec) | #79 Phase D 試行で確立した DRAM/L2 latency 計測 |
 | `src/bin/perf_trotter_step.rs` | `trotter_step` (Strang 2 次 Trotter 1 step) | #82 で C3 multi-qubit gate fusion + phase_p rayon 化の真の compute speedup 検証 |
 | `src/bin/perf_apply_single_mode_axis_i.rs` | `apply_single_mode_axis_i` (Trotter per-axis 2×2 ユニタリ) | #90 で #71 fixup `578d050` (動的 chunk_size) 棄却を perf binary で再評価し dynamic を採用 (詳細は `docs/design/05-1-matvec.md` §5.1.4 末尾) |
 | `src/bin/perf_cfm4_richardson.rs` | `cfm4_step_with_richardson_estimate` (Richardson 1 step = 6 Lanczos call) | #113 で Phase 9+ scoping のため component 別 wall % を実測 breakdown. `full` / `single_lanczos` / `matvec_only` / `gram_schmidt` の 4 mode を持ち, "step → Lanczos call → matvec / GS" の各層を同一 PMU セットで比較する |
@@ -371,11 +372,11 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release --bin perf_cfm4_richardso
 ```
 
 対象関数は `pub fn` に上げ, `crate::bench_api` (`src/lib.rs`) で再 export
-している (`apply_h_kryanneal`, `trotter_step`, `apply_single_mode_axis_i`,
+している (`apply_h_kinema`, `trotter_step`, `apply_single_mode_axis_i`,
 `lanczos_propagate`, `cfm4_step_with_richardson_estimate`,
 `chebyshev_propagate`; あと `gram_schmidt` mode が直接呼ぶ BLAS-1 primitive
 として `dot_conj` / `axpy`).
-Python 側 API (`_rust.apply_h_kryanneal_py` / `_rust.trotter_step_py` /
+Python 側 API (`_rust.apply_h_kinema_py` / `_rust.trotter_step_py` /
 `_rust.apply_single_mode_axis_i_inplace_py` /
 `_rust.cfm4_step_with_richardson_estimate_py` 等) には影響なし.
 `chebyshev_propagate` は POC Phase A 段階では Python binding を持たず
@@ -452,7 +453,7 @@ stdout は空に保つ (perf の出力を汚さない).
 
 ## Phase 6 D 実験と未採用の根拠 (issue #79, 2026-05-17)
 
-Phase D で `apply_h_kryanneal_rayon` を **連続 k 個の高 i を group-fused
+Phase D で `apply_h_kinema_rayon` を **連続 k 個の高 i を group-fused
 3-phase 形** に書き換える試み (DRAM v traffic を `dim · (1 + h_baseline) →
 dim · (1 + h_naive)` に削減する設計) を行ったが, **本 Linux サーバー
 (AMD EPYC 7713P, 64 物理コア, L2 = 512 KB/core, L3 = 32 MB/CCX × 8) で
@@ -566,7 +567,7 @@ krylov_tol` が `‖ψ‖ = 1` 規約と意味的に整合し, `c_m_abs` (return
 - `docs/design/05-2-lanczos.md` "a posteriori 早期打切 (issue #98 Phase 8)" 節
   (旧仕様の問題 / 判定式 / overhead 試算).
 - `docs/design/12-release-plan.md` Phase 8 (Definition of Done / Bench acceptance).
-- `src/krylov.rs::tridiag_c_last_abs` / `python/kryanneal/krylov.py::_tridiag_c_last_abs`
+- `src/krylov.rs::tridiag_c_last_abs` / `python/kinema/krylov.py::_tridiag_c_last_abs`
   (per-iter ヘルパ; Rust ↔ Python ref `rel < 1e-13` 一致).
 
 ## Phase 8 follow-up (issue #100): Richardson iter-0 matvec memoization
@@ -581,7 +582,7 @@ call で再利用することで **2 個の primitive matvec / Richardson step**
 実装ポイント:
 
 - `src/matvec.rs::apply_h_drv` / `apply_h_p_diag`: cache 計算専用 primitive.
-  既存 `apply_h_kryanneal` の cache-blocked 形は **維持** (hot path 触らない).
+  既存 `apply_h_kinema` の cache-blocked 形は **維持** (hot path 触らない).
   primitive は Richardson 入口で 1 step 1 回のみ呼ばれるので SIMD 非適用,
   rayon は MIN_RAYON_DIM 閾値で本体と同じ dispatch.
 - `src/cfm4.rs::cfm4_step` のシグネチャに crate-internal `iter0_cache:
@@ -673,7 +674,7 @@ accumulate scalar) を発生させていたが, walk 2 / walk 3 を **1 dim-walk
 
 #126 の SIMD + fusion 完了後の直交最適化. #124 perf archive で **Chebyshev の
 parallel efficiency が 64 thread で 44%** (Lanczos 27% より良いが理想 100% には
-程遠い) と判明. `apply_h_kryanneal` は #62 で rayon 並列化済だが,
+程遠い) と判明. `apply_h_kinema` は #62 で rayon 並列化済だが,
 `chebyshev_recurrence_fused` (k_ord ≥ 2 hot loop) が **scalar single-thread** で
 走っており, ここがスケーリング bottleneck の一部.
 
@@ -685,7 +686,7 @@ parallel efficiency が 64 thread で 44%** (Lanczos 27% より良いが理想 1
 - `chebyshev_recurrence_fused` dispatch wrapper を 3 段に拡張: rayon ON +
   `dim >= MIN_RAYON_DIM_CHEB` → rayon path / simd ON + 偶数長 → single-thread
   SIMD / それ以外 → scalar fused.
-- chunk_size は matvec.rs の `apply_h_kryanneal_rayon` と同じ式
+- chunk_size は matvec.rs の `apply_h_kinema_rayon` と同じ式
   `(dim / (nth * 4)).clamp(RAYON_CHUNK_MIN_CHEB, RAYON_CHUNK_MAX_CHEB)`. SIMD
   kernel の偶数長前提を満たすため 2 倍数に丸める (min/max 共 2 倍数なので
   invariant 不変).

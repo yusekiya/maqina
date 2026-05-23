@@ -24,8 +24,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kryanneal import IsingProblem, QuantumAnnealer, QuantumResult, Schedule
-from kryanneal.initial_states import uniform_superposition
+from kinema import IsingProblem, QuantumAnnealer, QuantumResult, Schedule
+from kinema.initial_states import uniform_superposition
 
 
 def _ferromagnetic_chain_h_p_diag(n: int) -> np.ndarray:
@@ -294,7 +294,7 @@ def test_run_save_tlist_snapshot_smoke() -> None:
     Phase 4 までの ``NotImplementedError`` 経路は除去された (issue #47 で
     有効化). 固定 dt 経路の m2 で smoke 確認.
     """
-    from kryanneal import Observable
+    from kinema import Observable
 
     n = 3
     prob = IsingProblem(
@@ -336,7 +336,7 @@ def test_run_observables_without_save_tlist_raises() -> None:
     """Phase 5 (issue #47): ``save_tlist=None`` で ``observables`` 指定は
     最節約モードに矛盾するため ``ValueError``.
     """
-    from kryanneal import Observable
+    from kinema import Observable
 
     n = 3
     prob = IsingProblem(
@@ -436,7 +436,7 @@ def test_create_simulator_returns_simulator_with_initial_state() -> None:
     """``create_simulator`` 戻り値が ``AnnealingSimulator`` で,
     ``t == t0`` / ``psi ≈ psi0`` / ``n_matvec == 0`` で初期化されている.
     """
-    from kryanneal import AnnealingSimulator
+    from kinema import AnnealingSimulator
 
     n = 3
     prob = IsingProblem(

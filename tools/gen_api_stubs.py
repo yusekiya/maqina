@@ -1,7 +1,7 @@
-"""kryanneal 公開 API の per-module ``.pyi`` スタブを生成する.
+"""kinema 公開 API の per-module ``.pyi`` スタブを生成する.
 
-各公開モジュール (``python/kryanneal/<name>.py``) の AST を走査し,
-``python/kryanneal/<name>.pyi`` に以下を出力する:
+各公開モジュール (``python/kinema/<name>.py``) の AST を走査し,
+``python/kinema/<name>.pyi`` に以下を出力する:
 
 * モジュール docstring
 * top-level imports (アノテーション解決のため verbatim 保持)
@@ -20,11 +20,11 @@
     uv run python tools/gen_api_stubs.py
 
 ``.pre-commit-config.yaml`` の ``gen-api-stubs`` フックが
-``python/kryanneal`` 配下または本スクリプト自体の変更時に自動実行する.
+``python/kinema`` 配下または本スクリプト自体の変更時に自動実行する.
 差分が出ると pre-commit が失敗するので
-``git add python/kryanneal/*.pyi`` して再 commit する.
+``git add python/kinema/*.pyi`` して再 commit する.
 
-本スクリプトは cv_ising の ``tools/gen_api_stubs.py`` を kryanneal の
+本スクリプトは cv_ising の ``tools/gen_api_stubs.py`` を kinema の
 maturin 標準レイアウト (``python-source = "python"``) に合わせて移植した
 もの.
 """
@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-PKG_DIR = REPO_ROOT / "python" / "kryanneal"
+PKG_DIR = REPO_ROOT / "python" / "kinema"
 
 # 公開モジュール一覧. ``__init__`` を含む.
 MODULES = [
@@ -83,7 +83,7 @@ def is_public(name: str, all_set: set[str] | None) -> bool:
     モジュールが ``__all__`` を宣言していない場合, underscore-prefix で
     private と扱うのではなく **全 top-level 名を stub に含める**. これは
     cross-module で private 名が import されるケース
-    (``from kryanneal.krylov import _cfm4_step_with_m2_estimate`` 等) で
+    (``from kinema.krylov import _cfm4_step_with_m2_estimate`` 等) で
     型チェッカが member を解決できるようにするため. 公開 API 境界を
     強制したい場合は ``__all__`` を宣言する側の責務.
     """
@@ -342,7 +342,7 @@ def _rewrite_import_as_reexport(node: ast.ImportFrom) -> ast.ImportFrom:
 
     PEP 484 の stub 仕様では import された名前は **明示的に
     ``as Y`` 付きの場合のみ re-export** とみなされる. 元 ``.py`` では
-    ``from kryanneal.krylov import DENSE_GROUNDSTATE_THRESHOLD`` のように
+    ``from kinema.krylov import DENSE_GROUNDSTATE_THRESHOLD`` のように
     re-export を意図せずに internal use のために import している箇所が
     あるが, runtime ではいずれも ``module.Y`` として attribute access 可能
     なので, stub では一律 explicit re-export 形に揃えて consumer 側

@@ -8,20 +8,20 @@
 │    psi0, H_p_diag, h_x, schedule(callable)                   │
 │         │                                                    │
 │         ▼                                                    │
-│  kryanneal.IsingProblem    (problem container)               │
-│  kryanneal.Schedule        (annealing schedule)              │
-│  kryanneal.QuantumAnnealer (driver: run / advance_to)        │
-│  kryanneal.AnnealingSimulator (step-wise stateful API)       │
+│  kinema.IsingProblem    (problem container)               │
+│  kinema.Schedule        (annealing schedule)              │
+│  kinema.QuantumAnnealer (driver: run / advance_to)        │
+│  kinema.AnnealingSimulator (step-wise stateful API)       │
 │         │                                                    │
 │         ▼ Python matvec callback                             │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │  kryanneal._rust  (PyO3 extension, maturin-built)      │  │
+│  │  kinema._rust  (PyO3 extension, maturin-built)      │  │
 │  │    lanczos_propagate  (matrix-free Lanczos M-step)     │  │
 │  │    cfm4_step          (CFM4:2 1 step)                  │  │
 │  │    m2_midpoint_step   (M2 中点則 1 step)               │  │
 │  │    cfm4_step_with_*_estimate (embedded error 推定子)   │  │
 │  │    trotter_step       (Strang / Suzuki 1 step, Phase 2)│  │
-│  │    apply_h_kryanneal  (matvec; bit-flip + 対角積)      │  │
+│  │    apply_h_kinema  (matvec; bit-flip + 対角積)      │  │
 │  │    apply_single_mode_axis_i (2×2 ユニタリ in-place適用)│  │
 │  └────────────────────────────────────────────────────────┘  │
 │         ▼                                                    │
@@ -33,9 +33,9 @@
 
 | 層 | 責務 |
 |---|---|
-| Python (`python/kryanneal/`) | 公開 API、`IsingProblem` / `Schedule` / `Annealer` の組み立て、結果オブジェクト、瞬時固有状態への投影、入力検証、QuTiP 比較ヘルパ |
+| Python (`python/kinema/`) | 公開 API、`IsingProblem` / `Schedule` / `Annealer` の組み立て、結果オブジェクト、瞬時固有状態への投影、入力検証、QuTiP 比較ヘルパ |
 | Rust (`src/`) | Lanczos ループ (`lanczos_propagate`)、CFM4:2 / M2 / Richardson 推定子の段階指数積、Trotter step (Phase 2 以降)、三重対角固有分解 (hand-rolled QL)、BLAS 経由の Level-1/2 ops |
-| Rust matvec / primitives | `apply_h_kryanneal` (matvec, bit-flip + 対角積) と `apply_single_mode_axis_i` (Trotter 用 2×2 ユニタリ axis i 作用) を Python callback を介さず Rust 内で完結 |
+| Rust matvec / primitives | `apply_h_kinema` (matvec, bit-flip + 対角積) と `apply_single_mode_axis_i` (Trotter 用 2×2 ユニタリ axis i 作用) を Python callback を介さず Rust 内で完結 |
 
 #### matvec を Rust 側に置く理由
 
@@ -63,10 +63,10 @@ per-mode GEMM が必要な場合) に対し、FFI 越境コスト削減 + Python
 具体的には:
 
 - `Cargo.toml` と `src/lib.rs` (Rust 側) を **プロジェクトルート**に置く
-- Python ソースは `python/kryanneal/` 配下に置き、`pyproject.toml` で
+- Python ソースは `python/kinema/` 配下に置き、`pyproject.toml` で
   `python-source = "python"` を宣言する
 - `.pyi` 型スタブは対応する `.py` と同じディレクトリに並べる
-- `py.typed` (PEP 561 マーカ) を `python/kryanneal/` に置く
+- `py.typed` (PEP 561 マーカ) を `python/kinema/` に置く
 
 この形が docs で「common `ImportError` pitfall」と呼ばれる事象
 ([PyO3/maturin#490](https://github.com/PyO3/maturin/issues/490)) を
@@ -77,7 +77,7 @@ per-mode GEMM が必要な場合) に対し、FFI 越境コスト削減 + Python
 可能だが docs 推奨形ではないため、本パッケージは標準形に従う。
 
 ```
-kryanneal/
+kinema/
 ├── pyproject.toml              # uv + maturin, python-source = "python"
 ├── Cargo.toml                  # ← Rust crate ルート (maturin 標準位置)
 ├── README.md
@@ -88,14 +88,14 @@ kryanneal/
 │   └── benchmarks.md
 ├── src/                        # ← Rust ソース (maturin 標準位置)
 │   ├── lib.rs                  # PyO3 エントリポイント (#[pymodule] fn _rust)
-│   ├── matvec.rs               # apply_h_kryanneal, apply_single_mode_axis_i
+│   ├── matvec.rs               # apply_h_kinema, apply_single_mode_axis_i
 │   ├── krylov.rs               # lanczos_propagate (ndarray ベース)
 │   ├── cfm4.rs                 # CFM4:2 / M2 / Richardson
 │   ├── trotter.rs              # trotter_step (Phase 2 で追加)
 │   ├── tridiag.rs              # 実対称三重対角の implicit QL (hand-rolled)
 │   └── blas.rs                 # 内積 / axpy / nrm2 / scal ラッパ
 ├── python/                     # ← Python ソース (python-source = "python")
-│   └── kryanneal/
+│   └── kinema/
 │       ├── __init__.py         # 公開 API
 │       ├── __init__.pyi        # 自動生成 stub (.py と同所; maturin が wheel 同梱)
 │       ├── py.typed            # PEP 561 マーカ
@@ -147,7 +147,7 @@ build-backend = "maturin"
 
 [tool.maturin]
 python-source = "python"        # ← 標準推奨 (ImportError 回避)
-module-name = "kryanneal._rust" # Rust 側 #[pymodule] fn _rust の Python パス
+module-name = "kinema._rust" # Rust 側 #[pymodule] fn _rust の Python パス
 features = ["extension-module"]
 profile = "production"
 strip = true

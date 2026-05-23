@@ -13,7 +13,7 @@
 実装方針:
 
 * ``method="lanczos"`` (default): Python ループから
-  ``_rust.apply_h_kryanneal_into_py`` (in-place 版) を呼んで Krylov 部分空間
+  ``_rust.apply_h_kinema_into_py`` (in-place 版) を呼んで Krylov 部分空間
   (次元 ``m``, default 64) を構築し, ``_rust.tridiag_eigh_py`` で三重対角の
   完全固有分解を取って下位 ``k`` 個の Ritz vector を再構築する.
   ``w`` buffer を loop 外で 1 回確保し再利用することで境界の alloc/copy
@@ -27,8 +27,8 @@ from __future__ import annotations as annotations
 import importlib
 from typing import Literal as Literal
 import numpy as np
-from kryanneal.problem import IsingProblem as IsingProblem
-from kryanneal.schedule import Schedule as Schedule
+from kinema.problem import IsingProblem as IsingProblem
+from kinema.schedule import Schedule as Schedule
 from typing import Any
 __all__ = ['instantaneous_eigenstates']
 
@@ -88,8 +88,8 @@ def instantaneous_eigenstates(problem: IsingProblem, schedule: Schedule, t: floa
     Examples
     --------
     >>> import numpy as np
-    >>> from kryanneal import IsingProblem, Schedule
-    >>> from kryanneal.eigenstates import instantaneous_eigenstates
+    >>> from kinema import IsingProblem, Schedule
+    >>> from kinema.eigenstates import instantaneous_eigenstates
     >>> n = 4
     >>> prob = IsingProblem(
     ...     n=n,

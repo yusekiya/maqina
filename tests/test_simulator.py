@@ -23,14 +23,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kryanneal import (
+from kinema import (
     AnnealingSimulator,
     IsingProblem,
     Observable,
     QuantumAnnealer,
     Schedule,
 )
-from kryanneal.initial_states import uniform_superposition
+from kinema.initial_states import uniform_superposition
 
 
 def _ferromagnetic_chain_h_p_diag(n: int) -> np.ndarray:

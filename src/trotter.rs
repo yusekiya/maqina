@@ -28,7 +28,7 @@
 //! `exp(+i·θ·X) = cos(θ)·I + i·sin(θ)·X` (`X² = I` より). すなわち `R_i(dt)` に
 //! 渡すべき 2×2 ユニタリは `u = [cos θ, i·sin θ, i·sin θ, cos θ]` で
 //! **`θ = +a_t · h_x_i · dt` (正符号)**. `H_drv` の負符号を `θ` に巻き取ら
-//! ない (`apply_h_kryanneal` で `coeff = -a_t · h_x[i]` としているのと整合).
+//! ない (`apply_h_kinema` で `coeff = -a_t · h_x[i]` としているのと整合).
 //!
 //! ## 4 次 Suzuki (`trotter_suzuki4_step`)
 //!
@@ -75,7 +75,7 @@ use crate::matvec::{apply_multi_qubit_gate_fused, apply_single_mode_axis_i, MAX_
 /// `phase_p(dt')`: `psi[k] *= exp(-i · b_t · h_p_diag[k] · dt')` を全 k に適用.
 ///
 /// 大 dim (≥ 2^17 = 128K Complex64 = 2 MB) では rayon par_iter_mut で並列化
-/// (`apply_h_kryanneal_rayon` の `MIN_RAYON_DIM` と同じ閾値). small dim では
+/// (`apply_h_kinema_rayon` の `MIN_RAYON_DIM` と同じ閾値). small dim では
 /// scalar fallback. trotter_step の per-step time のうち, multi-qubit gate
 /// fusion で削減できない diag 部分 (N=20 dim=1M で数 ms 級) を rayon barrier
 /// 2 個 (前後) に詰める (Phase 6 C3, issue #64 v3 修正).
@@ -315,7 +315,7 @@ pub(crate) fn trotter_step_py<'py>(
 /// ```
 ///
 /// として呼ぶ. `trotter_step_py` と同じ shape 検査を行い, 不整合は
-/// `PyValueError`. 主な call site: `python/kryanneal/krylov.py` の Trotter
+/// `PyValueError`. 主な call site: `python/kinema/krylov.py` の Trotter
 /// 経路 step loop, `benchmarks/bench_block_fusion.py` /
 /// `benchmarks/bench_parallel_scaling.py` (計測内 alloc/copy 排除).
 /// 詳細は `docs/design/07-rust-extension.md` §7.3.
@@ -487,7 +487,7 @@ pub(crate) fn trotter_suzuki4_step_py<'py>(
 /// ```
 ///
 /// として呼ぶ. `trotter_suzuki4_step_py` と同じ shape 検査を行い, 不整合は
-/// `PyValueError`. 主な call site: `python/kryanneal/krylov.py` の
+/// `PyValueError`. 主な call site: `python/kinema/krylov.py` の
 /// trotter_suzuki4 経路 step loop. 詳細は `docs/design/07-rust-extension.md` §7.3.
 #[pyfunction]
 #[pyo3(signature = (psi, h_x, h_p_diag, a_t_list, b_t_list, dt, n))]
@@ -581,7 +581,7 @@ mod tests {
 
     /// `(a_t, b_t, h_x, h_p_diag)` から `dim × dim` の実 dense Hamiltonian を
     /// 構築する. H_driver (X 演算子の和) も diag も実係数のため H 全体は
-    /// 実対称. `apply_h_kryanneal` の符号 convention (`coeff = -a_t · h_x_i`)
+    /// 実対称. `apply_h_kinema` の符号 convention (`coeff = -a_t · h_x_i`)
     /// と一致させてある.
     fn build_dense_h_real(
         n: usize,

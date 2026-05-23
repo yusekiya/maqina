@@ -23,9 +23,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kryanneal import IsingProblem, Observable, Schedule
-from kryanneal.initial_states import uniform_superposition
-from kryanneal.krylov import (
+from kinema import IsingProblem, Observable, Schedule
+from kinema.initial_states import uniform_superposition
+from kinema.krylov import (
     evolve_schedule_adaptive_m2,
     evolve_schedule_adaptive_richardson,
 )
@@ -345,7 +345,7 @@ def test_auto_dt_init_resolves_to_formula() -> None:
     検証する. 床値 (`_AUTO_DT_INIT_FLOOR`) と上限 (interval T 自体) の
     境界も同時に確認する.
     """
-    from kryanneal.annealer import (
+    from kinema.annealer import (
         _AUTO_DT_INIT_C,
         _AUTO_DT_INIT_FLOOR,
         _resolve_dt_init_auto,
@@ -382,8 +382,8 @@ def test_dt_init_none_facade_smoke() -> None:
     がビット一致する (None resolution が driver の ``dt0`` に正しく流れて
     いることの確認).
     """
-    from kryanneal import QuantumAnnealer
-    from kryanneal.annealer import _resolve_dt_init_auto
+    from kinema import QuantumAnnealer
+    from kinema.annealer import _resolve_dt_init_auto
 
     n = 4
     T = 5.0
@@ -430,7 +430,7 @@ def test_dt_init_none_small_T_completes() -> None:
     床値 / 上限の境界処理が正しく動き, driver 入力検証
     (``dt_min <= dt0 <= dt_max``) に違反しないことを確認する.
     """
-    from kryanneal import QuantumAnnealer
+    from kinema import QuantumAnnealer
 
     n = 3
     T = 0.05  # 床値支配でも上限支配でも無い中庸. 0.1·sqrt(0.05)≈2.24e-2 < T.
@@ -462,7 +462,7 @@ def test_auto_dt_max_resolves_to_formula() -> None:
     - cap < dt0: dt0 floor が支配
     の 3 パターンを機械精度で確認する.
     """
-    from kryanneal.annealer import _gershgorin_norm_upper_bound, _resolve_dt_max_auto
+    from kinema.annealer import _gershgorin_norm_upper_bound, _resolve_dt_max_auto
 
     # 案件: 大 N で cap が支配する設定. h_x=1·n=20, H_p_diag in [-1, 1].
     n = 20
@@ -499,8 +499,8 @@ def test_dt_max_none_facade_caps_dt_history() -> None:
     手前 (~ dt0·growth_max) で頭打ちになることが多いが, "cap を超えない"
     という上界保証が本テストの主目的.
     """
-    from kryanneal import QuantumAnnealer
-    from kryanneal.annealer import _gershgorin_norm_upper_bound, _resolve_dt_max_auto
+    from kinema import QuantumAnnealer
+    from kinema.annealer import _gershgorin_norm_upper_bound, _resolve_dt_max_auto
 
     n = 10
     T = 5.0
@@ -567,7 +567,7 @@ def test_auto_dt_max_zero_hamiltonian_falls_back_to_default() -> None:
 
     Gershgorin 上界が 0 になるケースの fallback path カバレッジ.
     """
-    from kryanneal.annealer import _resolve_dt_max_auto
+    from kinema.annealer import _resolve_dt_max_auto
 
     n = 3
     h_p = np.zeros(1 << n, dtype=np.float64)
@@ -585,7 +585,7 @@ def test_m_max_facade_smoke() -> None:
     (PI controller が dt を絞ることで). n=4, T=5 の smooth linear schedule
     で smoke 検証.
     """
-    from kryanneal import QuantumAnnealer
+    from kinema import QuantumAnnealer
 
     n = 4
     T = 5.0
@@ -619,7 +619,7 @@ def test_m_max_overrides_self_m() -> None:
     QuantumAnnealer(m=16) を構築して ``run()`` した結果がビット一致する
     (driver は同じ m=16 で呼ばれるはず).
     """
-    from kryanneal import QuantumAnnealer
+    from kinema import QuantumAnnealer
 
     n = 4
     T = 2.0
@@ -655,7 +655,7 @@ def test_m_eff_stats_in_adaptive_result() -> None:
     """adaptive Richardson 経路で ``QuantumResult.m_eff_stats`` が非 None で
     必要なキー全部を持ち, 各統計値が ``[1, 6·m]`` の範囲に収まる (issue #52 A).
     """
-    from kryanneal import QuantumAnnealer
+    from kinema import QuantumAnnealer
 
     n = 4
     T = 5.0
@@ -691,7 +691,7 @@ def test_m_eff_stats_in_adaptive_result() -> None:
 
 def test_m_eff_stats_none_for_fixed_dt_methods() -> None:
     """固定 dt 経路 (m2 / trotter / cfm4) では ``m_eff_stats`` が None."""
-    from kryanneal import QuantumAnnealer
+    from kinema import QuantumAnnealer
 
     n = 3
     T = 1.0
@@ -721,7 +721,7 @@ def test_m_max_32_matches_m_24_when_early_termination() -> None:
     Lanczos が決定論的に同じ部分空間を構築し, 終端 ψ もビット一致または
     機械精度内一致が期待される.
     """
-    from kryanneal import QuantumAnnealer
+    from kinema import QuantumAnnealer
 
     n = 4
     T = 5.0
@@ -760,7 +760,7 @@ def test_m_max_32_matches_m_24_when_early_termination() -> None:
 
 def test_m_max_invalid_raises() -> None:
     """``m_max`` に非正整数または非整数を渡すと ``ValueError``."""
-    from kryanneal import QuantumAnnealer
+    from kinema import QuantumAnnealer
 
     n = 3
     prob = _make_random_problem(n, seed=11)
@@ -879,8 +879,8 @@ def test_krylov_tol_none_resolves_to_atol_ratio_bit_exact() -> None:
     facade None → ``effective_krylov_tol = tol_step · 1e-3`` の resolution
     が driver の ``krylov_tol`` に正しく流れていることの bit-exact 確認.
     """
-    from kryanneal import QuantumAnnealer
-    from kryanneal.annealer import _KRYLOV_TOL_ATOL_RATIO
+    from kinema import QuantumAnnealer
+    from kinema.annealer import _KRYLOV_TOL_ATOL_RATIO
 
     n = 4
     T = 5.0
@@ -924,7 +924,7 @@ def test_krylov_tol_none_vs_explicit_1e12_same_accuracy() -> None:
     `1e-11` でも atol=1e-8 に対し 3 桁マージンが残るため終端 ψ は機械精度
     近くで一致する.
     """
-    from kryanneal import QuantumAnnealer
+    from kinema import QuantumAnnealer
 
     n = 4
     T = 5.0
@@ -965,7 +965,7 @@ def test_krylov_tol_atol_ratio_constant_is_1e_minus_3() -> None:
     (issue #54 で採用された経験値; 変更時は docs/design/05-3-propagator.md §5.3 E 節と
     bench 結果の更新も必要).
     """
-    from kryanneal.annealer import _KRYLOV_TOL_ATOL_RATIO
+    from kinema.annealer import _KRYLOV_TOL_ATOL_RATIO
 
     assert _KRYLOV_TOL_ATOL_RATIO == 1e-3
 
@@ -975,7 +975,7 @@ def test_dt_init_invalid_string_still_raises_at_runtime() -> None:
     (issue #54 で `Literal["auto"]` を削除し explicit guard を廃止した
     あとも, ``float(s)`` 経由で型不整合を弾く保護が残ることの確認).
     """
-    from kryanneal import QuantumAnnealer
+    from kinema import QuantumAnnealer
 
     n = 3
     prob = _make_random_problem(n, seed=11)
@@ -997,7 +997,7 @@ def test_dt_max_invalid_string_still_raises_at_runtime() -> None:
     """``dt_max`` に非数値文字列を渡すと runtime で ``ValueError``
     (``dt_init`` 同様, `Literal` 削除後の自然な float 変換失敗で弾かれる).
     """
-    from kryanneal import QuantumAnnealer
+    from kinema import QuantumAnnealer
 
     n = 3
     prob = _make_random_problem(n, seed=11)

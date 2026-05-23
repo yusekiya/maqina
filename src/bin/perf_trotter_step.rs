@@ -6,7 +6,7 @@
 //! Python の `bench_block_fusion.py` は `trotter_step_py` (allocate-and-return)
 //! を経由するため, dim · 16 B の `complex128` array を毎回 alloc/copy する
 //! overhead が wall time に乗る (`docs/design/05-1-matvec.md` §5.1.4 参照).
-//! `apply_h_kryanneal_py` ほど顕著ではないが (trotter_step は per-step compute が
+//! `apply_h_kinema_py` ほど顕著ではないが (trotter_step は per-step compute が
 //! 大きい), C3 (issue #64) の 4.01× speedup 主張のように compute speedup と
 //! noise の切り分けが必要なケースで Python bench は信頼性が落ちる.
 //!
@@ -49,7 +49,7 @@
 //!
 //! - `n`: TFIM サイト数. dim = 2^n. default = 20.
 //! - `iterations`: trotter_step 呼出回数. default = 500. 実行時間が 5-10 秒に
-//!   なるよう調整 (perf counter の統計的安定性確保). `apply_h_kryanneal` より
+//!   なるよう調整 (perf counter の統計的安定性確保). `apply_h_kinema` より
 //!   per-iter cost が大きいので default は 500 (perf_apply_h の 1000 の半分).
 //!
 //! # 出力

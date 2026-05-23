@@ -1,7 +1,7 @@
-//! `kryanneal._rust`: Rust 実装の Krylov / CFM4 / Trotter / matvec 高速経路.
+//! `kinema._rust`: Rust 実装の Krylov / CFM4 / Trotter / matvec 高速経路.
 //!
 //! Phase 1 (MVP) では以下を提供する:
-//!   - `apply_h_kryanneal` (matvec: bit-flip + 対角積)
+//!   - `apply_h_kinema` (matvec: bit-flip + 対角積)
 //!   - `lanczos_propagate` (matrix-free Lanczos 短時間プロパゲータ)
 //!   - `m2_midpoint_step` (M2 中点則 1 step)
 //!
@@ -12,7 +12,7 @@
 //! Phase 3 で `cfm4_step` を追加:
 //!   - CFM4:2 commutator-free Magnus (Alvermann-Fehske 2011, 2 stage)
 //!   - 線形結合 callback 形式 (各 stage の `(c_drv, c_diag)` を畳み込んで
-//!     既存 `apply_h_kryanneal` を再利用; `docs/design/05-2-lanczos.md` §5.2 末尾)
+//!     既存 `apply_h_kinema` を再利用; `docs/design/05-2-lanczos.md` §5.2 末尾)
 //!
 //! Phase 4 で `cfm4_step_with_m2_estimate` (M2 embedded error 推定子) と
 //! `cfm4_step_with_richardson_estimate` (step-doubling Richardson 推定子) を追加.
@@ -29,7 +29,7 @@
 //!
 //! BLAS / rayon / SIMD 経路でビルドされたかどうかは `__has_blas__`,
 //! `__has_rayon__`, `__has_simd__` の各 `bool` 属性で参照可能.
-//! Python 側 `kryanneal.krylov` は import 時に `__has_blas__` を読み, BLAS
+//! Python 側 `kinema.krylov` は import 時に `__has_blas__` を読み, BLAS
 //! 無効ビルド (scalar fallback) の場合に `RuntimeWarning` を 1 度だけ発する.
 //! `__has_rayon__` / `__has_simd__` は bench / 計測時の build profile 確認用.
 //!
@@ -38,9 +38,9 @@
 //! `__has_avx512f__` / `__has_neon__` (`cfg!(target_feature = "...")` 由来) と,
 //! ビルドターゲットを示す `__target_arch__` / `__target_os__`
 //! (`std::env::consts::ARCH` / `OS`) を expose する. ユーザー側では
-//! `kryanneal.show_config()` でこれらを集約 dump できる (numpy.show_config 相当).
+//! `kinema.show_config()` でこれらを集約 dump できる (numpy.show_config 相当).
 //!
-//! Python 側 (`kryanneal.krylov`) は本モジュールの import 可否で fast path を
+//! Python 側 (`kinema.krylov`) は本モジュールの import 可否で fast path を
 //! 切替える silent-fallback 設計. Rust 拡張がない環境では Python リファレンス
 //! 実装で動作する.
 
@@ -68,12 +68,12 @@ mod trotter;
 /// `src/bin/perf_apply_single_mode_axis_i.rs` /
 /// `src/bin/perf_cfm4_richardson.rs` / `src/bin/perf_chebyshev.rs`
 /// (Linux `perf stat` 等で hardware counter を取るための pure-Rust binary)
-/// から `apply_h_kryanneal` / `trotter_step` / `apply_single_mode_axis_i` /
+/// から `apply_h_kinema` / `trotter_step` / `apply_single_mode_axis_i` /
 /// `lanczos_propagate` / `cfm4_step_with_richardson_estimate` /
 /// `chebyshev_propagate` を呼べるよう公開する. このモジュールは Python 側
 /// には露出されない (pyo3 `#[pymodule]` には登録しない).
 ///
-/// Python 経由で呼びたい場合は引き続き `_rust.apply_h_kryanneal_py` /
+/// Python 経由で呼びたい場合は引き続き `_rust.apply_h_kinema_py` /
 /// `_rust.trotter_step_py` / `_rust.apply_single_mode_axis_i_inplace_py` /
 /// `_rust.lanczos_propagate_py` /
 /// `_rust.cfm4_step_with_richardson_estimate_py` (および non-inplace 版) を
@@ -87,7 +87,7 @@ pub mod bench_api {
     };
     pub use crate::chebyshev::chebyshev_propagate;
     pub use crate::krylov::lanczos_propagate;
-    pub use crate::matvec::apply_h_kryanneal;
+    pub use crate::matvec::apply_h_kinema;
     pub use crate::matvec::apply_single_mode_axis_i;
     pub use crate::trotter::trotter_step;
 }
@@ -102,7 +102,7 @@ const HAS_BLAS: bool = cfg!(feature = "blas");
 /// build profile の確認用途.
 const HAS_RAYON: bool = cfg!(feature = "rayon");
 
-/// 本拡張が `simd` feature 有効 (`apply_h_kryanneal` の bit-flip pass i=0,1,2
+/// 本拡張が `simd` feature 有効 (`apply_h_kinema` の bit-flip pass i=0,1,2
 /// の `wide::f64x4` 特化, Phase 6 C2 / issue #63) でビルドされたかを示す
 /// compile-time フラグ. Python 側からは `_rust.__has_simd__` として参照する.
 /// `benchmarks/bench_simd_scaling.py` が SIMD ON/OFF build を切り分ける際の
@@ -141,8 +141,8 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__has_neon__", HAS_NEON)?;
     m.add("__target_arch__", std::env::consts::ARCH)?;
     m.add("__target_os__", std::env::consts::OS)?;
-    m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_py, m)?)?;
-    m.add_function(wrap_pyfunction!(matvec::apply_h_kryanneal_into_py, m)?)?;
+    m.add_function(wrap_pyfunction!(matvec::apply_h_kinema_py, m)?)?;
+    m.add_function(wrap_pyfunction!(matvec::apply_h_kinema_into_py, m)?)?;
     m.add_function(wrap_pyfunction!(matvec::apply_single_mode_axis_i_py, m)?)?;
     m.add_function(wrap_pyfunction!(
         matvec::apply_single_mode_axis_i_inplace_py,

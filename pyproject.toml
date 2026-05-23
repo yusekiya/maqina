@@ -1,5 +1,5 @@
 [project]
-name = "kryanneal"
+name = "kinema"
 version = "0.11.0"
 description = "Krylov + Magnus quantum annealing simulator for the transverse-field Ising model"
 readme = "README.md"
@@ -15,11 +15,11 @@ build-backend = "maturin"
 
 [tool.maturin]
 # maturin 公式 docs 推奨の mixed Rust/Python project レイアウト.
-# Python ソースを python/kryanneal/ に置き、Cargo.toml + src/lib.rs は
+# Python ソースを python/kinema/ に置き、Cargo.toml + src/lib.rs は
 # プロジェクトルート直下. PyO3/maturin#490 で報告されている
 # ModuleNotFoundError pitfall を回避するため "python" を明示する.
 python-source = "python"
-module-name = "kryanneal._rust"
+module-name = "kinema._rust"
 features = ["extension-module"]
 profile = "production"
 strip = true

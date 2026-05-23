@@ -1,4 +1,4 @@
-"""block-fusion (Phase 6 C3, issue #64) bench: trotter_step / apply_h_kryanneal の
+"""block-fusion (Phase 6 C3, issue #64) bench: trotter_step / apply_h_kinema の
 per-step time を計測する.
 
 ## 計測対象と目的
@@ -6,7 +6,7 @@ per-step time を計測する.
 | kernel | 計測理由 |
 |---|---|
 | ``trotter_step`` | Phase 6 C3 の主スコープ. ``apply_single_mode_axis_i`` を 1 軸ずつ ``n`` 回呼ぶ旧実装から, 連続 ``FUSE_K = 4`` qubit を 1 つの rayon chunk closure 内で per-axis 逐次に適用する ``apply_multi_qubit_gate_fused`` 経路に書き換えた効果を測る. 期待: per-step rayon barrier 数 ``2n+2 → n/FUSE_K + 2``, N=20 で 40 → 7. compute は per-axis × k と同じ (`2k·dim` ops, 増えない) で chunk-resident cache 効果と barrier 削減のみで稼ぐ (dense 2^k×2^k matmul 経路は本 PR 初版で 0.81× regression したため放棄). |
-| ``apply_h_kryanneal`` | Phase 6 C3 の副次スコープ. ``RAYON_CHUNK_MAX`` を ``1<<14`` (= 256 KB chunk) から ``1<<13`` (= 128 KB chunk) に縮めて per-core L2 fit を保証した効果. 高 i pass で chunk-partner block の DRAM round trip が減ることを期待. |
+| ``apply_h_kinema`` | Phase 6 C3 の副次スコープ. ``RAYON_CHUNK_MAX`` を ``1<<14`` (= 256 KB chunk) から ``1<<13`` (= 128 KB chunk) に縮めて per-core L2 fit を保証した効果. 高 i pass で chunk-partner block の DRAM round trip が減ることを期待. |
 
 両 kernel とも本 script は **計測本体のみ** 提供する. baseline (Phase 6 C2
 完了時点 = main branch tip) と after (C3 適用 = 本 PR branch tip) の per-step
@@ -36,7 +36,7 @@ per-step time を計測する.
 - N=20, cpu_count=64 Linux サーバー, ``RAYON_NUM_THREADS=64``,
   ``BLAS_THREADS=1`` で ``trotter_step`` の per-step time が baseline の
   **>= 1.3×** 改善.
-- 副次目標: ``apply_h_kryanneal`` も同条件で改善 (chunk_size 効果). 数値
+- 副次目標: ``apply_h_kinema`` も同条件で改善 (chunk_size 効果). 数値
   目標は設定しないが median speedup を md に出す.
 - 数値一致: 別途 ``cargo test`` + ``uv run pytest`` で ``rel < 1e-13`` 確認済み
   (本 bench では検証しない).
@@ -47,7 +47,7 @@ per-step time を計測する.
 
 - rayon thread 数: ``RAYON_NUM_THREADS`` 環境変数で **プロセス起動時に** 固定
   (rayon global pool は最初の rayon op で構築され, それ以降は変更不可).
-- BLAS thread 数: 本 script 冒頭で ``kryanneal.set_blas_threads(args.blas_threads)``
+- BLAS thread 数: 本 script 冒頭で ``kinema.set_blas_threads(args.blas_threads)``
   を呼び 1 thread に固定 (default 1). rayon と BLAS の thread pool が同時に
   cpu_count 個ずつ thread を張ると context-switch で性能劣化するため.
 
@@ -110,7 +110,7 @@ def _measure_trotter_step(n: int, repeat: int, warmup: int, dt: float) -> list[f
     (issue #86; 旧 ``trotter_step_py`` は per-call で ``dim · 16 B`` の新規
     array を allocate するため Rust kernel の micro 効果が埋もれる).
     """
-    from kryanneal import _rust  # pyright: ignore[reportMissingImports]
+    from kinema import _rust  # pyright: ignore[reportMissingImports]
 
     dim = 1 << n
     rng = np.random.default_rng(0xC3_B10C_F0_7807_7E40 ^ n)
@@ -136,18 +136,18 @@ def _measure_trotter_step(n: int, repeat: int, warmup: int, dt: float) -> list[f
     return timings
 
 
-def _measure_apply_h_kryanneal(n: int, repeat: int, warmup: int) -> list[float]:
-    """``_rust.apply_h_kryanneal_into_py`` の wall time を repeat 回計測して返す.
+def _measure_apply_h_kinema(n: int, repeat: int, warmup: int) -> list[float]:
+    """``_rust.apply_h_kinema_into_py`` の wall time を repeat 回計測して返す.
 
     matvec primitive (Lanczos / CFM4:2 内部). C3 の副次スコープ (chunk_size 縮小).
     h_x は all-ones で全 i bit-flip pass を踏ませる.
 
-    in-place 版 (``apply_h_kryanneal_into_py``) を使い ``y_out`` を warmup 前に
-    1 回 alloc して再利用する. 旧 ``apply_h_kryanneal_py`` 経路だと毎 call で
+    in-place 版 (``apply_h_kinema_into_py``) を使い ``y_out`` を warmup 前に
+    1 回 alloc して再利用する. 旧 ``apply_h_kinema_py`` 経路だと毎 call で
     ``dim · 16 B`` の新規 alloc/copy が計測域に混入し Rust kernel の micro
     効果が埋もれる (issue #79 / #85).
     """
-    from kryanneal import _rust  # pyright: ignore[reportMissingImports]
+    from kinema import _rust  # pyright: ignore[reportMissingImports]
 
     dim = 1 << n
     rng = np.random.default_rng(0xC3_B10C_F0_AA77EC ^ n)
@@ -162,12 +162,12 @@ def _measure_apply_h_kryanneal(n: int, repeat: int, warmup: int) -> list[float]:
     y_out = np.empty(dim, dtype=np.complex128)
 
     for _ in range(warmup):
-        _rust.apply_h_kryanneal_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_kinema_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
 
     timings: list[float] = []
     for _ in range(repeat):
         t0 = time.perf_counter()
-        _rust.apply_h_kryanneal_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_kinema_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
         t1 = time.perf_counter()
         timings.append(t1 - t0)
     return timings
@@ -186,15 +186,15 @@ def _machine_info(label: str) -> dict[str, Any]:
         "rayon_num_threads_env": os.environ.get("RAYON_NUM_THREADS"),
     }
     try:
-        import kryanneal
-        from kryanneal import _rust  # pyright: ignore[reportMissingImports]
+        import kinema
+        from kinema import _rust  # pyright: ignore[reportMissingImports]
 
-        info["kryanneal_version"] = getattr(kryanneal, "__version__", "unknown")
+        info["kinema_version"] = getattr(kinema, "__version__", "unknown")
         info["__has_blas__"] = bool(getattr(_rust, "__has_blas__", False))
         info["__has_rayon__"] = bool(getattr(_rust, "__has_rayon__", False))
         info["__has_simd__"] = bool(getattr(_rust, "__has_simd__", False))
     except ImportError:
-        info["kryanneal_version"] = "import-failed"
+        info["kinema_version"] = "import-failed"
         info["__has_blas__"] = None
         info["__has_rayon__"] = None
         info["__has_simd__"] = None
@@ -266,7 +266,7 @@ def _parse_int_list(s: str) -> tuple[int, ...]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Phase 6 C3 block-fusion bench (trotter_step / apply_h_kryanneal)",
+        description="Phase 6 C3 block-fusion bench (trotter_step / apply_h_kinema)",
     )
     parser.add_argument(
         "--n-values",
@@ -303,15 +303,15 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=1,
         help=(
-            "kryanneal.set_blas_threads(N) で BLAS thread 数を固定 "
+            "kinema.set_blas_threads(N) で BLAS thread 数を固定 "
             "(default 1; rayon × BLAS 干渉を分離)"
         ),
     )
     parser.add_argument(
         "--kernels",
         type=str,
-        default="trotter_step,apply_h_kryanneal",
-        help="計測対象 kernel (カンマ区切り; trotter_step / apply_h_kryanneal)",
+        default="trotter_step,apply_h_kinema",
+        help="計測対象 kernel (カンマ区切り; trotter_step / apply_h_kinema)",
     )
     parser.add_argument(
         "--output-dir",
@@ -327,15 +327,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    import kryanneal
+    import kinema
 
     if args.blas_threads is not None:
-        kryanneal.set_blas_threads(args.blas_threads)
+        kinema.set_blas_threads(args.blas_threads)
 
     machine = _machine_info(args.label)
 
     kernels = [k.strip() for k in args.kernels.split(",") if k.strip()]
-    valid_kernels = {"trotter_step", "apply_h_kryanneal"}
+    valid_kernels = {"trotter_step", "apply_h_kinema"}
     unknown = set(kernels) - valid_kernels
     if unknown:
         print(
@@ -361,8 +361,8 @@ def main(argv: list[str] | None = None) -> int:
                     warmup=args.warmup,
                     dt=args.dt,
                 )
-            elif kernel == "apply_h_kryanneal":
-                timings = _measure_apply_h_kryanneal(
+            elif kernel == "apply_h_kinema":
+                timings = _measure_apply_h_kinema(
                     n,
                     repeat=args.repeat,
                     warmup=args.warmup,

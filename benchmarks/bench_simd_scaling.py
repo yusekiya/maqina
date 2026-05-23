@@ -1,4 +1,4 @@
-"""SIMD scaling bench: `apply_h_kryanneal` per-pass time の SIMD ON/OFF 比較.
+"""SIMD scaling bench: `apply_h_kinema` per-pass time の SIMD ON/OFF 比較.
 
 issue #63 (Phase 6 C2) の acceptance「N=18, i=0,1,2 集中時の per-pass time
 **>=1.5× 改善** (cpu_count=64 Linux サーバーで, BLAS thread=1)」を計測する
@@ -9,7 +9,7 @@ parent/child 自動切替はせず, **操作員が異なる build で 2 回 meas
 
 ## 計測対象
 
-`_rust.apply_h_kryanneal_py` の per-call wall time を以下 2 設定で取る:
+`_rust.apply_h_kinema_py` の per-call wall time を以下 2 設定で取る:
 
 - ``all-i`` (h_x = all-ones): 全 i bit-flip pass が寄与. 本番ホットパス
   (Lanczos / CFM4:2) を最も忠実に再現する.
@@ -41,7 +41,7 @@ parent/child 自動切替はせず, **操作員が異なる build で 2 回 meas
         uv run maturin develop --uv --release \\
         --no-default-features --features extension-module,blas,rayon
     # build flag 確認 (期待: __has_simd__ = False)
-    uv run python -c "from kryanneal import _rust; print('simd:', _rust.__has_simd__)"
+    uv run python -c "from kinema import _rust; print('simd:', _rust.__has_simd__)"
     uv run python benchmarks/bench_simd_scaling.py \\
         --mode measure --label simd-off \\
         --output benchmarks/results/bench_simd/simd-off.json
@@ -122,15 +122,15 @@ SIMD_TARGET_I_VALUES = (0, 1, 2)
 
 
 def _measure_apply_h(n: int, h_x: np.ndarray, repeat: int, warmup: int) -> list[float]:
-    """`_rust.apply_h_kryanneal_into_py` の wall time を repeat 回計測して返す.
+    """`_rust.apply_h_kinema_into_py` の wall time を repeat 回計測して返す.
 
     warmup 回数だけ捨てた後, repeat 回の wall time を秒単位で返す.
 
     in-place 版を使い ``y_out`` を warmup 前に 1 回 alloc して再利用する.
-    旧 ``apply_h_kryanneal_py`` だと毎 call で ``dim · 16 B`` の新規 alloc/copy
+    旧 ``apply_h_kinema_py`` だと毎 call で ``dim · 16 B`` の新規 alloc/copy
     が計測域に混入する (issue #79 / #85).
     """
-    from kryanneal import _rust  # pyright: ignore[reportMissingImports]
+    from kinema import _rust  # pyright: ignore[reportMissingImports]
 
     dim = 1 << n
     rng = np.random.default_rng(0xBEEF_FACE ^ n)
@@ -144,12 +144,12 @@ def _measure_apply_h(n: int, h_x: np.ndarray, repeat: int, warmup: int) -> list[
     y_out = np.empty(dim, dtype=np.complex128)
 
     for _ in range(warmup):
-        _rust.apply_h_kryanneal_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_kinema_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
 
     timings: list[float] = []
     for _ in range(repeat):
         t0 = time.perf_counter()
-        _rust.apply_h_kryanneal_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_kinema_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
         t1 = time.perf_counter()
         timings.append(t1 - t0)
     return timings
@@ -168,7 +168,7 @@ def _measure_single_mode(n: int, i: int, repeat: int, warmup: int) -> list[float
     per-call で ``dim · 16 B`` の新規 array を allocate するため SIMD kernel の
     micro 効果が埋もれる).
     """
-    from kryanneal import _rust  # pyright: ignore[reportMissingImports]
+    from kinema import _rust  # pyright: ignore[reportMissingImports]
 
     dim = 1 << n
     rng = np.random.default_rng(0xC0FE_FACE ^ n ^ (i << 20))
@@ -232,15 +232,15 @@ def _machine_info(label: str) -> dict[str, Any]:
         "rayon_num_threads_env": os.environ.get("RAYON_NUM_THREADS"),
     }
     try:
-        import kryanneal
-        from kryanneal import _rust  # pyright: ignore[reportMissingImports]
+        import kinema
+        from kinema import _rust  # pyright: ignore[reportMissingImports]
 
-        info["kryanneal_version"] = getattr(kryanneal, "__version__", "unknown")
+        info["kinema_version"] = getattr(kinema, "__version__", "unknown")
         info["__has_blas__"] = bool(getattr(_rust, "__has_blas__", False))
         info["__has_rayon__"] = bool(getattr(_rust, "__has_rayon__", False))
         info["__has_simd__"] = bool(getattr(_rust, "__has_simd__", False))
     except ImportError:
-        info["kryanneal_version"] = "import-failed"
+        info["kinema_version"] = "import-failed"
         info["__has_blas__"] = None
         info["__has_rayon__"] = None
         info["__has_simd__"] = None
@@ -249,10 +249,10 @@ def _machine_info(label: str) -> dict[str, Any]:
 
 def mode_measure(args: argparse.Namespace) -> int:
     """1 build profile 分の measure を走らせて JSON に書き出す."""
-    import kryanneal
+    import kinema
 
     if args.blas_threads is not None:
-        kryanneal.set_blas_threads(args.blas_threads)
+        kinema.set_blas_threads(args.blas_threads)
 
     machine = _machine_info(args.label)
 
@@ -261,11 +261,11 @@ def mode_measure(args: argparse.Namespace) -> int:
         if n < 3:
             print(f"[measure] skip n={n} (n < 3, SIMD i=2 が踏めない)", flush=True)
             continue
-        # apply_h_kryanneal_py sweep (issue #63 / Phase 6 C2).
+        # apply_h_kinema_py sweep (issue #63 / Phase 6 C2).
         for mode in ("all-i", "i012-focus"):
             h_x = _build_h_x(n, mode)
             print(
-                f"[measure] n={n} dim={1 << n} kernel=apply_h_kryanneal mode={mode}",
+                f"[measure] n={n} dim={1 << n} kernel=apply_h_kinema mode={mode}",
                 flush=True,
             )
             timings = _measure_apply_h(n, h_x, repeat=args.repeat, warmup=args.warmup)
@@ -275,7 +275,7 @@ def mode_measure(args: argparse.Namespace) -> int:
                         "label": args.label,
                         "n": n,
                         "dim": 1 << n,
-                        "kernel": "apply_h_kryanneal",
+                        "kernel": "apply_h_kinema",
                         "mode": mode,
                         "trial": trial_idx,
                         "wall_sec": t,
@@ -339,13 +339,13 @@ def _summarize_median(
 ) -> dict[tuple[int, str, str], float]:
     """(n, kernel, mode) ごとの median wall_sec を返す.
 
-    issue #71 で `kernel` 次元を追加 (apply_h_kryanneal /
+    issue #71 で `kernel` 次元を追加 (apply_h_kinema /
     apply_single_mode_axis_i). 旧 JSON (kernel 欠落) は
-    `kernel = "apply_h_kryanneal"` として扱い後方互換.
+    `kernel = "apply_h_kinema"` として扱い後方互換.
     """
     buckets: dict[tuple[int, str, str], list[float]] = {}
     for r in trials:
-        kernel = str(r.get("kernel", "apply_h_kryanneal"))
+        kernel = str(r.get("kernel", "apply_h_kinema"))
         buckets.setdefault((int(r["n"]), kernel, str(r["mode"])), []).append(
             float(r["wall_sec"])
         )
@@ -401,7 +401,7 @@ def mode_compare(args: argparse.Namespace) -> int:
     lines.append("# bench_simd_scaling (Phase 6 C2 / C2.5, issue #63 / #71)")
     lines.append("")
     lines.append(
-        "`apply_h_kryanneal` (C2) と `apply_single_mode_axis_i` (C2.5) の "
+        "`apply_h_kinema` (C2) と `apply_single_mode_axis_i` (C2.5) の "
         "per-pass time を SIMD ON/OFF で比較する."
     )
     lines.append("")
@@ -434,7 +434,7 @@ def mode_compare(args: argparse.Namespace) -> int:
         )
     lines.append("")
     lines.append(
-        "issue #63 acceptance: N=18 `apply_h_kryanneal` `i012-focus` で "
+        "issue #63 acceptance: N=18 `apply_h_kinema` `i012-focus` で "
         "speedup ≥ 1.5× を満たすこと."
     )
     lines.append(

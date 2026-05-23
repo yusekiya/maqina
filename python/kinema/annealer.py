@@ -6,7 +6,7 @@
 に対して異なる初期状態 / 区間で繰り返し実行できるよう, ``psi0`` は
 コンストラクタではなく ``run`` 側で受け取る.
 
-``AnnealingSimulator`` (``kryanneal.simulator``) は同じ問題に対する
+``AnnealingSimulator`` (``kinema.simulator``) は同じ問題に対する
 step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Observable``
 で測定して続きを発展させる workflow 用. ``QuantumAnnealer.create_simulator``
 で生成するのが簡便 (現 instance の ``problem`` / ``schedule`` / ``m`` /
@@ -57,7 +57,7 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
   ``QuantumResult`` 露出は Rust API 拡張 (``lanczos_propagate`` の戻り値
   追加) が必要なため本フェーズでは保留 (``docs/design/05-3-propagator.md`` §5.3 参照).
 
-実装方針: ``kryanneal.krylov.evolve_schedule_m2`` /
+実装方針: ``kinema.krylov.evolve_schedule_m2`` /
 ``evolve_schedule_trotter`` / ``evolve_schedule_trotter_suzuki4`` /
 ``evolve_schedule_cfm4`` (固定 dt driver) / ``evolve_schedule_adaptive_richardson``
 (adaptive driver) を内部で呼ぶ薄いラッパ. 入力検証 (shape / dtype /
@@ -76,20 +76,20 @@ from typing import TYPE_CHECKING, Literal, cast
 
 import numpy as np
 
-from kryanneal._helpers import _AUTO_DT_INIT_BETA as _AUTO_DT_INIT_BETA
-from kryanneal._helpers import _AUTO_DT_INIT_C as _AUTO_DT_INIT_C
-from kryanneal._helpers import _AUTO_DT_INIT_FLOOR as _AUTO_DT_INIT_FLOOR
-from kryanneal._helpers import _KRYLOV_TOL_ATOL_RATIO as _KRYLOV_TOL_ATOL_RATIO
-from kryanneal._helpers import _KRYLOV_TOL_FIXED_DEFAULT as _KRYLOV_TOL_FIXED_DEFAULT
-from kryanneal._helpers import _LANCZOS_DT_NORM_COEFF as _LANCZOS_DT_NORM_COEFF
-from kryanneal._helpers import _PSI_NORM_TOL as _PSI_NORM_TOL
-from kryanneal._helpers import (
+from kinema._helpers import _AUTO_DT_INIT_BETA as _AUTO_DT_INIT_BETA
+from kinema._helpers import _AUTO_DT_INIT_C as _AUTO_DT_INIT_C
+from kinema._helpers import _AUTO_DT_INIT_FLOOR as _AUTO_DT_INIT_FLOOR
+from kinema._helpers import _KRYLOV_TOL_ATOL_RATIO as _KRYLOV_TOL_ATOL_RATIO
+from kinema._helpers import _KRYLOV_TOL_FIXED_DEFAULT as _KRYLOV_TOL_FIXED_DEFAULT
+from kinema._helpers import _LANCZOS_DT_NORM_COEFF as _LANCZOS_DT_NORM_COEFF
+from kinema._helpers import _PSI_NORM_TOL as _PSI_NORM_TOL
+from kinema._helpers import (
     _gershgorin_norm_upper_bound as _gershgorin_norm_upper_bound,
 )
-from kryanneal._helpers import _resolve_dt_init_auto as _resolve_dt_init_auto
-from kryanneal._helpers import _resolve_dt_max_auto as _resolve_dt_max_auto
-from kryanneal._helpers import _validate_psi0 as _validate_psi0
-from kryanneal.krylov import (
+from kinema._helpers import _resolve_dt_init_auto as _resolve_dt_init_auto
+from kinema._helpers import _resolve_dt_max_auto as _resolve_dt_max_auto
+from kinema._helpers import _validate_psi0 as _validate_psi0
+from kinema.krylov import (
     evolve_schedule_adaptive_richardson,
     evolve_schedule_adaptive_richardson_chebyshev,
     evolve_schedule_cfm4,
@@ -97,13 +97,13 @@ from kryanneal.krylov import (
     evolve_schedule_trotter,
     evolve_schedule_trotter_suzuki4,
 )
-from kryanneal.observable import Observable
-from kryanneal.problem import IsingProblem
-from kryanneal.result import QuantumResult
-from kryanneal.schedule import Schedule
+from kinema.observable import Observable
+from kinema.problem import IsingProblem
+from kinema.result import QuantumResult
+from kinema.schedule import Schedule
 
 if TYPE_CHECKING:
-    from kryanneal.simulator import AnnealingSimulator
+    from kinema.simulator import AnnealingSimulator
 
 __all__ = ["QuantumAnnealer"]
 
@@ -870,7 +870,7 @@ class QuantumAnnealer:
         ``m`` / ``krylov_tol`` を Simulator 側で上書きしたい場合は
         ``AnnealingSimulator`` を直接構築する.
         """
-        from kryanneal.simulator import AnnealingSimulator
+        from kinema.simulator import AnnealingSimulator
 
         return AnnealingSimulator(
             self.problem,

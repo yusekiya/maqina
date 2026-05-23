@@ -10,7 +10,7 @@
 実装方針:
 
 * ``method="lanczos"`` (default): Python ループから
-  ``_rust.apply_h_kryanneal_into_py`` (in-place 版) を呼んで Krylov 部分空間
+  ``_rust.apply_h_kinema_into_py`` (in-place 版) を呼んで Krylov 部分空間
   (次元 ``m``, default 64) を構築し, ``_rust.tridiag_eigh_py`` で三重対角の
   完全固有分解を取って下位 ``k`` 個の Ritz vector を再構築する.
   ``w`` buffer を loop 外で 1 回確保し再利用することで境界の alloc/copy
@@ -28,8 +28,8 @@ from typing import Literal
 
 import numpy as np
 
-from kryanneal.problem import IsingProblem
-from kryanneal.schedule import Schedule
+from kinema.problem import IsingProblem
+from kinema.schedule import Schedule
 
 __all__ = ["instantaneous_eigenstates"]
 
@@ -100,8 +100,8 @@ def instantaneous_eigenstates(
     Examples
     --------
     >>> import numpy as np
-    >>> from kryanneal import IsingProblem, Schedule
-    >>> from kryanneal.eigenstates import instantaneous_eigenstates
+    >>> from kinema import IsingProblem, Schedule
+    >>> from kinema.eigenstates import instantaneous_eigenstates
     >>> n = 4
     >>> prob = IsingProblem(
     ...     n=n,
@@ -177,7 +177,7 @@ def _eigenstates_lanczos(
     psi0 /= norm0
 
     # V: (m, dim) row-major. 各行が Lanczos vector (行ストレージ).
-    # ``apply_h_kryanneal_into_py`` は C-contiguous な (dim,) を要求するので,
+    # ``apply_h_kinema_into_py`` は C-contiguous な (dim,) を要求するので,
     # 行ストレージにしておけば V[j] がそのまま渡せる.
     V = np.zeros((m, dim), dtype=np.complex128)
     alpha = np.zeros(m, dtype=np.float64)
@@ -185,18 +185,18 @@ def _eigenstates_lanczos(
     V[0] = psi0
 
     # ``w_buf`` を Krylov loop 外で 1 回確保し毎周再利用 (issue #85).
-    # 旧来 ``apply_h_kryanneal_py`` 経路では 1 周ごとに ``dim · 16 B`` の
+    # 旧来 ``apply_h_kinema_py`` 経路では 1 周ごとに ``dim · 16 B`` の
     # 新規 alloc/copy が発生し m=64 で ~1 GB の不要な heap traffic になる.
-    # ``apply_h_kryanneal`` は ``y`` を **上書き** するので ``np.empty`` で
+    # ``apply_h_kinema`` は ``y`` を **上書き** するので ``np.empty`` で
     # 構わない (``np.zeros`` 不要).
     w_buf = np.empty(dim, dtype=np.complex128)
 
     m_eff = m
     for j in range(m):
         v_j = V[j]
-        rust.apply_h_kryanneal_into_py(v_j, w_buf, h_x, h_p_diag, a_t, b_t)
+        rust.apply_h_kinema_into_py(v_j, w_buf, h_x, h_p_diag, a_t, b_t)
         # ``w`` への以後の `-=` / 正規化が w_buf を破壊しても OK (次周冒頭で
-        # apply_h_kryanneal_into_py が再度上書きするため).
+        # apply_h_kinema_into_py が再度上書きするため).
         w = w_buf
         # α_j = Re ⟨v_j | w⟩. Hermitian H なら Im 部は浮動小数ノイズ.
         alpha_j = float(np.vdot(v_j, w).real)
@@ -246,7 +246,7 @@ def _eigenstates_exact(
 ) -> tuple[np.ndarray, np.ndarray]:
     """``method="exact"`` 経路: dense ``H(t)`` を組み立て ``numpy.linalg.eigh``.
 
-    ``H(t)`` の列を ``apply_h_kryanneal_into_py`` (in-place 版) を ``e_j =
+    ``H(t)`` の列を ``apply_h_kinema_into_py`` (in-place 版) を ``e_j =
     δ_{·, j}`` に当てて 1 列ずつ抽出する. ``out_col`` は列ループ外で
     1 回確保して再利用する (issue #85, 旧 alloc-and-return 経路の Python
     境界 alloc/copy overhead を回避). Kronecker product より重複コードが無く, ビット
@@ -268,13 +268,13 @@ def _eigenstates_exact(
 
     H = np.empty((dim, dim), dtype=np.complex128)
     e_j = np.zeros(dim, dtype=np.complex128)
-    # 列ループ外で 1 本確保し ``apply_h_kryanneal_into_py`` で毎周上書き
-    # (issue #85). 旧来 ``apply_h_kryanneal_py`` 経路だと ``dim`` 回ぶんの
+    # 列ループ外で 1 本確保し ``apply_h_kinema_into_py`` で毎周上書き
+    # (issue #85). 旧来 ``apply_h_kinema_py`` 経路だと ``dim`` 回ぶんの
     # ``dim · 16 B`` 新規 alloc/copy が走る.
     out_col = np.empty(dim, dtype=np.complex128)
     for j in range(dim):
         e_j[j] = 1.0
-        rust.apply_h_kryanneal_into_py(e_j, out_col, h_x, h_p_diag, a_t, b_t)
+        rust.apply_h_kinema_into_py(e_j, out_col, h_x, h_p_diag, a_t, b_t)
         H[:, j] = out_col
         e_j[j] = 0.0
 
@@ -294,9 +294,9 @@ def _import_rust():
     明示的に ``ImportError`` を投げる.
     """
     try:
-        return importlib.import_module("kryanneal._rust")
+        return importlib.import_module("kinema._rust")
     except ImportError as err:
         raise ImportError(
-            "kryanneal._rust is not available; `uv run maturin develop --uv` "
+            "kinema._rust is not available; `uv run maturin develop --uv` "
             "to build the Rust extension before calling instantaneous_eigenstates."
         ) from err

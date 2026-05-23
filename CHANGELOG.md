@@ -1,6 +1,6 @@
 # Changelog
 
-`kryanneal` の公開 API 破壊的変更と Phase 単位の差分を集約する.
+`kinema` の公開 API 破壊的変更と Phase 単位の差分を集約する.
 
 - 運用ポリシー: `docs/conventions.md` §2 (バージョニング) / §2.2 を一次
   資料とする. **mid-Phase で取り込まれた破壊的変更も本ファイルに時系列
@@ -74,7 +74,7 @@ Magnus + step-doubling Richardson + PI controller 経路に統合した variant 
   K_used 動的決定で Krylov 部分空間次元の概念がない).
 - **Rust 側**: `src/cfm4.rs::cfm4_step_chebyshev` /
   `cfm4_step_chebyshev_with_richardson_estimate`,
-  `python/kryanneal/krylov.py::evolve_schedule_adaptive_richardson_chebyshev`,
+  `python/kinema/krylov.py::evolve_schedule_adaptive_richardson_chebyshev`,
   `src/bin/perf_cfm4_richardson_chebyshev.rs` (perf 計測 binary).
 - **`tests/test_chebyshev.py`**: QuTiP fidelity + Lanczos 一致 + annealer/simulator
   smoke + m_max ValueError.
@@ -101,7 +101,7 @@ EPYC 7713P perf 実測 (#113 / PR #115) で「rayon 経路では BLAS=1」とい
 
 ### Added
 
-- **issue #116**: `kryanneal.set_blas_threads_auto()` 公開. 内部で
+- **issue #116**: `kinema.set_blas_threads_auto()` 公開. 内部で
   `_recommended_blas_threads()` を呼んで `set_blas_threads(n)` を適用 (戻り値
   は適用した n). `_recommended_blas_threads()` は
   `os.process_cpu_count() // 8` を 1-16 でクランプし, さらに
@@ -118,7 +118,7 @@ EPYC 7713P perf 実測 (#113 / PR #115) で「rayon 経路では BLAS=1」とい
   NT=16-32 でも +2% 以内, spin-wait の rayon 圧迫も実害無し) を併記.
 - **`docs/quickstart.md`** "並列ジョブ実行時のスレッド数制御" 節:
   `set_blas_threads_auto()` を新 default の便利関数として追加紹介.
-- **`python/kryanneal/__init__.py::set_blas_threads` docstring**: 旧
+- **`python/kinema/__init__.py::set_blas_threads` docstring**: 旧
   「rayon 経路で `set_blas_threads(1)`」例示を新方針 (`set_blas_threads_auto()`
   を default 推奨, 完全隔離が要件なら明示 `set_blas_threads(1)` または env で
   `OPENBLAS_NUM_THREADS=1`) に差し替え.
@@ -139,7 +139,7 @@ krylov_tol` (Hochbruck-Lubich 1997) に置き換え, `krylov_tol` を **"Krylov
 ### Breaking
 
 - **issue #98 / PR #99**: `krylov_tol` のセマンティクス変更. 旧 β 単体閾値
-  → 新 a posteriori 許容誤差 (`β · |c| · dt / m`). `python/kryanneal/krylov.py`
+  → 新 a posteriori 許容誤差 (`β · |c| · dt / m`). `python/kinema/krylov.py`
   / `src/krylov.rs` 双方の `lanczos_propagate` 内ループ判定式を書き換え.
   - 内部 c 配列を `psi_norm` 抜きで保持し終端で `ψ_new = ‖ψ‖ · V · c` に
     coeff を畳み込む形にリファクタ. これにより `c_m_abs` (Phase 7 で expose
@@ -159,7 +159,7 @@ krylov_tol` (Hochbruck-Lubich 1997) に置き換え, `krylov_tol` を **"Krylov
   half_1 stage 1 は同じ入口 ψ から始まるため `H_drv · ψ` / `H_p_diag · ψ`
   primitive を入口で 1 度だけ計算して両 Lanczos call で再利用. ~3% 純減
   (cache 計算 1 合成 matvec の overhead を引いた純削減). 数値同等性
-  `rel < 2e-15`. Lanczos API 不変, 既存 `apply_h_kryanneal` の cache-blocked
+  `rel < 2e-15`. Lanczos API 不変, 既存 `apply_h_kinema` の cache-blocked
   形は維持 (hot path 触らない). `apply_h_drv` / `apply_h_p_diag` primitive を
   `src/matvec.rs` に追加し, crate-internal `cfm4_step(iter0_cache: Option<...>)`
   引数で渡す.
@@ -211,7 +211,7 @@ on/off の数値一致 artifact test + 大規模 QuTiP 比較 (C4), Quick start
 
 - **issue #62 / PR #67** (Phase 6 C1): `src/matvec.rs` の bit-flip pass
   primitive を rayon `par_chunks_mut` で L2 並列化.
-  - `apply_h_kryanneal`: `y` を `(dim / (nth·4))` を目安に chunk 分割し,
+  - `apply_h_kinema`: `y` を `(dim / (nth·4))` を目安に chunk 分割し,
     各 chunk closure 内で diag pass + 全 i bit-flip pass を fuse
     (cache-blocked 形). `y_chunk` を L1 cache resident に保ち, 後段 SIMD
     (C2) / cache block-fusion (C3) の足場とする.
@@ -226,12 +226,12 @@ on/off の数値一致 artifact test + 大規模 QuTiP 比較 (C4), Quick start
     `apply_*_rayon_matches_serial` (`to_bits()` 一致) + 8 thread × 100
     反復の race-detection fuzz test で担保.
 - **issue #68** (Phase 6 C1 follow-up): `MIN_RAYON_DIM = 1 << 17` の dim 閾値
-  dispatch を public `apply_h_kryanneal` / `apply_single_mode_axis_i` に追加.
+  dispatch を public `apply_h_kinema` / `apply_single_mode_axis_i` に追加.
   dim < 128K (= N ≤ 16) では rayon barrier overhead が単スレッド時間を超えて
   regression するため scalar 経路にフォールバック. `bench_parallel_scaling.py`
   に `trotter_step` cell 追加 + knee detection を max-speedup baseline +
   95% plateau に置換.
-- **issue #63** (Phase 6 C2): `apply_h_kryanneal` の bit-flip pass の
+- **issue #63** (Phase 6 C2): `apply_h_kinema` の bit-flip pass の
   i ∈ {0, 1, 2} を `wide::f64x4` で SIMD 特化 (`simd_kernels::bitflip_iN`).
   PR #73 で `coeff == 0` 短絡, PR #74 で `read_unaligned` /
   `write_unaligned` + `mul_add` に書き直し AVX `vmovupd` + `vfmadd231pd`
@@ -257,14 +257,14 @@ on/off の数値一致 artifact test + 大規模 QuTiP 比較 (C4), Quick start
 - **issue #65** (Phase 6 C4): BLAS feature on/off の数値一致 artifact test +
   大規模 QuTiP 比較.
   - `tests/test_blas_consistency.py`: 固定 seed の sample 入力で psi_final /
-    probabilities / observables 時系列を `.npz` に dump. `KRYANNEAL_EXPECT_BLAS`
+    probabilities / observables 時系列を `.npz` に dump. `KINEMA_EXPECT_BLAS`
     env で build mode を pin できる.
   - `tools/diff_blas_artifacts.py`: BLAS on / off ビルドの `.npz` を読んで
     全 array が `rel < 1e-13` で一致することを assert する standalone script.
   - `tests/test_reference_qutip.py`: n=12-14 で 4 method を QuTiP `sesolve`
     (atol=1e-12) と fidelity 比較. n=15-16 は cfm4_adaptive_richardson のみ
     (sparse 経路). n>=14 は `@pytest.mark.slow`.
-  - `benchmarks/bench_qutip_large.py`: dt sweep で QuTiP vs kryanneal 固定 dt
+  - `benchmarks/bench_qutip_large.py`: dt sweep で QuTiP vs kinema 固定 dt
     method の fidelity と wall time を 1 pass 同時測定 (work-precision diagram).
   - 派生 bench `benchmarks/bench_m_eff_adiabatic.py`: Krylov subspace 次元の
     schedule 依存性を計測.
@@ -286,7 +286,7 @@ on/off の数値一致 artifact test + 大規模 QuTiP 比較 (C4), Quick start
 - **issue #90**: `src/bin/perf_apply_single_mode_axis_i.rs` 追加. #71 fixup
   `578d050` (chunk_size 動的化) を perf binary で再評価し棄却を撤回, 動的
   chunk_size `(dim/(nth·4)).clamp(...)` を採用.
-- **issue #85 / #86**: `apply_h_kryanneal_py` / step 系 `_py` wrap に in-place
+- **issue #85 / #86**: `apply_h_kinema_py` / step 系 `_py` wrap に in-place
   入口 (`*_into_py` / `*_inplace_py` 計 5 関数) を追加. Python bench の
   alloc-and-return overhead を排除する経路.
 - **issue #95**: `bench_qutip_large.py` の ty 型診断 2 件を解消.
@@ -296,7 +296,7 @@ on/off の数値一致 artifact test + 大規模 QuTiP 比較 (C4), Quick start
     `lto = "fat"`, `panic = "abort"`.
   - `pyproject.toml::[tool.maturin]`: `profile = "production"`, `strip = true`.
   - `.cargo/config.toml::[build] rustflags`: `["-C", "target-cpu=native"]`.
-  - `kryanneal.show_config()` (numpy.show_config 相当) を追加し,
+  - `kinema.show_config()` (numpy.show_config 相当) を追加し,
     `_rust.__has_avx2__` / `__has_fma__` / `__has_avx512f__` / `__has_neon__`
     / `__target_arch__` / `__target_os__` を expose.
 
@@ -324,13 +324,13 @@ Phase 6 中の確定済み観測値 (Linux AMD EPYC 7713P):
   **2.71-3.48×** (#71 C2.5).
 - `apply_single_mode_axis_i` N=16 serial path SIMD on/off (i=0/1/2):
   **1.88-2.43×** (#71 C2.5).
-- `apply_h_kryanneal` per-pass SIMD on/off: **~1.75×**, `i012-focus` mode
+- `apply_h_kinema` per-pass SIMD on/off: **~1.75×**, `i012-focus` mode
   total ~1.28× (#63 C2; acceptance 1.5× は未達のまま, DRAM bandwidth は
   C3 では touch せず #79 D で試行・未採用).
 
 ### Archived (試行・未採用)
 
-- **issue #79** (Phase 6 D): `apply_h_kryanneal_rayon` を **連続 k 個の高 i を
+- **issue #79** (Phase 6 D): `apply_h_kinema_rayon` を **連続 k 個の高 i を
   group-fused 3-phase 形** に書き換える試み. DRAM v traffic を理論上
   `dim · (1 + h_baseline) → dim · (1 + h_naive)` に削減する設計だったが,
   Linux AMD EPYC 7713P で perf 計測 (`src/bin/perf_apply_h.rs` 新設) した

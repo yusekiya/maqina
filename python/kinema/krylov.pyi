@@ -4,7 +4,7 @@
 """Krylov + Magnus 時間発展ドライバ.
 
 ここに **公開 driver 関数** (``evolve_schedule_*``) と **Python リファレンス
-実装** を置く. Rust 拡張 (``kryanneal._rust``) が利用可能なら fast path に
+実装** を置く. Rust 拡張 (``kinema._rust``) が利用可能なら fast path に
 ディスパッチし, 利用不可なら Python リファレンスで silent fallback する
 契約 (詳細は ``docs/design/03-architecture.md`` §3, §5).
 
@@ -34,7 +34,7 @@ Phase 3 で CFM4:2 (Alvermann-Fehske 2011) 経路を追加:
 Phase 4 で adaptive driver (``evolve_schedule_adaptive_m2`` /
 ``evolve_schedule_adaptive_richardson``) を追加する.
 
-Rust 拡張へのアクセスは ``kryanneal._rust`` を **遅延 import** で行う:
+Rust 拡張へのアクセスは ``kinema._rust`` を **遅延 import** で行う:
 ``_rust`` のロード失敗 (拡張未ビルド環境) を ``ImportError`` で捕捉して
 ``_rust`` モジュール参照を ``None`` にし, fast path を選ぶ関数側で
 ``None`` を見て Python リファレンスにフォールバックする.
@@ -44,8 +44,8 @@ import importlib
 from types import ModuleType as ModuleType
 from typing import TYPE_CHECKING as TYPE_CHECKING, Callable as Callable
 import numpy as np
-from kryanneal.schedule import Schedule as Schedule
-from kryanneal.observable import Observable as Observable
+from kinema.schedule import Schedule as Schedule
+from kinema.observable import Observable as Observable
 from typing import Any
 SnapshotData = dict[str, 'np.ndarray | dict[str, np.ndarray] | None']
 __all__ = ['SnapshotData', 'evolve_schedule_adaptive_m2', 'evolve_schedule_adaptive_richardson', 'evolve_schedule_adaptive_richardson_chebyshev', 'evolve_schedule_cfm4', 'evolve_schedule_m2', 'evolve_schedule_trotter', 'evolve_schedule_trotter_suzuki4']
@@ -494,6 +494,6 @@ def evolve_schedule_adaptive_richardson_chebyshev(h_x: np.ndarray, h_p_diag: np.
     ValueError, RuntimeError
         :func:`evolve_schedule_adaptive_richardson` と同様.
     NotImplementedError
-        Rust 拡張 ``kryanneal._rust`` が import できなかった場合.
+        Rust 拡張 ``kinema._rust`` が import できなかった場合.
     """
     ...

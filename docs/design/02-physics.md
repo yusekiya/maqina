@@ -39,7 +39,7 @@ QuTiP Qobj 等) を **パッケージ側で扱わない**。代わりに **Z 基
    集約され、Rust 拡張への FFI 境界が極端に薄くなる。
 2. ユーザー側に PauliTerm DSL や J/h API を強制しない (好みのライブラリで
    diagonal を組めば良い)。
-3. ヘルパとして `kryanneal.builders.diag_from_pauli_terms(...)` や
+3. ヘルパとして `kinema.builders.diag_from_pauli_terms(...)` や
    `diag_from_J_h(...)` を **オプションで** 同梱する (Section 6 参照)。
 
 メモリコスト: `H_p_diag` は 8 bytes × 2^N。`ψ` は 16 bytes × 2^N。
@@ -53,7 +53,7 @@ N=24 で diag 128 MB + ψ 256 MB。
 - `psi0: np.ndarray[complex128, shape=(2**n,)]`
   - L2-normalize 済みであることを呼び出し側で保証。パッケージ側ではコンストラクタで
     `‖psi0‖ - 1 < 1e-10` をチェックし、満たさない場合は ValueError。
-- ヘルパとして `kryanneal.initial_states.uniform_superposition(n)`
+- ヘルパとして `kinema.initial_states.uniform_superposition(n)`
   (= driver の GS、`|+⟩^⊗N`) を同梱。
 
 ---

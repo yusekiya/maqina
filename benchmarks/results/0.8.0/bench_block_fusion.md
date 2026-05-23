@@ -13,7 +13,7 @@ label: `bench-block-fusion`
 - **cpu_count_logical**: `64`
 - **timestamp_utc**: `2026-05-18 13:19:04 UTC`
 - **rayon_num_threads_env**: `None`
-- **kryanneal_version**: `unknown`
+- **kinema_version**: `unknown`
 - **__has_blas__**: `True`
 - **__has_rayon__**: `True`
 - **__has_simd__**: `True`
@@ -22,11 +22,11 @@ label: `bench-block-fusion`
 
 | n | kernel | median wall_sec | median calls/sec |
 |---|---|---|---|
-| 18 | apply_h_kryanneal | 2.718419e-04 | 3.679e+03 |
+| 18 | apply_h_kinema | 2.718419e-04 | 3.679e+03 |
 | 18 | trotter_step | 2.468068e-03 | 4.052e+02 |
-| 20 | apply_h_kryanneal | 9.532124e-04 | 1.049e+03 |
+| 20 | apply_h_kinema | 9.532124e-04 | 1.049e+03 |
 | 20 | trotter_step | 8.149054e-03 | 1.227e+02 |
-| 22 | apply_h_kryanneal | 5.069751e-03 | 1.972e+02 |
+| 22 | apply_h_kinema | 5.069751e-03 | 1.972e+02 |
 | 22 | trotter_step | 1.633804e-02 | 6.121e+01 |
 
 ## 使い方 (baseline vs after の手動 diff)

@@ -1,4 +1,4 @@
-# pre-commit hooks for kryanneal.
+# pre-commit hooks for kinema.
 #
 # 全フックは `local` で uv-managed venv の各ツールを呼ぶ (cv_ising と同方針).
 # pre-commit 自身が isolated env を作らないので, uv sync 後の dev 依存
@@ -23,22 +23,22 @@ repos:
         types_or: [python]
         # 自動生成 stub (.pyi) は対象外. それ以外の Python ソースは
         # default location 配下の全てを lint 対象に含める.
-        files: ^(python/kryanneal/.*\.py|tools/.*\.py|tests/.*\.py|benchmarks/.*\.py)$
+        files: ^(python/kinema/.*\.py|tools/.*\.py|tests/.*\.py|benchmarks/.*\.py)$
 
       - id: ruff-format
         name: Ruff format
         entry: uv run --quiet ruff format --force-exclude
         language: system
         types_or: [python]
-        files: ^(python/kryanneal/.*\.py|tools/.*\.py|tests/.*\.py|benchmarks/.*\.py)$
+        files: ^(python/kinema/.*\.py|tools/.*\.py|tests/.*\.py|benchmarks/.*\.py)$
 
       - id: ty-check
         name: ty type check (project mode)
         # project mode: ファイル単位ではなくパッケージディレクトリを丸ごと
         # チェックする. pass_filenames=false で常にこの単位で起動する.
-        entry: uv run --quiet ty check python/kryanneal
+        entry: uv run --quiet ty check python/kinema
         language: system
-        files: ^(python/kryanneal/.*\.pyi?|tools/.*\.py)$
+        files: ^(python/kinema/.*\.pyi?|tools/.*\.py)$
         pass_filenames: false
 
       # ---------------------------------------------------------------
@@ -67,6 +67,6 @@ repos:
         name: Regenerate per-module .pyi stubs
         entry: uv run --quiet python tools/gen_api_stubs.py
         language: system
-        files: ^(python/kryanneal/.*\.py|tools/gen_api_stubs\.py)$
+        files: ^(python/kinema/.*\.py|tools/gen_api_stubs\.py)$
         # スクリプトは MODULES を一括処理するので filename を渡さない.
         pass_filenames: false

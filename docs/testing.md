@@ -2,7 +2,7 @@
 
 > **このファイルは移管されました.**
 >
-> kryanneal のテスト・lint・build 手順は **project skill
+> kinema のテスト・lint・build 手順は **project skill
 > `.claude/skills/test-runner/SKILL.md`** に集約されています.
 > 詳細はそちらを参照してください.
 

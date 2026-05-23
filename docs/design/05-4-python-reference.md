@@ -1,6 +1,6 @@
 # §5.4 Python リファレンス実装
 
-`python/kryanneal/krylov.py` に `_python_lanczos_propagate` /
+`python/kinema/krylov.py` に `_python_lanczos_propagate` /
 `_python_cfm4_step` 等を **pure NumPy** で実装し、Rust 拡張がビルドできない
 環境でも silently fallback する設計とする。
 

@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kryanneal.krylov import (
+from kinema.krylov import (
     _CFM4_C1,
     _CFM4_C2,
     _python_cfm4_step,
@@ -28,7 +28,7 @@ from kryanneal.krylov import (
 )
 
 try:
-    from kryanneal import _rust as _rust_mod
+    from kinema import _rust as _rust_mod
 except ImportError:  # pragma: no cover
     _rust_mod = None  # type: ignore[assignment]
 
@@ -91,7 +91,7 @@ def _full_h1_h2_nodes(
     )
 
 
-@pytest.mark.skipif(not _HAS_RUST, reason="kryanneal._rust extension not built")
+@pytest.mark.skipif(not _HAS_RUST, reason="kinema._rust extension not built")
 @pytest.mark.parametrize("n", [2, 3, 4])
 @pytest.mark.parametrize("seed", [11, 137, 4093])
 @pytest.mark.parametrize("extrapolate", [False, True])

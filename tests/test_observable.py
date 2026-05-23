@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kryanneal import IsingProblem, Observable
+from kinema import IsingProblem, Observable
 
 
 def test_construct_ok() -> None:

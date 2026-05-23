@@ -58,14 +58,14 @@ from pathlib import Path
 
 import numpy as np
 
-from kryanneal import (
+from kinema import (
     IsingProblem,
     Observable,
     QuantumAnnealer,
     Schedule,
     set_blas_threads,
 )
-from kryanneal.initial_states import uniform_superposition
+from kinema.initial_states import uniform_superposition
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "benchmarks" / "results"
@@ -105,7 +105,7 @@ def _parse_method_list(text: str) -> list[str]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "kryanneal observables / save_tlist overhead benchmark (Phase 5, issue #47)"
+            "kinema observables / save_tlist overhead benchmark (Phase 5, issue #47)"
         )
     )
     parser.add_argument(
@@ -168,7 +168,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "if specified, call kryanneal.set_blas_threads(N) at startup. "
+            "if specified, call kinema.set_blas_threads(N) at startup. "
             "Use --blas-threads 1 for a machine-independent single-thread "
             "baseline. Default: None (leave BLAS thread counts untouched)."
         ),
@@ -248,7 +248,7 @@ def time_one_run(
 def _gather_machine_info(args: argparse.Namespace) -> dict[str, str]:
     """machine info 行 (markdown 出力用)."""
     try:
-        rust_mod = importlib.import_module("kryanneal._rust")
+        rust_mod = importlib.import_module("kinema._rust")
         has_blas = bool(getattr(rust_mod, "__has_blas__", False))
     except ImportError:
         has_blas = False
@@ -259,7 +259,7 @@ def _gather_machine_info(args: argparse.Namespace) -> dict[str, str]:
         "cpu_count": str(os.process_cpu_count() or 1),
         "python": sys.version.split()[0],
         "numpy": np.__version__,
-        "kryanneal_blas_feature": str(has_blas),
+        "kinema_blas_feature": str(has_blas),
         "blas_threads_arg": str(args.blas_threads),
     }
 
