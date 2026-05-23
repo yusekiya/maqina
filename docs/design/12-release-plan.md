@@ -487,18 +487,16 @@ spill 回避) + Gram-Schmidt 消滅** から来ている.
       既存 `perf_cfm4_richardson` の同名 mode と直接比較できる構造で
       Linux perf stat の hardware counter で per-step wall / K_used / IPC を
       breakdown.
-- [ ] **本番 perf bench** (Linux AMD EPYC 7713P): `bench_qutip_large.py
+- [x] **本番 perf bench** (Linux AMD EPYC 7713P): `bench_qutip_large.py
       --scenarios long-T --solvers cfm4_adaptive_richardson_krylov,
-      cfm4_adaptive_richardson_chebyshev` で Pareto plot を取得し PR に添付.
-- [ ] **判定 gate 適用**:
-  - Pareto win (全 atol で Lanczos 上回り) → minor bump で merge,
-    default 切替の follow-up issue 起票.
-  - Pareto draw → 差分原因分析 (Gershgorin loose で K_used 過大なら Power
-    iter で R refine), 改善後再評価.
-  - Pareto loss → 中止 + 原因 archive. Phase A 4.45× を踏まえると考えにくい
-    保険シナリオ.
-- [ ] **docs/design/INDEX.md / 05-3-propagator.md / CLAUDE.md** 更新.
-- [ ] **Version bump**: `0.9.0 → 0.10.0` (公開 API 拡張で minor bump).
+      cfm4_adaptive_richardson_chebyshev` で Pareto plot を取得し PR に添付
+      (n=8 1.19-1.25×, n=10 1.19-1.28×, n=12 1.09-1.17× wall 高速 / Lanczos 比).
+- [x] **判定 gate 適用**: **Pareto win** で確定 (全 atol で Lanczos 上回り).
+  follow-up #124 で default 切替を起票・実施.
+- [x] **docs/design/INDEX.md / 05-3-propagator.md / CLAUDE.md** 更新.
+- [x] **Version bump**: `0.9.0 → 0.10.0` 実施済 (`Cargo.toml` /
+      `pyproject.toml` / `Cargo.lock` / `uv.lock`). 後続 follow-up #124 で
+      `0.10.0 → 0.11.0` にさらに minor bump.
 
 ### Out of scope (Phase B+ follow-up へ)
 
@@ -516,6 +514,36 @@ spill 回避) + Gram-Schmidt 消滅** から来ている.
   half_1 の入口が同じ ψ なので原理的に同型の memoization が可能だが,
   per-stage K_used ~ 20 個の matvec のうち 1 個と削減比小. Phase B では
   scope 外, 必要なら follow-up.
+
+### Phase B follow-up: Chebyshev propagator hot path の Gershgorin precompute (commit `c3f20c7`)
+
+Phase B 完了直後の hot path 最適化 (pre-1.0 内部 API 破壊的変更を含む).
+`gershgorin_bounds(h_x, h_p_diag, a_t, b_t)` は per-call で `h_p_diag` (length
+2^N) の full walk + `h_x` 絶対値和を計算しており, Chebyshev propagator が 1 step
+あたり 6 回呼ぶため per-step `O(2^N + N)` を消費 (N=18 で wall 1% 弱). `h_x` /
+`h_p_diag` は `IsingProblem` 構築後 immutable なので `Σ|h_x|` / `min/max(h_p_diag)`
+を 1 度だけ precompute して使い回せば per-step は `gershgorin_bounds_cached` で
+**O(1) (5 fp 演算)** に縮む.
+
+- 影響範囲 (pre-1.0 内部 API): `chebyshev_propagate` / `cfm4_step_chebyshev*`
+  / 両 `_py` wrap のシグネチャに `h_x_abs_sum, h_p_min, h_p_max: f64` 3 引数を
+  末尾追加. PyO3 signature も更新.
+- `IsingProblem` (Python): `_h_x_abs_sum` / `_h_p_diag_min` / `_h_p_diag_max`
+  を `field(init=False, repr=False, compare=False)` で dataclass 宣言, frozen=True
+  維持のため `__post_init__` で `object.__setattr__` 経由でセット. 対応する
+  read-only property を公開.
+- Python driver (`evolve_schedule_adaptive_richardson_chebyshev`): driver 入口で
+  precompute を 1 度だけ実行し step ループ内 dispatcher に渡す.
+- legacy `gershgorin_bounds` (untransformed) は残し, 内部で cached 版を呼ぶ形に
+  整理 (hot path では使わない docstring 注記付き). `b_t` 符号で min/max を
+  swap する分岐は cached 版にも保持 (現状 schedule は `b_t ∈ [0, 1]` だが
+  robust 性のため).
+- 検証: `cargo test --release` (BLAS on) 92 passed / `uv run pytest -m "not
+  slow"` 341 passed. `tests/test_blas_consistency.py` の Chebyshev direct call
+  artifact dump 経路も同 rel < 1e-13 を維持.
+- 詳細: `docs/design/05-3-propagator.md` "スペクトル境界推定" 節 + `src/chebyshev.rs`
+  module docstring (両方とも O(N) 表記を O(1) precompute / O(2^N) 素朴経路に
+  訂正済).
 
 ### Phase B follow-up: Chebyshev 3 項漸化 inner loop の SIMD + fusion (#126)
 
@@ -641,6 +669,24 @@ cycle (CLAUDE.md `bench を伴う issue の運用` 節) は適用外。
 migration note: 新 default 経路は **adaptive PI controller** を走らせるので
 `n_steps` の代わりに `atol` で精度を制御する。旧挙動を維持したい場合は
 `method="m2"` / `"cfm4"` を明示する。
+
+### Phase B follow-up: パッケージリブランド `kryanneal → kinema` (commit `1106f77`)
+
+v1.0 前の最後の機会としてプロジェクト名を `kryanneal` (Kry(lov) +
+(an)neal(ing)) から `kinema` ((Kine)tic quantum evolution by (Ma)gnus
+expansion) に rename。pure rename / 数値挙動 / 公開シグネチャ (API レイアウト)
+変更なし。0.11.0 minor bump に同梱。
+
+- Python パッケージ: `python/kryanneal/` → `python/kinema/` (git mv で履歴保持)
+- Build config: `pyproject.toml` / `Cargo.toml` の `name`, `[tool.maturin]
+  module-name = "kinema._rust"`, `.cargo/config.toml` コメント
+- Rust 内部関数: `apply_h_kryanneal*` → `apply_h_kinema*` 全 path
+- env var: `KRYANNEAL_EXPECT_BLAS` → `KINEMA_EXPECT_BLAS`
+- 提案中の例外クラス名 (`docs/design/04-python-api.md` のみ):
+  `KryannealError` / `KrySchemaError` / `KryConvergenceError` →
+  `KinemaError` / `KineSchemaError` / `KineConvergenceError`
+- 検証: pytest 347 passed / cargo test (default + `--no-default-features`)
+  92 + 80 passed / pre-commit 全フック pass.
 
 ---
 

@@ -1,4 +1,4 @@
-# kinema: 設計書 (v0.8) — INDEX
+# kinema: 設計書 (v0.11) — INDEX
 
 横磁場イジングモデル (TFIM) の量子ダイナミクスを matrix-free に計算する
 Python パッケージ。Krylov 法 (Lanczos) で matvec を介した短時間プロパゲータ
@@ -40,8 +40,8 @@ step-doubling Richardson 推定子を PI 制御に流す方式 (詳細 [§5.3](0
 | §9 | [09-testing.md](09-testing.md) | テスト戦略。Rust `cargo test`, Python `pytest`, BLAS feature on/off 等価性ペア |
 | §10 | [10-benchmarks.md](10-benchmarks.md) | ベンチマーク戦略と期待される性能特性 |
 | §11 | [11-build-infrastructure.md](11-build-infrastructure.md) | 開発・ビルド基盤の入口 (詳細は `docs/conventions.md`) |
-| §12 | [12-release-plan.md](12-release-plan.md) | 段階リリース計画 Phase 1–8 (v0.1 → v0.8 完了までの DoD) |
-| §13 | [13-future-work.md](13-future-work.md) | Future work (v0.8 までは対応しない範囲) |
+| §12 | [12-release-plan.md](12-release-plan.md) | 段階リリース計画 Phase 1–8 + A/B (v0.1 → v0.11 完了までの DoD) |
+| §13 | [13-future-work.md](13-future-work.md) | Future work (v0.11 までは対応しない範囲) |
 | §14 | [14-references.md](14-references.md) | 参考文献 / 参照プロジェクト |
 
 注: 旧 §5 (数値カーネル) は §5.1–§5.4 の 4 ファイルに分割した。コード内

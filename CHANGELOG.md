@@ -11,45 +11,124 @@
   (`0.N.0` → `0.N+1.0`) で破壊的変更を吸収する (`docs/conventions.md`
   §2 参照).
 
-## 0.11.0 - 2026-05-22 — Default method を Chebyshev variant に切替 + atol 仕様明文化 (Phase B follow-up, issue #124)
+## 0.11.0 - 2026-05-23 — Chebyshev variant 統合完了 (Phase B finalize) + パッケージリブランド
 
-Phase B 本体 (#122) と #126 / #127 の perf 結果 (Linux AMD EPYC 7713P, N=18
-で Lanczos 比 5.49× wall 高速, branch-miss 158× 減, sys time 78× 減,
-parallel efficiency 27% → 44%) を受けて, 判断系 follow-up を確定. default
-method の semantic 変更を伴うため minor bump.
+Phase B 本体 (#122) で導入した `cfm4_adaptive_richardson_chebyshev` 経路を
+follow-up #126 / #127 / #124 で仕上げ, さらに公開前リブランド (#1106f77
+`kryanneal → kinema`) と Chebyshev hot path の Gershgorin precompute (#c3f20c7)
+を同 minor に取り込む. Phase B + follow-up 全体の perf 効果は Linux AMD EPYC
+7713P / N=18 で Lanczos 比 **5.49× wall 高速 / branch-miss 158× 減 / sys time
+78× 減 / parallel efficiency 27% → 44%** (#124 perf archive).
 
 ### Breaking
 
-- **`QuantumAnnealer.run(method=...)` の default**: `"m2"` →
+- **パッケージリブランド (rename, commit `1106f77`)**: `kryanneal` →
+  `kinema` ((Kine)tic quantum evolution by (Ma)gnus expansion) に rename.
+  pure rename / 数値挙動変更なし. 影響範囲は Python パッケージ名
+  (`python/kryanneal/` → `python/kinema/`), Rust crate / `[tool.maturin]
+  module-name`, Rust 内部関数名 (`apply_h_kryanneal*` → `apply_h_kinema*`),
+  env var (`KRYANNEAL_EXPECT_BLAS` → `KINEMA_EXPECT_BLAS`), docs 全般.
+  v1.0 前の最後の機会としてプロジェクト名を確定. 移行はインポートと env を
+  単純置換するだけで完了 (cargo test 92 passed / pytest 347 passed で確認).
+- **`QuantumAnnealer.run(method=...)` の default** (#124): `"m2"` →
   `"cfm4_adaptive_richardson_chebyshev"`. 旧 default を使っていたユーザーは
   `method="m2"` を明示するか, 新 default 経路に切替えて `n_steps` の代わりに
   `atol` で精度を制御する.
-- **`QuantumAnnealer.create_simulator(method=...)` の default**: `"cfm4"` →
-  `"cfm4_adaptive_richardson_chebyshev"`. ついでに `Literal` から欠落していた
-  `_chebyshev` を追加 (Phase B #122 取りこぼし fixup).
-- **`AnnealingSimulator(method=...)` の default**: `"cfm4"` →
+- **`QuantumAnnealer.create_simulator(method=...)` の default** (#124):
+  `"cfm4"` → `"cfm4_adaptive_richardson_chebyshev"`. ついでに `Literal` から
+  欠落していた `_chebyshev` を追加 (Phase B #122 取りこぼし fixup).
+- **`AnnealingSimulator(method=...)` の default** (#124): `"cfm4"` →
   `"cfm4_adaptive_richardson_chebyshev"`.
+- **Chebyshev `gershgorin_bounds*` の precompute 化 (commit `c3f20c7`)**:
+  Chebyshev propagator のスペクトル境界推定 (`gershgorin_bounds`) は
+  per-call で `h_p_diag` (length 2^N) の full walk を行っており, 1 step
+  あたり 6 回呼ばれるため per-step `O(2^N + N)` を消費 (N=18 で wall 1% 弱).
+  `h_x` / `h_p_diag` が `IsingProblem` 構築後 immutable な性質を利用し
+  `Σ|h_x|`, `min/max(h_p_diag)` を 1 度だけ precompute → `gershgorin_bounds_cached`
+  で per-step を **O(1) (5 fp 演算)** に縮めた. pre-1.0 内部 API の破壊的変更:
+  - `chebyshev_propagate` のシグネチャに `h_x_abs_sum, h_p_min, h_p_max: f64`
+    の 3 引数を末尾追加 (PyO3 binding も同様).
+  - `cfm4_step_chebyshev` / `cfm4_step_chebyshev_with_richardson_estimate`
+    および両 `_py` wrap も同 3 引数を pass-through.
+  - `IsingProblem` に `h_x_abs_sum` / `h_p_diag_min` / `h_p_diag_max` の
+    read-only property を追加 (`frozen=True` 維持のため `__post_init__` で
+    `object.__setattr__` 経由でセット).
+  - Python driver `evolve_schedule_adaptive_richardson_chebyshev` 入口で
+    precompute を 1 度実行し step ループ内 dispatcher に渡す形に変更.
+  - legacy `gershgorin_bounds` は残存 (内部で cached 版を呼ぶ; docstring に
+    hot path で使わない旨を注記).
 
 `_krylov` literal は永続的に残す (旧 default 互換 + 比較ベンチ用途).
 
+### Added
+
+- **Chebyshev 3 項漸化 inner loop の SIMD + fusion (#126, Phase B follow-up)**:
+  `src/chebyshev.rs::simd_kernels::chebyshev_recurrence_fused` (`wide::f64x4`) +
+  `_scalar` fallback + dispatch wrapper. `chebyshev_propagate` の `k_ord ≥ 2`
+  hot loop の 3 dim-walk (matvec / recurrence scaling / accumulate) を **1
+  dim-walk + SIMD** に fuse. f64x4 helpers (`as_f64_slice`,
+  `load/store_f64x4_unaligned`, `swap_reim`) は localize duplication として
+  chebyshev module 内に再実装 (matvec の `simd_kernels` を visibility 跨ぎで
+  触らないため). `cfm4_step_chebyshev_*` 経由でも自動で乗る.
+- **Chebyshev non-matvec inner loop の rayon 並列化 (#127, Phase B follow-up)**:
+  `src/chebyshev.rs::chebyshev_recurrence_fused_rayon`. `scratch` / `psi_acc`
+  の 2 RW slice を `par_chunks_mut` 2 本独立に取り `zip().enumerate()` で base
+  offset から `phi_curr` / `phi_prev` (R) を共有 sub-slice 切り出し → chunk 内で
+  SIMD/scalar fused kernel を呼ぶ 2 段構造. dispatch 閾値
+  `MIN_RAYON_DIM_CHEB = 1 << 17` (`matvec.rs::MIN_RAYON_DIM` と揃え). chunk_size
+  は `(dim/(nth·4)).clamp(min,max)` を 2 倍数に丸めて SIMD kernel の偶数長前提を
+  満たす. parallel efficiency (Phase B 完了時の 44%) のさらなる改善を狙う.
+- **`docs/chebyshev-explained.md` (commit `d6d3e23`)**: 時間独立 H に対する
+  `exp(-i H dt) ψ` を Chebyshev 多項式 3 項漸化で計算する手順 (Jacobi-Anger,
+  スペクトル正規化, 切り捨て次数, Bessel 係数, 3 ベクトル rotation, SIMD/rayon,
+  CFM4:2 Magnus 統合, Lanczos との対比) を 10 章構成で段階的に解説する読み物.
+  一次資料の `src/chebyshev.rs` / `docs/design/05-3-propagator.md` を補完.
+- **`IsingProblem.{h_x_abs_sum, h_p_diag_min, h_p_diag_max}` property** (#c3f20c7):
+  Chebyshev Gershgorin precompute 用の read-only property を公開.
+
 ### Changed
 
-- **`QuantumAnnealer.run` / `AnnealingSimulator.__init__` の `atol` docstring**:
-  "Note (Chebyshev variant の atol 振舞い, issue #124)" 注を追加. Chebyshev では
+- **`QuantumAnnealer.run` / `AnnealingSimulator.__init__` の `atol` docstring**
+  (#124): "Note (Chebyshev variant の atol 振舞い)" 注を追加. Chebyshev では
   `atol` を upper bound として扱い, K_used 動的拡張により実際の精度がそれより
   良くなる場合があることを明文化 ("feature" 仕様, Scope 2 (a) + (d) 確定).
-- **`docs/design/05-3-propagator.md` "Chebyshev variant" 節**: "`chebyshev_tol`
-  と `atol` の関係 — accidental 高精度 (issue #124)" 小節を追加.
-- **`docs/quickstart.md` の主例**: `method=` 指定を削除して default を使う形に
-  統一. Chebyshev variant の atol upper bound 注を追記.
-- **`bench_qutip_large.py --adaptive-tols` / `--krylov-tols` ヘルプ**: 両 adaptive
-  経路 (`_krylov` / `_chebyshev`) に対応する文言に更新. default solver list
-  (`_VALID_SOLVERS` 全列挙) は変更なし (Pareto 比較目的なので両者走らせる).
+- **`docs/design/05-3-propagator.md`** (#124, #20d14d0):
+  "`chebyshev_tol` と `atol` の関係 — accidental 高精度" 小節を追加.
+  "Chebyshev variant の dt 選択戦略 — Lanczos との対比" subsection を追加
+  (PI controller スケルトンは両経路で共通だが, err 分解先と per-step 内部
+  コストの dt 依存性が異なる点を表形式で対比).
+- **`docs/quickstart.md` の主例** (#124): `method=` 指定を削除して default を
+  使う形に統一. Chebyshev variant の atol upper bound 注を追記.
+- **`bench_qutip_large.py --adaptive-tols` / `--krylov-tols` ヘルプ** (#124):
+  両 adaptive 経路 (`_krylov` / `_chebyshev`) に対応する文言に更新. default
+  solver list (`_VALID_SOLVERS` 全列挙) は変更なし (Pareto 比較目的なので
+  両者走らせる).
+- **`README.md`**: Chebyshev 法の説明を追加 (#cbfda0e). プロジェクト description
+  を修正 (#6401f38).
+- **`CLAUDE.md` テスト実行経路節 (#f494f5b)**: 「テスト・lint・maturin develop
+  の実行は原則 test-runner subagent に委譲する」運用ルールを
+  `.claude/solve-overrides.md` から CLAUDE.md 本体に格上げ (default 経路化).
+  並列実行の方針 (`cargo test` BLAS on/off は target/ lock 競合でシリアル,
+  `cargo test` BLAS on と `pytest` は独立で並列可, `maturin develop` と
+  `pytest` は serialize 必須) を明記.
 - **`docs/design/12-release-plan.md` / `docs/design/INDEX.md` / `CLAUDE.md`**:
-  Phase B follow-up (#124) 節を追加.
+  Phase B 完了 + follow-up (#124 / #126 / #127) 節を追加 / 「予定」文言を
+  「実装済」に整理.
 
-公開 API シグネチャ自体は不変 (default 値のみ変更). 既存 test は全て
-`method=` を明示しているので default 切替で壊れない.
+### Performance
+
+- **`chebyshev_propagate` Gershgorin precompute (#c3f20c7)**: per-step
+  `O(2^N + N)` → `O(1) (5 fp 演算)`. N=18 で wall ~1% 削減 (Lanczos 比 5.49×
+  speedup の baseline 上に乗る微小最適化).
+- **Chebyshev recurrence の SIMD + fusion (#126)** と **rayon 並列化 (#127)**:
+  per-step wall 改善 / parallel efficiency 向上の 2 軸. 詳細 perf 値は
+  `docs/design/12-release-plan.md` Phase B follow-up 節と該当 PR コメントの
+  perf binary 計測 (`perf_chebyshev` / `perf_cfm4_richardson_chebyshev`) を参照.
+
+公開 API シグネチャ変更は (1) パッケージ rename (kryanneal → kinema), (2)
+default `method` の semantic 変更, (3) Chebyshev internal API への precompute
+引数 3 個追加の 3 軸. 既存 test は `method=` を明示 + パッケージ rename は
+全箇所一括置換済のため default 切替で壊れるテストなし.
 
 ## 0.10.0 - 2026-05-22 — Phase B (Chebyshev propagator を CFM4 adaptive Richardson 経路に統合, issue #122)
 

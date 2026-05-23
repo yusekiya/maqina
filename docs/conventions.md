@@ -44,7 +44,7 @@
 | Phase 8 完了 (Lanczos a posteriori 早期打切, #98) | `0.8.0` |
 | issue #116 (BLAS thread default 方針改訂, `set_blas_threads_auto()` 追加) | `0.9.0` |
 | Phase B (#122 Chebyshev propagator を CFM4 adaptive Richardson 経路に統合) | `0.10.0` |
-| Phase B follow-up (#124 Default method を Chebyshev variant に切替 + atol 仕様明文化) | `0.11.0` |
+| Phase B finalize (#124 default 切替 + #126/#127 inner loop SIMD/rayon + パッケージ rename `kryanneal → kinema` + Chebyshev Gershgorin precompute) | `0.11.0` |
 | Phase 9+ | `docs/design/13-future-work.md` §13 Future work を再評価して `0.12.0+` のロードマップを引く |
 
 注: Phase 6 / 7 / 8 はそれぞれ完了時に `0.N.0` への bump を予定していたが,
