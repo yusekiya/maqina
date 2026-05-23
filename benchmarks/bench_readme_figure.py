@@ -432,9 +432,10 @@ def main() -> None:
     parser.add_argument(
         "--cfm4-dts",
         type=_parse_floats,
-        default=[5.0, 2.0, 0.5, 0.2, 0.05],
+        default=[5.0, 2.0, 0.5, 0.2],
         help="cfm4 (固定 dt) dt sweep (method=cfm4 のとき). T/dt = n_steps. "
-        "default は粗 → 細順で T=1e4 想定 (n_steps = 2000-200000)",
+        "default は粗 → 細順で T=1e4 想定 (n_steps = 2000-50000). "
+        "dt=0.05 は dt=0.5 時点で infidelity=0 飽和を実測したため除外 (時間予算優先).",
     )
     parser.add_argument(
         "--qutip-tols",
