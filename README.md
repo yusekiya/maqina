@@ -3,6 +3,7 @@
 **(Kine)tic quantum evolution by (Ma)gnus expansion**: 横磁場イジングモデル (TFIM) の量子ダイナミクスを matrix-free に計算するシミュレータ。
 
 - **Krylov 法 (Lanczos)** で短時間プロパゲータを近似
+- **Chebyshev 多項式展開** で短時間プロパゲータを近似 (current default; Lanczos 比で per-step wall ~5× 高速)
 - **CFM4:2 (commutator-free Magnus, 4 次)** で時間依存 Hamiltonian の時間発展を近似
 - **adaptive dt ドライバ** (step-doubling Richardson + PI 制御)
 
