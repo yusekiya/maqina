@@ -173,22 +173,171 @@ $$
 これが Lanczos の $m_\mathrm{eff}$ に相当する **per-step matvec 回数** を
 決める. 上限 `k_max_cap = 5000` で病的ケース (大 $\|H\| dt$) も clamp.
 
-### Bessel 係数 $J_0, J_1, \ldots, J_{K+1}$ の計算
+### Bessel 係数 $J_0, J_1, \ldots, J_{K+1}$ の計算 — Miller's downward recurrence
 
-Miller's **downward recurrence** で `bessel_j_array(z, K+1)` が
-一括計算する. forward $J_{k+1} = (2k/z) J_k - J_{k-1}$ は大 $k$ で
-数値不安定 ($J_k$ が指数的に減衰するのに誤差が増殖) なため,
-**任意の出発値**から下降させて self-stabilizing な性質を使う:
+Step 5 の漸化に入る前に, **「$J_k(z)$ という数値スカラーをそもそもどう計算するか」**
+という問題が残ります。kinema は **Miller の下降漸化** という古典的手法で
+$J_0(z), J_1(z), \ldots, J_{K+1}(z)$ を **一括かつ機械精度** (相対誤差
+$< 10^{-13}$) で求めます。Bessel 関数論を呼ばずに, **(a) 漸化式 (b) 急減衰
+(c) 総和恒等式** の 3 道具だけで仕組みを説明できます。
 
-1. $N_\mathrm{start} \gg K$ から $b_{N_\mathrm{start}+1} = 0$,
-   $b_{N_\mathrm{start}} = 1$ で出発
-2. 下降漸化 $b_{k-1} = (2k/z) b_k - b_{k+1}$ で $k = N_\mathrm{start}, \ldots, 1$
-3. 総和規約 $J_0(z) + 2 \sum_{j \ge 1} J_{2j}(z) = 1$ で正規化倍率を決定
-4. 全 $b_k$ を倍率で正規化
+#### 道具 1 — Bessel 自身の 3 項漸化
 
-実装は `src/chebyshev.rs::bessel_j_array`. 出発点 $N_\mathrm{start} =
-\max(K + 30, 2|z| + 50)$ で `scipy.special.jv` と rel < $10^{-13}$ 一致を
-test (`bessel_jv_matches_scipy_reference`) で実証.
+Bessel 関数も 3 項漸化を満たします:
+$$
+J_{n+1}(z) = \frac{2n}{z} J_n(z) - J_{n-1}(z).
+$$
+(これは Bessel の母関数 $\exp[\tfrac{z}{2}(t - 1/t)]$ を $t$ で微分して
+係数比較するだけで導ける。`T_k(\tilde H)\psi` の漸化と式の形は同じだが,
+こちらは **異なる関数列 $\{J_n\}_n$ 同士** の関係である点に注意。)
+
+#### 道具 2 — $J_n(z)$ は大 $n$ で超指数的に減衰
+
+§4 で「打ち切り次数 $K$ を $|J_{K+1}(z)| < \mathrm{tol}/2$ で決める」と
+言いました。ここで使った $|J_n(z)| \to 0$ ($n \to \infty$) の性質, しかも
+$n > z$ で
+$$
+|J_n(z)| \;\lesssim\; \frac{1}{\sqrt{2\pi n}} \!\left(\frac{e z}{2 n}\right)^{n}
+$$
+で **超指数的に減衰** することを再利用します。例: $z = 1, n = 30$ で
+$|J_n| \sim 10^{-40}$。
+
+#### 道具 3 — 漸化式の解空間は 2 次元
+
+Step 1 の漸化式は $n$ について **2 階線形差分方程式**。連続 2 値 $(a_0, a_1)$
+を指定すれば全 $n$ で一意に決まり, 解の集合は **2 次元ベクトル空間**。基底の
+1 つは $\{J_n(z)\}$ 自身, もう 1 つは **何か別の独立解** (具体形は不要)。
+任意の解は
+$$
+a_n = \alpha J_n(z) + \beta Z_n(z), \qquad (\alpha, \beta) \in \mathbb{C}^2.
+$$
+ここで $Z_n$ は「$J_n$ と独立な解」というだけで, 中身は知らなくてよい。
+
+#### 観察 1: forward 漸化は不安定
+
+$J_0(z), J_1(z)$ を Taylor 級数等で別計算し $n = 0 \to K$ に **forward** で
+回す素朴な方法は **必ず破綻** します。理由:
+
+道具 3 の "$Z_n$" は **道具 2 の "$J_n$ 急減衰" の裏返しで必ず急発散** します。
+理由は線形代数: もし $Z_n$ も減衰したら, 2 連続値の Casoratian
+$a_n b_{n+1} - a_{n+1} b_n$ が 0 に潰れ独立性が崩れる。よって **$Z_n$ は
+$J_n$ と逆向きに超指数的に発散** していないと, $\{J_n, Z_n\}$ が基底足り得ない。
+
+forward 漸化を回すと:
+- $J_n$ は減衰
+- 計算機の丸め誤差 $\sim 10^{-16}$ は必ず $Z_n$ 成分 (= $\epsilon Z_n$) を持ち込む
+- $Z_n$ は **発散** → 誤差項が指数的に成長
+- $n \sim 15$ あたりで丸め誤差が真値を圧倒し $J_{30} \sim 10^{-40}$ は出ない
+
+#### 観察 2: backward 漸化は self-stabilizing
+
+漸化式を **backward** ($n = N \to 0$) に回すと, **増殖方向が逆転** します。
+線形性から, 任意の出発値 $(b_{N+1}, b_N)$ を解空間で展開:
+$$
+b_n = \alpha J_n(z) + \beta Z_n(z).
+$$
+$\alpha, \beta$ は出発値で決まり, **下降中ずっと固定**。値が変わるのは
+$J_n, Z_n$ 自身:
+
+- **下降中 $J_n$ は (大 $n$ で小, 小 $n$ で moderate に) 増える**
+- **下降中 $Z_n$ は (大 $n$ で大, 小 $n$ で moderate に) 減る**
+
+両者の比 $|Z_n / J_n|$ は道具 2 の漸近から 1 ステップで $\sim (z/(2n))^2$
+オーダで縮みます。**$n \gg z$ の領域で 1 ステップで数桁の精度向上**。
+
+#### 直感的な数値例 ($z = 1$)
+
+出発 $N_\mathrm{start} = 30$, $(b_{31}, b_{30}) = (0, 1)$ で下降漸化を回す
+場合, 出発値を $\alpha J_n + \beta Z_n$ 展開すると Casoratian 不変量から
+$$
+\alpha \sim 10^{38}, \qquad \beta \sim 10^{-42}.
+$$
+つまり **"適当な出発" 値は実は $J$ 方向に既に scale $10^{38}$ で振っており**,
+$Z$ 成分は超指数的に小さい (= 道具 2 の $J_{30} \sim 10^{-40}$ の逆数オーダ)。
+
+下降中 $\alpha, \beta$ は固定。target $n = 0$ で
+$$
+\left|\frac{\beta Z_0}{\alpha J_0}\right| \;\sim\; \frac{10^{-42}}{10^{38}} \cdot \mathcal{O}(1)
+\;\sim\; 10^{-80}.
+$$
+**$Z$ 汚染は真値より 80 桁小さく**, 機械精度 ($10^{-16}$) を遥かに下回る。
+よって $b_0 \approx \alpha J_0(z)$ が機械精度で成立。同じく $b_1 \approx \alpha
+J_1$, $b_2 \approx \alpha J_2$, ... と全 $n$ で **scale $\alpha$ 倍された $J_n$**
+が得られる。
+
+#### 残った問題: scale 定数 $\alpha$ を決める
+
+$b_n \approx \alpha J_n(z)$ までは分かったが, $\alpha$ は出発値次第で値が
+変わるので未知。これを決めるのに **Jacobi-Anger の特殊値** を使います。
+
+Step 3 で導いた展開
+$$
+e^{iz\cos\theta} = J_0(z) + 2 \sum_{m=1}^{\infty} i^m J_m(z) \cos(m\theta)
+$$
+に $\theta = \pi/2$ を代入。LHS は $e^{0} = 1$, RHS の $\cos(m\pi/2)$ は
+$m$ 偶数で $\pm 1$, 奇数で $0$ なので, $m = 2j$ の和だけ残り
+$i^{2j}\cos(j\pi) = (-1)^j \cdot (-1)^j = 1$ で整理:
+$$
+\boxed{\;J_0(z) + 2 \sum_{j=1}^{\infty} J_{2j}(z) = 1\;}
+$$
+**$z$ によらず常に成立する恒等式**。
+
+#### 正規化手順
+
+1. 下降漸化で $b_n \approx \alpha J_n$ ($n = 0, 1, \ldots, K+1$) を得る
+2. 同じ scale で総和 $b_0 + 2(b_2 + b_4 + \cdots)$ を計算 → 値は $\alpha \cdot 1 = \alpha$
+3. 全 $b_n$ を $\alpha$ で割れば真の $J_n(z)$
+
+総和恒等式が **"$\alpha$ の温度計"** として働き scale を確定。
+
+#### 何を仮定したか
+
+この導入で使った前提は 3 つだけ:
+
+1. Bessel 漸化式 (母関数 $\partial_t$ から導出可能)
+2. $J_n(z)$ の急減衰 (§4 と同じ事実)
+3. Jacobi-Anger 総和規約 (§3 の Jacobi-Anger に $\theta = \pi/2$ 代入)
+
+**Bessel 微分方程式 / Frobenius 法 / 第 2 種 Bessel 関数 $Y_n$** などは
+一切使っていません。"独立な解 $Z_n$" の具体形は知らなくてよく, **「2 次元
+解空間の中で $J$ と独立な解は $J$ と逆向きに発散しないと整合しない」** という
+線形代数の事実だけで足りています。
+
+#### 実装 (`src/chebyshev.rs::bessel_j_array`)
+
+```rust
+// 出発点 (target k_max より深く取って汚染消去マージン確保)
+let n_start = (k_max + 30).max(2 * abs_z_u + 50);
+
+// 任意の出発値で下降漸化開始
+b[n_start + 1] = 0.0;
+b[n_start] = 1.0;
+
+// 下降: b[k-1] = (2k/z) · b[k] - b[k+1]
+for k in (1..=n_start).rev() {
+    b[k - 1] = (2.0 * k as f64 / z) * b[k] - b[k + 1];
+    // overflow guard: |b| > 1e100 で全配列を 1e-100 倍にスケール
+    if b[k - 1].abs() > 1e100 {
+        for v in b.iter_mut() { *v *= 1e-100; }
+    }
+}
+
+// 総和規約で正規化
+let mut sum_norm = b[0];
+for j in 1.. {
+    let idx = 2 * j;
+    if idx > n_start { break; }
+    sum_norm += 2.0 * b[idx];
+}
+let inv = 1.0 / sum_norm;
+for k in 0..=k_max { out[k] = b[k] * inv; }
+```
+
+定数 `+30` は観察 2 の "汚染抑制 1 ステップあたり数桁" を 30 ステップ重ねて
+**double 16 桁を遥かに超えるマージン** を確保するため。`+50` は $K < |z|$ の
+小 $z$ case の保険。scipy.special.jv との rel < $10^{-13}$ 一致を Rust unit
+test (`bessel_jv_matches_scipy_reference`) で 8 cells (low/medium/high の
+$(z, k)$ 組) について検証済。
 
 ---
 
