@@ -43,11 +43,16 @@
 //!
 //! # スペクトル境界推定
 //!
-//! `E_c` と `R` は Gershgorin の行和上界から **closed form O(N) で算出**
-//! ([`gershgorin_bounds`]). matvec 不要なので per-step オーバヘッドは無視可.
-//! 上界が loose だと `z = R·dt` が大きくなり K も大きくなるため, Phase B で
-//! 必要に応じて Power iteration で R を tighten する option を持たせる
-//! (本 POC では Gershgorin one-shot に限定).
+//! `E_c` と `R` は Gershgorin の行和上界から算出する. 上位 driver から
+//! `h_x_abs_sum = Σ_i |h_x_i|` と `h_p_min / h_p_max = min/max(h_p_diag)` の
+//! precompute 値を受け取り [`gershgorin_bounds_cached`] で **O(1) (数値演算
+//! 5 回)** で per-step 計算する. これらの値は `IsingProblem` 構築時に 1 度だけ
+//! 計算して使い回す (h_x / h_p_diag は immutable). 素朴な
+//! [`gershgorin_bounds`] (h_p_diag を毎回 full walk) は `O(2^N + N)` で N=18
+//! で wall time の 1% 弱を占めてしまうため, hot path では使わない. 上界が
+//! loose だと `z = R·dt` が大きくなり K も大きくなるため, 必要に応じて Power
+//! iteration で R を tighten する余地はある (本 POC では Gershgorin one-shot
+//! に限定).
 //!
 //! # 切り捨て次数
 //!
@@ -440,25 +445,55 @@ fn chebyshev_recurrence_fused(
 ///
 /// `h_p_diag` が空 (dim = 0; n = 0 は呼ばれない前提だが防御的に) のときは
 /// `(0.0, 0.0)` を返す.
+///
+/// 本関数は `h_x` / `h_p_diag` の full walk を毎回行うため per-step では
+/// 非効率. 上位 driver から呼ぶ場合は呼出側で
+/// `h_x_abs_sum = Σ |h_x_i|`, `h_p_min = min(h_p_diag)`, `h_p_max = max(h_p_diag)`
+/// を 1 度だけ precompute して [`gershgorin_bounds_cached`] を使う.
 pub fn gershgorin_bounds(h_x: &[f64], h_p_diag: &[f64], a_t: f64, b_t: f64) -> (f64, f64) {
-    let off_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
-    let off = a_t.abs() * off_sum;
+    let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
 
-    let mut diag_min = f64::INFINITY;
-    let mut diag_max = f64::NEG_INFINITY;
-    for &d in h_p_diag.iter() {
-        let v = b_t * d;
-        if v < diag_min {
-            diag_min = v;
-        }
-        if v > diag_max {
-            diag_max = v;
-        }
-    }
-    if !diag_min.is_finite() {
-        // h_p_diag 空 (dim=0 など): 対角寄与なし.
+    if h_p_diag.is_empty() {
+        let off = a_t.abs() * h_x_abs_sum;
         return (-off, off);
     }
+
+    let mut h_p_min = f64::INFINITY;
+    let mut h_p_max = f64::NEG_INFINITY;
+    for &d in h_p_diag.iter() {
+        if d < h_p_min {
+            h_p_min = d;
+        }
+        if d > h_p_max {
+            h_p_max = d;
+        }
+    }
+    gershgorin_bounds_cached(h_x_abs_sum, h_p_min, h_p_max, a_t, b_t)
+}
+
+/// [`gershgorin_bounds`] の precompute 版.
+///
+/// `h_x` / `h_p_diag` は `IsingProblem` 構築後 immutable なので
+/// `h_x_abs_sum = Σ_i |h_x_i|` と `h_p_min / h_p_max = min/max(h_p_diag)` を
+/// 1 度だけ計算して上位 driver から渡せば, per-step の Gershgorin 計算は
+/// O(2^N + N) → O(1) に縮む.
+///
+/// `b_t` の符号で min / max が swap することに注意 (現状の `kinema` schedule は
+/// `b_t ∈ [0, 1]` だが, ロバスト性のため分岐を持つ).
+#[inline]
+pub fn gershgorin_bounds_cached(
+    h_x_abs_sum: f64,
+    h_p_min: f64,
+    h_p_max: f64,
+    a_t: f64,
+    b_t: f64,
+) -> (f64, f64) {
+    let off = a_t.abs() * h_x_abs_sum;
+    let (diag_min, diag_max) = if b_t >= 0.0 {
+        (b_t * h_p_min, b_t * h_p_max)
+    } else {
+        (b_t * h_p_max, b_t * h_p_min)
+    };
     (diag_min - off, diag_max + off)
 }
 
@@ -588,6 +623,10 @@ pub fn determine_truncation(z: f64, tol: f64, k_max_cap: usize) -> usize {
 /// * `dt`: 時刻刻み幅 (real).
 /// * `tol`: Chebyshev 切り捨て次数 K の決定閾値 (`|J_K(z)| < tol/2`).
 /// * `n`: サイト数. `dim = 2^n` を呼出側と一意に決める.
+/// * `h_x_abs_sum`: `Σ_i |h_x_i|` の precompute 値. `IsingProblem` 構築時に
+///   1 度だけ計算して上位 driver から渡す (Gershgorin per-step O(N) を O(1) に).
+/// * `h_p_min`, `h_p_max`: `min(h_p_diag)`, `max(h_p_diag)` の precompute 値.
+///   同様に Gershgorin per-step O(2^N) を O(1) に縮める.
 ///
 /// # 戻り値
 ///
@@ -633,14 +672,18 @@ pub fn chebyshev_propagate(
     dt: f64,
     tol: f64,
     n: usize,
+    h_x_abs_sum: f64,
+    h_p_min: f64,
+    h_p_max: f64,
 ) -> (Vec<Complex64>, usize, f64) {
     let dim = 1usize << n;
     assert_eq!(psi.len(), dim, "psi must have length 2^n");
     assert_eq!(h_x.len(), n, "h_x must have length n");
     assert_eq!(h_p_diag.len(), dim, "h_p_diag must have length 2^n");
 
-    // 1. Gershgorin bounds.
-    let (e_min, e_max) = gershgorin_bounds(h_x, h_p_diag, a_t, b_t);
+    // 1. Gershgorin bounds (precompute された h_x_abs_sum / h_p_min / h_p_max を
+    //    使って per-step O(1) で計算).
+    let (e_min, e_max) = gershgorin_bounds_cached(h_x_abs_sum, h_p_min, h_p_max, a_t, b_t);
     let e_c = 0.5 * (e_max + e_min);
     let r = 0.5 * (e_max - e_min);
 
@@ -780,6 +823,14 @@ mod tests {
     fn random_complex_vec(n: usize, seed: u64) -> Vec<Complex64> {
         let mut rng = Xor64::new(seed);
         (0..n).map(|_| rng.complex_signed()).collect()
+    }
+
+    /// テスト用ヘルパ: `(h_x_abs_sum, h_p_min, h_p_max)` の precompute 値を返す.
+    fn precompute_gershgorin_inputs(h_x: &[f64], h_p_diag: &[f64]) -> (f64, f64, f64) {
+        let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
+        let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
+        let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        (h_x_abs_sum, h_p_min, h_p_max)
     }
 
     fn relative_error(actual: &[Complex64], expected: &[Complex64]) -> f64 {
@@ -927,8 +978,20 @@ mod tests {
         let h_dense = build_dense_h_real(n, &h_x, &h_p_diag, a_t, b_t);
         let expected = reference_propagate_real_h(&h_dense, &psi, dt);
 
-        let (actual, k_used, err_estimate) =
-            chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, tol, n);
+        let (h_x_abs_sum, h_p_min, h_p_max) = precompute_gershgorin_inputs(&h_x, &h_p_diag);
+        let (actual, k_used, err_estimate) = chebyshev_propagate(
+            &h_x,
+            &h_p_diag,
+            a_t,
+            b_t,
+            &psi,
+            dt,
+            tol,
+            n,
+            h_x_abs_sum,
+            h_p_min,
+            h_p_max,
+        );
         assert!(k_used >= 1, "K_used = {k_used} should be >= 1");
         let rel = relative_error(&actual, &expected);
         assert!(
@@ -954,7 +1017,20 @@ mod tests {
         let h_dense = build_dense_h_real(n, &h_x, &h_p_diag, a_t, b_t);
         let expected = reference_propagate_real_h(&h_dense, &psi, dt);
 
-        let (actual, k_used, _) = chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, tol, n);
+        let (h_x_abs_sum, h_p_min, h_p_max) = precompute_gershgorin_inputs(&h_x, &h_p_diag);
+        let (actual, k_used, _) = chebyshev_propagate(
+            &h_x,
+            &h_p_diag,
+            a_t,
+            b_t,
+            &psi,
+            dt,
+            tol,
+            n,
+            h_x_abs_sum,
+            h_p_min,
+            h_p_max,
+        );
         let rel = relative_error(&actual, &expected);
         assert!(
             rel < 1e-12,
@@ -976,7 +1052,20 @@ mod tests {
         let a_t = 0.5_f64;
         let b_t = 0.5_f64;
 
-        let (result, _, _) = chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, 1e-13, n);
+        let (h_x_abs_sum, h_p_min, h_p_max) = precompute_gershgorin_inputs(&h_x, &h_p_diag);
+        let (result, _, _) = chebyshev_propagate(
+            &h_x,
+            &h_p_diag,
+            a_t,
+            b_t,
+            &psi,
+            dt,
+            1e-13,
+            n,
+            h_x_abs_sum,
+            h_p_min,
+            h_p_max,
+        );
         let new_norm: f64 = result.iter().map(|p| p.norm_sqr()).sum::<f64>().sqrt();
         let rel = (new_norm - psi_norm).abs() / psi_norm.max(1.0);
         assert!(
@@ -996,8 +1085,20 @@ mod tests {
         let psi = random_complex_vec(dim, 314);
         let dt = 0.5_f64;
 
-        let (result, k_used, err) =
-            chebyshev_propagate(&h_x, &h_p_diag, 1.0, 1.0, &psi, dt, 1e-13, n);
+        let (h_x_abs_sum, h_p_min, h_p_max) = precompute_gershgorin_inputs(&h_x, &h_p_diag);
+        let (result, k_used, err) = chebyshev_propagate(
+            &h_x,
+            &h_p_diag,
+            1.0,
+            1.0,
+            &psi,
+            dt,
+            1e-13,
+            n,
+            h_x_abs_sum,
+            h_p_min,
+            h_p_max,
+        );
         assert_eq!(k_used, 0, "zero Hamiltonian fast-path expected K_used = 0");
         assert_eq!(err, 0.0, "zero Hamiltonian fast-path expected err = 0");
         // E_c = 0 のはずなのでそのまま一致.
@@ -1017,7 +1118,20 @@ mod tests {
         let dt = 0.5_f64;
         let b_t = 1.0_f64;
 
-        let (result, _, _) = chebyshev_propagate(&h_x, &h_p_diag, 0.0, b_t, &psi, dt, 1e-13, n);
+        let (h_x_abs_sum, h_p_min, h_p_max) = precompute_gershgorin_inputs(&h_x, &h_p_diag);
+        let (result, _, _) = chebyshev_propagate(
+            &h_x,
+            &h_p_diag,
+            0.0,
+            b_t,
+            &psi,
+            dt,
+            1e-13,
+            n,
+            h_x_abs_sum,
+            h_p_min,
+            h_p_max,
+        );
 
         let mut expected = vec![Complex64::new(0.0, 0.0); dim];
         for k in 0..dim {
@@ -1234,7 +1348,20 @@ mod tests {
         let b_t = 0.4_f64;
         let tol = 1e-10;
 
-        let (result, k_used, _) = chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, tol, n);
+        let (h_x_abs_sum, h_p_min, h_p_max) = precompute_gershgorin_inputs(&h_x, &h_p_diag);
+        let (result, k_used, _) = chebyshev_propagate(
+            &h_x,
+            &h_p_diag,
+            a_t,
+            b_t,
+            &psi,
+            dt,
+            tol,
+            n,
+            h_x_abs_sum,
+            h_p_min,
+            h_p_max,
+        );
         assert!(k_used >= 1, "K_used = {k_used} should be >= 1");
         // unitarity: ‖ψ_new‖ ≈ ‖ψ‖.
         let psi_norm: f64 = psi.iter().map(|p| p.norm_sqr()).sum::<f64>().sqrt();

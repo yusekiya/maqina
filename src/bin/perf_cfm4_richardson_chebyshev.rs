@@ -157,6 +157,11 @@ fn main() {
     let a_t = 0.5_f64;
     let b_t = 0.5_f64;
 
+    // Gershgorin 上下界の precompute. h_x / h_p_diag は loop 不変なので 1 度だけ.
+    let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
+    let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
+    let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
     let sink: f64;
     let elapsed_secs: f64;
     let extra_summary: Option<String>;
@@ -185,6 +190,9 @@ fn main() {
                     chebyshev_tol,
                     n,
                     true,
+                    h_x_abs_sum,
+                    h_p_min,
+                    h_p_max,
                 )
                 .expect("Chebyshev Richardson step (warmup) failed");
             }
@@ -212,6 +220,9 @@ fn main() {
                     chebyshev_tol,
                     n,
                     true,
+                    h_x_abs_sum,
+                    h_p_min,
+                    h_p_max,
                 )
                 .expect("Chebyshev Richardson step failed");
                 k_used_total += k_used;
@@ -230,15 +241,38 @@ fn main() {
         Mode::SingleChebyshev => {
             // warmup.
             for _ in 0..3 {
-                let _ = chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, chebyshev_tol, n);
+                let _ = chebyshev_propagate(
+                    &h_x,
+                    &h_p_diag,
+                    a_t,
+                    b_t,
+                    &psi,
+                    dt,
+                    chebyshev_tol,
+                    n,
+                    h_x_abs_sum,
+                    h_p_min,
+                    h_p_max,
+                );
             }
 
             let t0 = Instant::now();
             let mut k_used_total: usize = 0;
             let mut sink_acc = 0.0_f64;
             for _ in 0..n_steps {
-                let (psi_new, k_used, _err_estimate) =
-                    chebyshev_propagate(&h_x, &h_p_diag, a_t, b_t, &psi, dt, chebyshev_tol, n);
+                let (psi_new, k_used, _err_estimate) = chebyshev_propagate(
+                    &h_x,
+                    &h_p_diag,
+                    a_t,
+                    b_t,
+                    &psi,
+                    dt,
+                    chebyshev_tol,
+                    n,
+                    h_x_abs_sum,
+                    h_p_min,
+                    h_p_max,
+                );
                 k_used_total += k_used;
                 sink_acc += psi_new.iter().take(8).map(|c| c.re + c.im).sum::<f64>();
             }

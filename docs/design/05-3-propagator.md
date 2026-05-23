@@ -135,11 +135,15 @@ stage 2: B_2 = a_low · H_1 + a_high · H_2
          → ψ_new = chebyshev_propagate(..., c_drv_2, c_diag_2, ψ_mid, dt, ...)
 ```
 
-per-stage で **Gershgorin により `(E_c, R)` を再計算** する (Closed form O(N),
-1 step 6 stage × 0.001 ms = 0.006 ms で wall time の 0.003% 程度, 完全に
-無視可)。Lanczos `m_eff` が `chebyshev_tol` から決まる K_used に置き換わる
-だけで, 線形結合係数 / Richardson 構造 / PI controller の駆動量 (`err_magnus =
-max(0, err - err_chebyshev_total)`) は Lanczos 版と同型に保つ。
+per-stage で **Gershgorin により `(E_c, R)` を再計算** する。`h_x_abs_sum
+= Σ_i |h_x_i|` と `h_p_min / h_p_max = min/max(h_p_diag)` を `IsingProblem`
+構築時に 1 度だけ precompute して上位 driver から渡し, per-step は
+`gershgorin_bounds_cached` で **O(1) (数値演算 5 回)** で済ませる。素朴な
+`gershgorin_bounds` (h_p_diag を毎回 full walk) だと per-step `O(2^N + N)`
+で N=18 で wall time の 1% 弱を占めてしまうので, この precompute は明示的に
+持たせる契約とする。Lanczos `m_eff` が `chebyshev_tol` から決まる K_used に
+置き換わるだけで, 線形結合係数 / Richardson 構造 / PI controller の駆動量
+(`err_magnus = max(0, err - err_chebyshev_total)`) は Lanczos 版と同型に保つ。
 
 メモリ / cache:
 

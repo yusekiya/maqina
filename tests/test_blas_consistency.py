@@ -252,6 +252,11 @@ def _run_chebyshev_direct(n: int, seed: int) -> dict[str, np.ndarray]:
     h_p_diag = np.ascontiguousarray(rng.uniform(-1.0, 1.0, size=dim).astype(np.float64))
     psi0_arr = np.ascontiguousarray(uniform_superposition(n))
 
+    # Gershgorin 上下界の precompute (Chebyshev propagator の per-step O(1) 入力).
+    h_x_abs_sum = float(np.abs(h_x).sum())
+    h_p_min = float(h_p_diag.min())
+    h_p_max = float(h_p_diag.max())
+
     # 固定 schedule 係数. linear schedule の `t = 0.25 · T, T = 0.5` に近い
     # 中盤を模した値. CFM4:2 の 2 stage ノードはランダムに振ってある.
     a_s1, b_s1 = 0.55, 0.45
@@ -263,7 +268,18 @@ def _run_chebyshev_direct(n: int, seed: int) -> dict[str, np.ndarray]:
 
     # 1) single step (cfm4_step_chebyshev_py).
     psi_step, k_step, err_step = _rust.cfm4_step_chebyshev_py(
-        psi0_arr, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, cheb_tol
+        psi0_arr,
+        h_x,
+        h_p_diag,
+        a_s1,
+        b_s1,
+        a_s2,
+        b_s2,
+        dt,
+        cheb_tol,
+        h_x_abs_sum,
+        h_p_min,
+        h_p_max,
     )
     out["step_psi"] = np.ascontiguousarray(psi_step)
     out["step_k_used"] = np.array([int(k_step)], dtype=np.int64)
@@ -295,6 +311,9 @@ def _run_chebyshev_direct(n: int, seed: int) -> dict[str, np.ndarray]:
             dt,
             cheb_tol,
             False,
+            h_x_abs_sum,
+            h_p_min,
+            h_p_max,
         )
     )
     out["rich_psi"] = np.ascontiguousarray(psi_rich)

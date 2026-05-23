@@ -30,7 +30,7 @@ an array ...`` で破綻するため.
 では未提供 (Phase 1 内, builders 実装後に追加予定).
 """
 from __future__ import annotations as annotations
-from dataclasses import dataclass as dataclass
+from dataclasses import dataclass as dataclass, field as field
 import numpy as np
 from typing import Any
 __all__ = ['IsingProblem']
@@ -65,8 +65,31 @@ class IsingProblem:
     n: int
     H_p_diag: np.ndarray
     h_x: np.ndarray
+    _h_x_abs_sum: float = field(init=False, repr=False, compare=False, default=0.0)
+    _h_p_diag_min: float = field(init=False, repr=False, compare=False, default=0.0)
+    _h_p_diag_max: float = field(init=False, repr=False, compare=False, default=0.0)
 
     @property
     def dim(self) -> int:
         """Hilbert 空間次元 ``2**n``."""
+        ...
+
+    @property
+    def h_x_abs_sum(self) -> float:
+        """``Σ_i |h_x_i|`` の precompute 値 (Gershgorin 行和上界の非対角寄与).
+
+        Chebyshev propagator (``cfm4_step_chebyshev_*``) が per-step
+        Gershgorin 上下界を O(1) で計算するための precompute. ``__post_init__``
+        で 1 度だけ計算され, インスタンスが ``frozen=True`` のため以降不変.
+        """
+        ...
+
+    @property
+    def h_p_diag_min(self) -> float:
+        """``min(H_p_diag)`` の precompute 値 (Gershgorin 行和下界の対角最小)."""
+        ...
+
+    @property
+    def h_p_diag_max(self) -> float:
+        """``max(H_p_diag)`` の precompute 値 (Gershgorin 行和上界の対角最大)."""
         ...

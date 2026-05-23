@@ -2265,6 +2265,9 @@ def _adaptive_dispatch_richardson_estimate_chebyshev(
     dt: float,
     chebyshev_tol: float,
     extrapolate: bool,
+    h_x_abs_sum: float,
+    h_p_min: float,
+    h_p_max: float,
 ) -> tuple[np.ndarray, float, int, float]:
     """Chebyshev 経路 Richardson 推定子のディスパッチ.
 
@@ -2274,6 +2277,10 @@ def _adaptive_dispatch_richardson_estimate_chebyshev(
     SIMD 経路) が必須" を意味し, Lanczos 経路のような silent fallback は
     提供しない (Chebyshev の数値挙動 + 性能特性の評価が Rust 側を前提と
     しているため; Python ref 化は scope 外).
+
+    末尾 3 引数 (``h_x_abs_sum`` / ``h_p_min`` / ``h_p_max``) は Gershgorin
+    上下界の precompute 値. ``IsingProblem`` 構築時に 1 度だけ計算して
+    上位 driver から渡す (per-step の O(2^N + N) を O(1) に縮める).
     """
     if rust_mod is None:
         raise NotImplementedError(
@@ -2301,6 +2308,9 @@ def _adaptive_dispatch_richardson_estimate_chebyshev(
             dt,
             chebyshev_tol,
             extrapolate,
+            h_x_abs_sum,
+            h_p_min,
+            h_p_max,
         )
     )
     return psi_new, float(err), int(k_used_total), float(err_cheb_total)
@@ -2432,6 +2442,14 @@ def evolve_schedule_adaptive_richardson_chebyshev(
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     dim = int(psi.shape[0])
 
+    # Gershgorin 上下界の precompute (Chebyshev propagator が per-step で
+    # ``gershgorin_bounds_cached`` 経由 O(1) で `(E_c, R)` を計算するための
+    # 入力値). ``h_x`` / ``h_p_diag`` は driver 入口時点で固定なので 1 度だけ
+    # 計算して全 step に使い回す.
+    h_x_abs_sum = float(np.abs(h_x_arr).sum())
+    h_p_min = float(h_p_diag_arr.min())
+    h_p_max = float(h_p_diag_arr.max())
+
     recorder = (
         _SnapshotRecorder(save_tlist, observables, store_states, dim)
         if save_tlist is not None
@@ -2517,6 +2535,9 @@ def evolve_schedule_adaptive_richardson_chebyshev(
                 dt_try,
                 chebyshev_tol,
                 richardson_extrapolate,
+                h_x_abs_sum,
+                h_p_min,
+                h_p_max,
             )
         )
         err_magnus = max(0.0, err - err_chebyshev_total)

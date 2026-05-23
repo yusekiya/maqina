@@ -29,7 +29,7 @@ an array ...`` で破綻するため.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -67,6 +67,12 @@ class IsingProblem:
     n: int
     H_p_diag: np.ndarray
     h_x: np.ndarray
+    # 以下は __post_init__ で計算する Gershgorin 上下界の precompute 値.
+    # init=False で __init__ 引数から外し, frozen=True でも
+    # object.__setattr__ 経由で書き込む.
+    _h_x_abs_sum: float = field(init=False, repr=False, compare=False, default=0.0)
+    _h_p_diag_min: float = field(init=False, repr=False, compare=False, default=0.0)
+    _h_p_diag_max: float = field(init=False, repr=False, compare=False, default=0.0)
 
     def __post_init__(self) -> None:
         if not isinstance(self.n, (int, np.integer)) or self.n < 1:
@@ -75,6 +81,14 @@ class IsingProblem:
         expected_dim = 1 << int(self.n)
         self._validate_real_array("H_p_diag", self.H_p_diag, (expected_dim,))
         self._validate_real_array("h_x", self.h_x, (int(self.n),))
+
+        # Gershgorin 上下界の precompute (Chebyshev propagator が per-step
+        # `gershgorin_bounds_cached` で O(1) 計算するための入力値). h_x /
+        # H_p_diag は frozen なので 1 度だけ計算して持つ. frozen=True を
+        # 維持しつつ属性を設定するため object.__setattr__ を使う.
+        object.__setattr__(self, "_h_x_abs_sum", float(np.abs(self.h_x).sum()))
+        object.__setattr__(self, "_h_p_diag_min", float(self.H_p_diag.min()))
+        object.__setattr__(self, "_h_p_diag_max", float(self.H_p_diag.max()))
 
     @staticmethod
     def _validate_real_array(
@@ -99,3 +113,23 @@ class IsingProblem:
     def dim(self) -> int:
         """Hilbert 空間次元 ``2**n``."""
         return 1 << int(self.n)
+
+    @property
+    def h_x_abs_sum(self) -> float:
+        """``Σ_i |h_x_i|`` の precompute 値 (Gershgorin 行和上界の非対角寄与).
+
+        Chebyshev propagator (``cfm4_step_chebyshev_*``) が per-step
+        Gershgorin 上下界を O(1) で計算するための precompute. ``__post_init__``
+        で 1 度だけ計算され, インスタンスが ``frozen=True`` のため以降不変.
+        """
+        return self._h_x_abs_sum
+
+    @property
+    def h_p_diag_min(self) -> float:
+        """``min(H_p_diag)`` の precompute 値 (Gershgorin 行和下界の対角最小)."""
+        return self._h_p_diag_min
+
+    @property
+    def h_p_diag_max(self) -> float:
+        """``max(H_p_diag)`` の precompute 値 (Gershgorin 行和上界の対角最大)."""
+        return self._h_p_diag_max
