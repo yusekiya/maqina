@@ -1,13 +1,13 @@
-"""kryanneal 内部共有ヘルパ (cross-module private API).
+"""kinema 内部共有ヘルパ (cross-module private API).
 
-``QuantumAnnealer`` (``kryanneal.annealer``) と ``AnnealingSimulator``
-(``kryanneal.simulator``) の双方で使う共通定数 / 入力検証 / auto
+``QuantumAnnealer`` (``kinema.annealer``) と ``AnnealingSimulator``
+(``kinema.simulator``) の双方で使う共通定数 / 入力検証 / auto
 resolution helper を集約する. 本モジュールは **package-internal** で
 公開 API ではない (アンダースコア prefix の通称 / ``__all__`` 未宣言).
 
 設計判断 (issue #48 で切り出し)
 -------------------------------
-* ``kryanneal.annealer`` は ``__all__ = ["QuantumAnnealer"]`` で public
+* ``kinema.annealer`` は ``__all__ = ["QuantumAnnealer"]`` で public
   surface を絞っているため, そこから private helper を ``simulator.py``
   が module-level で import すると ``annealer.pyi`` (auto-generated)
   には export されておらず ty が解決失敗する.
@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from kryanneal.problem import IsingProblem
+from kinema.problem import IsingProblem
 
 
 _PSI_NORM_TOL: float = 1e-10

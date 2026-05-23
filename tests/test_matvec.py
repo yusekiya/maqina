@@ -1,4 +1,4 @@
-"""``_rust.apply_h_kryanneal_py`` の Python smoke test.
+"""``_rust.apply_h_kinema_py`` の Python smoke test.
 
 Rust 側 ``#[cfg(test)] mod tests`` で nalgebra dense 構築との rel < 1e-13
 一致を網羅的に検証している (``src/matvec.rs``). 本テストは
@@ -16,14 +16,14 @@ import numpy as np
 import pytest
 
 
-def test_apply_h_kryanneal_py_matches_dense_reference() -> None:
-    """``_rust.apply_h_kryanneal_py`` の出力が dense 構築 H · v と一致する.
+def test_apply_h_kinema_py_matches_dense_reference() -> None:
+    """``_rust.apply_h_kinema_py`` の出力が dense 構築 H · v と一致する.
 
     n=3 (dim=8) で固定 seed の擬似乱数を使い, 結果が **relative error
     1e-13 未満** で dense reference と一致することを確認する.
     Rust 拡張未ビルドの環境では skip (fallback 経路は別テストで網羅).
     """
-    _rust = pytest.importorskip("kryanneal._rust")
+    _rust = pytest.importorskip("kinema._rust")
 
     n = 3
     dim = 1 << n
@@ -37,7 +37,7 @@ def test_apply_h_kryanneal_py_matches_dense_reference() -> None:
     b_t = float(rng.uniform(-1.0, 1.0))
 
     # 被テスト.
-    y = _rust.apply_h_kryanneal_py(v, h_x, h_p_diag, a_t, b_t)
+    y = _rust.apply_h_kinema_py(v, h_x, h_p_diag, a_t, b_t)
 
     # 参照: dense H · v.
     # H_drv = -Σ_i h_x[i] · X_i, X_i は bit i を flip する作用素.
@@ -58,12 +58,12 @@ def test_apply_h_kryanneal_py_matches_dense_reference() -> None:
     assert y.dtype == np.complex128
 
 
-def test_apply_h_kryanneal_py_simd_path_smoke_for_i0_i1_i2() -> None:
-    """SIMD bit-flip pass (i=0,1,2) を踏みやすい設定で apply_h_kryanneal_py が
+def test_apply_h_kinema_py_simd_path_smoke_for_i0_i1_i2() -> None:
+    """SIMD bit-flip pass (i=0,1,2) を踏みやすい設定で apply_h_kinema_py が
     dense reference と ``rel < 1e-13`` で一致することを確認する (issue #63).
 
     SIMD 経路の有無は build 時の ``simd`` feature で決まる. default build
-    (``__has_simd__ = True``) では Rust 側 ``apply_h_kryanneal_serial`` /
+    (``__has_simd__ = True``) では Rust 側 ``apply_h_kinema_serial`` /
     ``_rayon`` のいずれも i ∈ {0,1,2} について ``simd_kernels::bitflip_iN``
     に dispatch される. SIMD ON のビルドが正しい数値を返すことを Python 越境
     後にも smoke 確認する役割 (Rust 単体テスト
@@ -72,7 +72,7 @@ def test_apply_h_kryanneal_py_simd_path_smoke_for_i0_i1_i2() -> None:
     n=5 (dim=32) は SIMD i=2 (block=8) を 4 block 踏み, i=0,1 はその上をなぞる
     最小サイズ. n を小さく保ち rel が ulp 累積で破綻しないことも同時確認.
     """
-    _rust = pytest.importorskip("kryanneal._rust")
+    _rust = pytest.importorskip("kinema._rust")
 
     n = 5
     dim = 1 << n
@@ -85,7 +85,7 @@ def test_apply_h_kryanneal_py_simd_path_smoke_for_i0_i1_i2() -> None:
     a_t = float(rng.uniform(-1.0, 1.0))
     b_t = float(rng.uniform(-1.0, 1.0))
 
-    y = _rust.apply_h_kryanneal_py(v, h_x, h_p_diag, a_t, b_t)
+    y = _rust.apply_h_kinema_py(v, h_x, h_p_diag, a_t, b_t)
 
     # 参照: dense H · v.
     h_drv = np.zeros((dim, dim), dtype=np.complex128)
@@ -97,21 +97,21 @@ def test_apply_h_kryanneal_py_simd_path_smoke_for_i0_i1_i2() -> None:
     y_expected = h_dense @ v
 
     rel = float(np.linalg.norm(y - y_expected) / max(np.linalg.norm(y_expected), 1.0))
-    assert rel < 1e-13, f"SIMD-path apply_h_kryanneal_py rel={rel} >= 1e-13"
+    assert rel < 1e-13, f"SIMD-path apply_h_kinema_py rel={rel} >= 1e-13"
 
 
-def test_apply_h_kryanneal_into_py_matches_alloc_variant_bitwise() -> None:
-    """``apply_h_kryanneal_into_py`` の結果が ``apply_h_kryanneal_py`` と
+def test_apply_h_kinema_into_py_matches_alloc_variant_bitwise() -> None:
+    """``apply_h_kinema_into_py`` の結果が ``apply_h_kinema_py`` と
     **bit-for-bit** 一致する (issue #85 acceptance).
 
-    両者は内部で同じ ``apply_h_kryanneal`` を呼ぶので, ``y`` を新規 alloc
+    両者は内部で同じ ``apply_h_kinema`` を呼ぶので, ``y`` を新規 alloc
     して返すか caller 提供の buffer に上書きするかが唯一の違い. 演算順序
     は完全に同一なので bit-identical を期待する.
 
     SIMD path を踏みやすいよう n=5 (i ∈ {0,1,2} の SIMD block ≤ dim) で
     実施する.
     """
-    _rust = pytest.importorskip("kryanneal._rust")
+    _rust = pytest.importorskip("kinema._rust")
 
     n = 5
     dim = 1 << n
@@ -124,10 +124,10 @@ def test_apply_h_kryanneal_into_py_matches_alloc_variant_bitwise() -> None:
     a_t = float(rng.uniform(-1.0, 1.0))
     b_t = float(rng.uniform(-1.0, 1.0))
 
-    y_alloc = _rust.apply_h_kryanneal_py(v, h_x, h_p_diag, a_t, b_t)
+    y_alloc = _rust.apply_h_kinema_py(v, h_x, h_p_diag, a_t, b_t)
 
     y_inplace = np.empty(dim, dtype=np.complex128)
-    ret = _rust.apply_h_kryanneal_into_py(v, y_inplace, h_x, h_p_diag, a_t, b_t)
+    ret = _rust.apply_h_kinema_into_py(v, y_inplace, h_x, h_p_diag, a_t, b_t)
     assert ret is None  # PyResult<()> は Python では None.
 
     # 演算順序が同じなので bit-identical を期待 (`np.array_equal` は
@@ -142,12 +142,12 @@ def test_apply_h_kryanneal_into_py_matches_alloc_variant_bitwise() -> None:
     assert y_inplace.dtype == np.complex128
 
 
-def test_apply_h_kryanneal_into_py_rejects_wrong_shape() -> None:
-    """``apply_h_kryanneal_into_py`` の境界チェック.
+def test_apply_h_kinema_into_py_rejects_wrong_shape() -> None:
+    """``apply_h_kinema_into_py`` の境界チェック.
 
     ``y_out`` の長さが ``dim = 2^len(h_x)`` と不一致なら ``ValueError``.
     """
-    _rust = pytest.importorskip("kryanneal._rust")
+    _rust = pytest.importorskip("kinema._rust")
 
     n = 3
     dim = 1 << n
@@ -162,7 +162,7 @@ def test_apply_h_kryanneal_into_py_rejects_wrong_shape() -> None:
     # 長さ違いの y_out で ValueError を期待.
     y_wrong = np.empty(dim + 1, dtype=np.complex128)
     with pytest.raises(ValueError, match="y_out length"):
-        _rust.apply_h_kryanneal_into_py(v, y_wrong, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_kinema_into_py(v, y_wrong, h_x, h_p_diag, a_t, b_t)
 
 
 @pytest.mark.parametrize("i", [0, 1, 2])
@@ -180,7 +180,7 @@ def test_apply_single_mode_axis_i_py_simd_path_smoke(i: int) -> None:
     なぞる最小サイズ. n を小さく保ち rel が ulp 累積で破綻しないことも
     同時確認.
     """
-    _rust = pytest.importorskip("kryanneal._rust")
+    _rust = pytest.importorskip("kinema._rust")
 
     n = 5
     dim = 1 << n
@@ -209,7 +209,7 @@ def test_apply_single_mode_axis_i_py_simd_path_smoke(i: int) -> None:
     # 被テスト: SIMD 経路 (default build) を踏む.
     psi_actual = _rust.apply_single_mode_axis_i_py(psi, u, i, n)
 
-    # 参照: dense `I ⊗ ... ⊗ U_i ⊗ ... ⊗ I` を直接構築する (kryanneal の
+    # 参照: dense `I ⊗ ... ⊗ U_i ⊗ ... ⊗ I` を直接構築する (kinema の
     # bit 規約: bit 0 = LSB, `psi[k]` の bit_i(k)=0 / =1 が pair (lo, hi) を
     # 形成). U_full[k, k]      = u[0] if bit_i(k)=0 else u[3]
     #         U_full[k, k^mask] = u[1] if bit_i(k)=0 else u[2]
@@ -249,7 +249,7 @@ def test_apply_single_mode_axis_i_inplace_py_matches_alloc_variant_bitwise() -> 
     SIMD path を踏みやすいよう n=5 (i ∈ {0,1,2} の SIMD block ≤ dim) で
     実施し, axis i は 0, 1, 2 を sweep する.
     """
-    _rust = pytest.importorskip("kryanneal._rust")
+    _rust = pytest.importorskip("kinema._rust")
 
     n = 5
     dim = 1 << n
@@ -284,7 +284,7 @@ def test_apply_single_mode_axis_i_inplace_py_rejects_wrong_shape() -> None:
     ``psi`` の長さが ``2^n`` と不一致 / ``u`` 長さが 4 でない / ``i >= n`` で
     ``ValueError`` (alloc 変種と同じ shape 検査ヘルパを共有する).
     """
-    _rust = pytest.importorskip("kryanneal._rust")
+    _rust = pytest.importorskip("kinema._rust")
 
     n = 3
     dim = 1 << n

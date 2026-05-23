@@ -1,13 +1,13 @@
 ---
 name: test-runner
-description: kryanneal の自動テスト・lint・build コマンドを 1 系統だけ実行し、pass/fail のサマリと失敗時の最小限の stdout だけを返す read-only ランナー。長い passed 列をメインの context から逃がす目的で使う。並列実行が必要な場合は、メインセッション側から本 agent を複数同時起動する (本 agent は内部で fan-out しない)。実行手順詳細は project skill `.claude/skills/test-runner/SKILL.md` を一次資料として参照する。
+description: kinema の自動テスト・lint・build コマンドを 1 系統だけ実行し、pass/fail のサマリと失敗時の最小限の stdout だけを返す read-only ランナー。長い passed 列をメインの context から逃がす目的で使う。並列実行が必要な場合は、メインセッション側から本 agent を複数同時起動する (本 agent は内部で fan-out しない)。実行手順詳細は project skill `.claude/skills/test-runner/SKILL.md` を一次資料として参照する。
 tools: Bash, Read
 model: sonnet
 ---
 
 # test-runner subagent
 
-kryanneal の自動テスト・lint・build を **1 系統だけ** 実行する read-only ランナー.
+kinema の自動テスト・lint・build を **1 系統だけ** 実行する read-only ランナー.
 
 ## 起動時の手続き
 

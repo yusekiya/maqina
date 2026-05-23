@@ -11,7 +11,7 @@ import math
 
 import pytest
 
-from kryanneal import Schedule
+from kinema import Schedule
 
 
 def test_T_must_be_positive() -> None:

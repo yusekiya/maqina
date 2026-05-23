@@ -1,6 +1,6 @@
 # bench_qutip_large.py
 
-Work-precision diagram ベンチ: QuTiP ``sesolve`` vs kryanneal 各 method (issue #65 Phase 6 C4).
+Work-precision diagram ベンチ: QuTiP ``sesolve`` vs kinema 各 method (issue #65 Phase 6 C4).
 
 複数 **scenario** (T × dynamic range の組合せ) と複数 **n** に対し 各 solver の精度つまみを sweep, 共通 reference (QuTiP `tol=ref_tol`) に対する infidelity と wall time を 1 回ずつ測定. 各 (scenario, n) ごとに **infidelity 昇順 + Pareto 最適マーク (✓)** を付けた work-precision 表を出す.
 

@@ -14,8 +14,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kryanneal import IsingProblem, Schedule, instantaneous_eigenstates
-from kryanneal import _rust as _rust_mod
+from kinema import IsingProblem, Schedule, instantaneous_eigenstates
+from kinema import _rust as _rust_mod
 
 
 def _make_problem(n: int, seed: int = 0) -> IsingProblem:
@@ -38,7 +38,7 @@ def _apply_ht(
     """``H(t) @ v`` を Rust matvec 経由で計算する (テスト残差用)."""
     a_t, b_t = sched.coeffs_at(t)
     v_c = np.ascontiguousarray(v)
-    return _rust_mod.apply_h_kryanneal_py(v_c, prob.h_x, prob.H_p_diag, a_t, b_t)
+    return _rust_mod.apply_h_kinema_py(v_c, prob.h_x, prob.H_p_diag, a_t, b_t)
 
 
 def _eigvec_residuals(

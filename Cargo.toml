@@ -1,5 +1,5 @@
 [package]
-name = "kryanneal"
+name = "kinema"
 version = "0.11.0"
 edition = "2021"
 publish = false
@@ -12,7 +12,7 @@ name = "_rust"
 #         ビルドできない.
 crate-type = ["cdylib", "rlib"]
 
-# `perf_apply_h`: Phase 6 D (issue #79) follow-up. `apply_h_kryanneal` を
+# `perf_apply_h`: Phase 6 D (issue #79) follow-up. `apply_h_kinema` を
 # N 回呼ぶだけの pure-Rust binary. Linux `perf stat` で hardware counter
 # (cache miss / DRAM controller throughput / stall reasons) を取り
 # 真のボトルネックを特定するために使う. cargo build --release --bin perf_apply_h
@@ -66,13 +66,13 @@ path = "src/bin/perf_apply_h.rs"
 # `set_blas_threads(n)`) と重ねがけにならないよう運用するのが推奨
 # (`CLAUDE.md` 物理的取り決め節参照).
 #
-# `simd`: `src/matvec.rs::apply_h_kryanneal` の bit-flip pass のうち
+# `simd`: `src/matvec.rs::apply_h_kinema` の bit-flip pass のうち
 # i=0,1,2 (stride 1/2/4 連続アクセス領域) を `wide::f64x4` 経由で SIMD 特化
 # する (`docs/design/12-release-plan.md` §12 Phase 6 C2, issue #63). default ON で stable Rust
 # だけで AVX2 / AVX-512 / NEON への自動 dispatch が効く (`wide` クレートが
 # `target_feature` を見て選択). `--no-default-features` で scalar 経路に戻り
 # `wide` 依存も外れる. SIMD は per-thread 最適化なので rayon と直交し,
-# `apply_h_kryanneal_serial` (小 dim) と `apply_h_kryanneal_rayon` (大 dim)
+# `apply_h_kinema_serial` (小 dim) と `apply_h_kinema_rayon` (大 dim)
 # の両 path で共通の inner kernel を呼ぶ構造になっている (issue #68 follow-up
 # で導入された `MIN_RAYON_DIM` dispatch との直交性).
 default = ["blas", "rayon", "simd"]

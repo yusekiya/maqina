@@ -96,8 +96,8 @@ from pathlib import Path
 
 import numpy as np
 
-from kryanneal import IsingProblem, QuantumAnnealer, Schedule, set_blas_threads
-from kryanneal.initial_states import uniform_superposition
+from kinema import IsingProblem, QuantumAnnealer, Schedule, set_blas_threads
+from kinema.initial_states import uniform_superposition
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "benchmarks" / "results"
@@ -155,7 +155,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """
     parser = argparse.ArgumentParser(
         description=(
-            "kryanneal per-step wall time benchmark "
+            "kinema per-step wall time benchmark "
             "(M2 / Trotter / Suzuki S_4 / CFM4:2; "
             "see docs/design/10-benchmarks.md §10)"
         )
@@ -216,7 +216,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "if specified, call kryanneal.set_blas_threads(N) at startup to "
+            "if specified, call kinema.set_blas_threads(N) at startup to "
             "lock all loaded BLAS pools (numpy bundled + system OpenBLAS that "
             "the Rust extension links against) to N threads. Use "
             "`--blas-threads 1` to take a machine-independent single-thread "
@@ -377,7 +377,7 @@ def collect_machine_info() -> dict[str, str]:
 
     # Rust 拡張の build フラグ.
     try:
-        rust_mod = importlib.import_module("kryanneal._rust")
+        rust_mod = importlib.import_module("kinema._rust")
         info["rust_extension"] = "loaded"
         info["__has_blas__"] = str(bool(getattr(rust_mod, "__has_blas__", False)))
     except ImportError:
@@ -428,7 +428,7 @@ def write_outputs(
     state 差 ``final_err_vs_ref`` (median) を per-n × method で出す.
     これらは adaptive driver の性能・精度評価で最重要 2 値だが,
     Summary 表の per-step / states/sec だけでは見えないため別節で並べる
-    (cv_ising の bench pattern とは異なる, kryanneal 固有の adaptive 評価軸).
+    (cv_ising の bench pattern とは異なる, kinema 固有の adaptive 評価軸).
     ``reference_wall_sec`` 列は ``_compute_reference_psi`` 自体の wall time
     を per-n で記録する (大 n で reference が 1-2 時間かかる現実問題への
     透明性).

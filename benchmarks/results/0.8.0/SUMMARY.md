@@ -14,13 +14,13 @@ Phase 8 (Lanczos a posteriori 早期打切 + Richardson iter-0 cache) 全 ON
 
 ## 1. `bench_parallel_scaling` — rayon scaling
 
-`apply_h_kryanneal` / `trotter_step` の max speedup と knee:
+`apply_h_kinema` / `trotter_step` の max speedup と knee:
 
 | kernel | n | max speedup | max @ threads | knee threads |
 |---|---|---|---|---|
-| `apply_h_kryanneal` | 16 | 1.01× | 64 | 1 (dim < `MIN_RAYON_DIM=1<<17` で scalar 経路 fallback, #68 dim 閾値 dispatch が機能) |
-| `apply_h_kryanneal` | 18 | 3.39× | 16 | 8 |
-| `apply_h_kryanneal` | 20 | **6.01×** | 32 | 32 |
+| `apply_h_kinema` | 16 | 1.01× | 64 | 1 (dim < `MIN_RAYON_DIM=1<<17` で scalar 経路 fallback, #68 dim 閾値 dispatch が機能) |
+| `apply_h_kinema` | 18 | 3.39× | 16 | 8 |
+| `apply_h_kinema` | 20 | **6.01×** | 32 | 32 |
 | `trotter_step` | 16 | 1.00× | 16 | 1 (同上) |
 | `trotter_step` | 18 | 3.98× | 16 | 8 |
 | `trotter_step` | 20 | **6.28×** | 16 | 16 |
@@ -33,16 +33,16 @@ memory-bandwidth knee は 16-32 threads 付近で saturate。
 
 | n | kernel | median wall (ms) | median calls/sec |
 |---|---|---|---|
-| 18 | `apply_h_kryanneal` | 0.272 | 3,679 |
+| 18 | `apply_h_kinema` | 0.272 | 3,679 |
 | 18 | `trotter_step` | 2.468 | 405 |
-| 20 | `apply_h_kryanneal` | 0.953 | 1,049 |
+| 20 | `apply_h_kinema` | 0.953 | 1,049 |
 | 20 | `trotter_step` | 8.149 | 123 |
-| 22 | `apply_h_kryanneal` | 5.070 | 197 |
+| 22 | `apply_h_kinema` | 5.070 | 197 |
 | 22 | `trotter_step` | 16.338 | 61 |
 
 → N=20 `trotter_step` per-call **8.15 ms**。issue #64 (Phase 6 C3) で acceptance
 が **1.3×**, PR #78 merge 時 bench で **4.01×** 達成済 (Linux 同サーバー)。
-本 finalize bench の絶対値は当該 acceptance を維持。`apply_h_kryanneal` は
+本 finalize bench の絶対値は当該 acceptance を維持。`apply_h_kinema` は
 N=20 で 0.95 ms / call。
 
 ## 3. `bench_per_step` — per-step time (5 method × 4 n)
@@ -78,9 +78,9 @@ n=16 / cfm4_adaptive_richardson の adaptive driver detail:
   自体は §5 の通り達成済み. Phase 8 #98 の m_eff 圧縮 78% は
   `bench_m_eff_adiabatic.py` で別 axis で実証済 (PR #99 comment).
 
-## 4. `bench_qutip_large` — QuTiP `sesolve` vs kryanneal の Pareto
+## 4. `bench_qutip_large` — QuTiP `sesolve` vs kinema の Pareto
 
-4 scenario × 複数 n で work-precision diagram を生成。kryanneal が QuTiP
+4 scenario × 複数 n で work-precision diagram を生成。kinema が QuTiP
 よりも Pareto 上にいる highlight を抜粋 (生 md `bench_qutip_large.md` に
 全 scenario の表が入っている):
 
@@ -108,7 +108,7 @@ a posteriori 早期打切) + Phase 6 C2/C3 (SIMD / cache block-fusion) の
 | 16 | trotter | dt=0.1 | 1.71e-06 | **0.040** | qutip tol=1e-3: 1.61e-4 / 0.167s → **4.2× 高速 + 94× 高精度** |
 | 16 | cfm4_adaptive_richardson | atol=1e-3 | 1.59e-10 | **0.396** | qutip tol=1e-7: 1.50e-11 / 0.442s → 1.12× 高速 (ほぼ同等) |
 
-→ N=12-16 域で kryanneal の固定 dt method (trotter / cfm4) が QuTiP より
+→ N=12-16 域で kinema の固定 dt method (trotter / cfm4) が QuTiP より
 高速 Pareto を握る。adaptive Richardson も atol=1e-3 帯で QuTiP と同等.
 
 ### 4.3 scenario = stiff (h_p_scale=10)
@@ -131,11 +131,11 @@ a posteriori 早期打切) + Phase 6 C2/C3 (SIMD / cache block-fusion) の
 
 | 観点 | Phase 6 finalize bench での担保 |
 |---|---|
-| rayon 並列化 (Phase 6 C1 #62) | `apply_h_kryanneal` / `trotter_step` ともに N=20 で **6×+ scaling** 観測 |
+| rayon 並列化 (Phase 6 C1 #62) | `apply_h_kinema` / `trotter_step` ともに N=20 で **6×+ scaling** 観測 |
 | dim 閾値 dispatch (#68) | N=16 で 1.0× = scalar 経路 fallback が想定通り |
-| SIMD bit-flip + cache block-fusion (#63 #64 #71) | `trotter_step` N=20 / `apply_h_kryanneal` N=20 の絶対値が個別 child PR (#78 / #80) merge 時の acceptance を維持 |
+| SIMD bit-flip + cache block-fusion (#63 #64 #71) | `trotter_step` N=20 / `apply_h_kinema` N=20 の絶対値が個別 child PR (#78 / #80) merge 時の acceptance を維持 |
 | BLAS feature on/off CI matrix (#65 Phase 6 C4) | `tests/test_blas_consistency.py` 経由で本 PR でも全 green |
-| QuTiP vs kryanneal Pareto (Phase 7 #93 持ち越し → Phase 8 #98 + Phase 6 累積で決着) | long-T / large-N / stiff / standard 全 4 scenario で kryanneal が QuTiP より Pareto 上または同等 |
+| QuTiP vs kinema Pareto (Phase 7 #93 持ち越し → Phase 8 #98 + Phase 6 累積で決着) | long-T / large-N / stiff / standard 全 4 scenario で kinema が QuTiP より Pareto 上または同等 |
 | Phase 8 m_eff 圧縮 78% (#98) | `bench_m_eff_adiabatic.py` で別 axis で実証済 (PR #99 comment, T=1.0 短時間 schedule の本 bench では局所的に未発火) |
 | Richardson iter-0 cache (#100) | `cfm4_adaptive_richardson` の per-step time が Phase 6 absolute scale で良好 (N=16 で 58.2 ms/step) |
 

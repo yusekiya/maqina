@@ -11,10 +11,10 @@ issue #62 (Phase 6 C1): rayon parallel scaling sweep.
 - **numpy_version**: 2.4.4
 - **cpu_count_logical**: 64
 - **timestamp_utc**: 2026-05-18T13:19:04.794073+00:00
-- **kryanneal_version**: unknown
+- **kinema_version**: unknown
 - **has_blas**: True
 
-## apply_h_kryanneal
+## apply_h_kinema
 
 | n \ threads | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
 |---|---|---|---|---|---|---|---|
@@ -22,7 +22,7 @@ issue #62 (Phase 6 C1): rayon parallel scaling sweep.
 | 18 | 3.846 ms | 1.940 ms | 1.501 ms | 1.165 ms | 1.135 ms | 1.719 ms | 3.456 ms |
 | 20 | 17.313 ms | 8.740 ms | 4.861 ms | 3.451 ms | 4.246 ms | 2.878 ms | 4.337 ms |
 
-### apply_h_kryanneal — speedup vs threads=1 (median)
+### apply_h_kinema — speedup vs threads=1 (median)
 
 | n \ threads | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
 |---|---|---|---|---|---|---|---|
@@ -30,7 +30,7 @@ issue #62 (Phase 6 C1): rayon parallel scaling sweep.
 | 18 | 1.00× | 1.98× | 2.56× | 3.30× | 3.39× | 2.24× | 1.11× |
 | 20 | 1.00× | 1.98× | 3.56× | 5.02× | 4.08× | 6.01× | 3.99× |
 
-### apply_h_kryanneal — knee (memory-bandwidth saturation point, smallest threads achieving ≥ 95% of max speedup)
+### apply_h_kinema — knee (memory-bandwidth saturation point, smallest threads achieving ≥ 95% of max speedup)
 
 | n | max speedup | max @ threads | knee threads | speedup at knee |
 |---|---|---|---|---|

@@ -17,14 +17,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kryanneal.krylov import (
+from kinema.krylov import (
     _make_python_matvec,
     _python_lanczos_propagate,
     _python_m2_step,
 )
 
 try:
-    from kryanneal import _rust as _rust_mod
+    from kinema import _rust as _rust_mod
 except ImportError:  # pragma: no cover
     _rust_mod = None  # type: ignore[assignment]
 
@@ -102,7 +102,7 @@ def test_python_lanczos_matches_dense_propagator(n: int, seed: int) -> None:
     assert rel < 1e-10, f"n={n}, seed={seed}: rel = {rel}"
 
 
-@pytest.mark.skipif(not _HAS_RUST, reason="kryanneal._rust extension not built")
+@pytest.mark.skipif(not _HAS_RUST, reason="kinema._rust extension not built")
 @pytest.mark.parametrize("n", [3, 4, 5])
 @pytest.mark.parametrize("seed", [11, 137, 8675309])
 def test_rust_lanczos_matches_python_reference(n: int, seed: int) -> None:
@@ -142,7 +142,7 @@ def test_rust_lanczos_matches_python_reference(n: int, seed: int) -> None:
     assert rel < 1e-13, f"n={n}, seed={seed}: rel = {rel}"
 
 
-@pytest.mark.skipif(not _HAS_RUST, reason="kryanneal._rust extension not built")
+@pytest.mark.skipif(not _HAS_RUST, reason="kinema._rust extension not built")
 @pytest.mark.parametrize("n", [3, 4])
 def test_python_m2_step_matches_rust(n: int) -> None:
     """``_python_m2_step`` が ``_rust.m2_midpoint_step_py`` と
@@ -337,7 +337,7 @@ def test_python_lanczos_aposteriori_monotone_compression() -> None:
         )
 
 
-@pytest.mark.skipif(not _HAS_RUST, reason="kryanneal._rust extension not built")
+@pytest.mark.skipif(not _HAS_RUST, reason="kinema._rust extension not built")
 @pytest.mark.parametrize("n", [3, 4])
 def test_m2_midpoint_step_inplace_py_matches_alloc_variant_bitwise(n: int) -> None:
     """``m2_midpoint_step_inplace_py`` の結果が ``m2_midpoint_step_py`` と

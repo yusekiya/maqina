@@ -12,7 +12,7 @@ import dataclasses
 import numpy as np
 import pytest
 
-from kryanneal import IsingProblem
+from kinema import IsingProblem
 
 
 def _ok_inputs(n: int = 3) -> tuple[np.ndarray, np.ndarray]:

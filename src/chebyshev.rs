@@ -29,7 +29,7 @@
 //! φ_{k+1} = 2 \tilde H φ_k - φ_{k-1}   = 2 (H φ_k - E_c φ_k) / R - φ_{k-1}
 //! ```
 //!
-//! で計算する. 各 step の `H φ_k` 作用は既存 [`crate::matvec::apply_h_kryanneal`]
+//! で計算する. 各 step の `H φ_k` 作用は既存 [`crate::matvec::apply_h_kinema`]
 //! を再利用 (新 primitive 不要).
 //!
 //! # メモリと cache 戦略
@@ -77,7 +77,7 @@ use num_complex::Complex64;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
-use crate::matvec::apply_h_kryanneal;
+use crate::matvec::apply_h_kinema;
 
 /// rayon dispatch を起動する **最小 dim 閾値** (issue #127 PoC).
 ///
@@ -311,7 +311,7 @@ mod simd_kernels {
 ///
 /// `scratch` / `psi_acc` を `par_chunks_mut(chunk_size)` で並列分割し, 各
 /// chunk 内で既存 SIMD (or scalar) fused kernel を呼ぶ 2 段構造. matvec.rs の
-/// `apply_h_kryanneal_rayon` と同じ chunking 戦略 (`(dim / (nth * 4)).clamp(
+/// `apply_h_kinema_rayon` と同じ chunking 戦略 (`(dim / (nth * 4)).clamp(
 /// MIN, MAX)`) を踏襲する.
 ///
 /// # chunk_size の align
@@ -677,7 +677,7 @@ pub fn chebyshev_propagate(
 
     if k_used >= 1 {
         // φ_1 = \tilde H ψ = (H ψ - E_c ψ) / R.
-        apply_h_kryanneal(&phi_prev, &mut scratch, h_x, h_p_diag, a_t, b_t, n);
+        apply_h_kinema(&phi_prev, &mut scratch, h_x, h_p_diag, a_t, b_t, n);
         for j in 0..dim {
             phi_curr[j] =
                 (scratch[j] - Complex64::new(e_c, 0.0) * phi_prev[j]) * Complex64::new(inv_r, 0.0);
@@ -691,14 +691,14 @@ pub fn chebyshev_propagate(
 
     // 6. k ≥ 2 の漸化. issue #126 PoC で walk 2 (recurrence scaling) と walk 3
     // (accumulate) を `chebyshev_recurrence_fused` で 1 walk + SIMD に fuse.
-    // walk 1 (matvec) は `apply_h_kryanneal` のまま. 計 3 walk → 2 walk + SIMD.
+    // walk 1 (matvec) は `apply_h_kinema` のまま. 計 3 walk → 2 walk + SIMD.
     // k_ord は jvals[k_ord] と `k_ord % 4` の両方で必要 (前者は coefficient,
     // 後者は `(-i)^k` の 4 周期 dispatch) なので iterator chain への書き換えは
     // 可読性を下げる. needless_range_loop を allow.
     #[allow(clippy::needless_range_loop)]
     for k_ord in 2..=k_used {
         // walk 1: scratch := H · phi_curr.
-        apply_h_kryanneal(&phi_curr, &mut scratch, h_x, h_p_diag, a_t, b_t, n);
+        apply_h_kinema(&phi_curr, &mut scratch, h_x, h_p_diag, a_t, b_t, n);
         // c_{k_ord} = 2 · (-i)^{k_ord} · J_{k_ord}(z). (-i)^k は 4 周期で循環.
         let pow_minus_i = match k_ord % 4 {
             0 => Complex64::new(1.0, 0.0),

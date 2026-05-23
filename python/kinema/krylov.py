@@ -1,7 +1,7 @@
 """Krylov + Magnus 時間発展ドライバ.
 
 ここに **公開 driver 関数** (``evolve_schedule_*``) と **Python リファレンス
-実装** を置く. Rust 拡張 (``kryanneal._rust``) が利用可能なら fast path に
+実装** を置く. Rust 拡張 (``kinema._rust``) が利用可能なら fast path に
 ディスパッチし, 利用不可なら Python リファレンスで silent fallback する
 契約 (詳細は ``docs/design/03-architecture.md`` §3, §5).
 
@@ -31,7 +31,7 @@ Phase 3 で CFM4:2 (Alvermann-Fehske 2011) 経路を追加:
 Phase 4 で adaptive driver (``evolve_schedule_adaptive_m2`` /
 ``evolve_schedule_adaptive_richardson``) を追加する.
 
-Rust 拡張へのアクセスは ``kryanneal._rust`` を **遅延 import** で行う:
+Rust 拡張へのアクセスは ``kinema._rust`` を **遅延 import** で行う:
 ``_rust`` のロード失敗 (拡張未ビルド環境) を ``ImportError`` で捕捉して
 ``_rust`` モジュール参照を ``None`` にし, fast path を選ぶ関数側で
 ``None`` を見て Python リファレンスにフォールバックする.
@@ -45,10 +45,10 @@ from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
-from kryanneal.schedule import Schedule
+from kinema.schedule import Schedule
 
 if TYPE_CHECKING:
-    from kryanneal.observable import Observable
+    from kinema.observable import Observable
 
 
 # Phase 5 (issue #47): driver が ``save_tlist`` 経路で組み立てる中間
@@ -190,16 +190,16 @@ def _merge_save_tlist_with_uniform(
 
 
 def _try_import_rust() -> ModuleType | None:
-    """``kryanneal._rust`` を動的 import で取り込む.
+    """``kinema._rust`` を動的 import で取り込む.
 
     ``importlib`` 経由にすることで, maturin develop 前の状態
     (``_rust.so`` 未生成) を ``ImportError`` で捕捉して silent fallback
     できる. ty / mypy 等の静的解析からは Rust 拡張モジュールが見えないため,
-    ``from kryanneal import _rust`` 形式だと未解決 import エラーになる.
+    ``from kinema import _rust`` 形式だと未解決 import エラーになる.
     動的 import なら静的解析の対象外になり, 実行時のみ可用性を判定する.
     """
     try:
-        return importlib.import_module("kryanneal._rust")
+        return importlib.import_module("kinema._rust")
     except ImportError:  # pragma: no cover - 拡張未ビルド環境向けフォールバック
         return None
 
@@ -725,7 +725,7 @@ def _python_trotter_step(
     * ``R_i(dt)``: ``θ_i = +a_mid · h_x_i · dt`` の 2×2 ユニタリ
       ``[cos θ, i·sin θ; i·sin θ, cos θ]`` を bit ``i`` 軸に in-place 適用.
       符号 convention は ``src/trotter.rs`` 冒頭 docstring 参照 (``H_drv =
-      -Σ h_x_i X_i`` の負号は ``θ`` 側に巻き取らず ``apply_h_kryanneal``
+      -Σ h_x_i X_i`` の負号は ``θ`` 側に巻き取らず ``apply_h_kinema``
       の ``coeff = -a_t · h_x_i`` と統一).
 
     全因子が unitary なので ``‖psi_new‖ = ‖psi‖`` が machine precision で
@@ -2278,7 +2278,7 @@ def _adaptive_dispatch_richardson_estimate_chebyshev(
     if rust_mod is None:
         raise NotImplementedError(
             "method='cfm4_adaptive_richardson_chebyshev' requires the Rust "
-            "extension (kryanneal._rust). Install with 'uv run maturin develop "
+            "extension (kinema._rust). Install with 'uv run maturin develop "
             "--uv' or fall back to method='cfm4_adaptive_richardson_krylov' (Lanczos)."
         )
     psi_new, err, k_used_total, err_cheb_total = (
@@ -2406,7 +2406,7 @@ def evolve_schedule_adaptive_richardson_chebyshev(
     ValueError, RuntimeError
         :func:`evolve_schedule_adaptive_richardson` と同様.
     NotImplementedError
-        Rust 拡張 ``kryanneal._rust`` が import できなかった場合.
+        Rust 拡張 ``kinema._rust`` が import できなかった場合.
     """
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
@@ -2450,7 +2450,7 @@ def evolve_schedule_adaptive_richardson_chebyshev(
         # (dispatcher 内でも同じ raise だが driver 入口で fail-fast).
         raise NotImplementedError(
             "evolve_schedule_adaptive_richardson_chebyshev requires the Rust "
-            "extension (kryanneal._rust). Build with 'uv run maturin develop "
+            "extension (kinema._rust). Build with 'uv run maturin develop "
             "--uv' or fall back to evolve_schedule_adaptive_richardson "
             "(Lanczos)."
         )
