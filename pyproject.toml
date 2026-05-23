@@ -1,7 +1,7 @@
 [project]
 name = "kinema"
 version = "0.11.0"
-description = "Krylov + Magnus quantum annealing simulator for the transverse-field Ising model"
+description = "Matrix-free transverse-field Ising kinetic quantum evolution via Magnus expansion"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
