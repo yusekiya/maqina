@@ -81,7 +81,8 @@ echo "================================================================"
 echo "run_bench_readme.sh start: $(date)"
 echo "  N=$N, T=$T_INT, seed=$SEED"
 echo "  scenarios: ${scenarios[*]}"
-echo "  order: adaptive_multi → cfm4_multi → qutip (並列) → adaptive_single → cfm4_single"
+echo "  order: [adaptive_multi は 0.8.0 既収集 CSV を使用] → cfm4_multi → qutip (並列)"
+echo "  note: single thread 系列 (Step 4/5) は時間予算により削除済"
 echo "================================================================"
 
 # ----------------------------------------------------------------------------
@@ -124,15 +125,18 @@ run_kryanneal_cell() {
 }
 
 # ============================================================================
-# Step 1: adaptive_multi (2 scenarios 順次)
+# Step 1: adaptive_multi — SKIPPED
+# 既収集 CSV (benchmarks/data/0.8.0/bench_{non-stiff,stiff}.csv) を流用.
+# non-stiff = 4 cell (atol=1e-3,1e-5,1e-7,1e-9), stiff = 3 cell (1e-9 は時間
+# 予算上スキップ; atol=1e-7 で infidelity が参照解 floor ~7.96e-12 付近に到達済).
 # ============================================================================
 echo ""
 echo "################################################################"
-echo "### Step 1: adaptive_multi (kryanneal cfm4_adaptive_richardson) ###"
+echo "### Step 1: adaptive_multi — SKIPPED (using 0.8.0 CSV)       ###"
 echo "################################################################"
-for scenario in "${scenarios[@]}"; do
-    run_kryanneal_cell adaptive multi "$scenario"
-done
+# for scenario in "${scenarios[@]}"; do
+#     run_kryanneal_cell adaptive multi "$scenario"
+# done
 
 # ============================================================================
 # Step 2: cfm4_multi (2 scenarios 順次)
@@ -172,35 +176,17 @@ wait
 echo "### Step 3: qutip done: $(date) ###"
 
 # ----------------------------------------------------------------------------
-# ここで止めても README 図の core message (multi-thread Pareto) は完成済.
-# Step 4-5 は single thread vs multi thread の並列化効果可視化用追加情報.
+# Step 4 (adaptive_single) / Step 5 (cfm4_single) は削除. 時間予算上 single
+# thread 系列は採取せず multi-thread + QuTiP の Pareto に絞る. Chebyshev variant
+# は main branch 側で別途追加実行する (Phase 2).
 # ----------------------------------------------------------------------------
-
-# ============================================================================
-# Step 4: adaptive_single (2 scenarios 順次)
-# ============================================================================
-echo ""
-echo "################################################################"
-echo "### Step 4: adaptive_single (RAYON_NUM_THREADS=1) ###"
-echo "################################################################"
-for scenario in "${scenarios[@]}"; do
-    run_kryanneal_cell adaptive single "$scenario"
-done
-
-# ============================================================================
-# Step 5: cfm4_single (2 scenarios 順次)
-# ============================================================================
-echo ""
-echo "################################################################"
-echo "### Step 5: cfm4_single (RAYON_NUM_THREADS=1) ###"
-echo "################################################################"
-for scenario in "${scenarios[@]}"; do
-    run_kryanneal_cell cfm4 single "$scenario"
-done
 
 echo ""
 echo "================================================================"
 echo "run_bench_readme.sh done: $(date)"
-echo "  output CSV: $OUTPUT_DIR/bench_<scenario>.csv (5 variants × 2 scenarios)"
-echo "  next: plot_readme_figure.py で variant 別 PNG 生成"
+echo "  output CSV: $OUTPUT_DIR/bench_<scenario>.csv"
+echo "    - adaptive_multi (Krylov adaptive): 既収集 (0.8.0)"
+echo "    - cfm4_multi (Krylov fixed dt): Step 2 で追記"
+echo "    - qutip: Step 3 で追記"
+echo "  next: main branch で Chebyshev variant cell 追加 + plot_readme_figure.py"
 echo "================================================================"
