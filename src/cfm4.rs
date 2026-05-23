@@ -990,6 +990,9 @@ pub(crate) fn cfm4_step_chebyshev(
     dt: f64,
     chebyshev_tol: f64,
     n: usize,
+    h_x_abs_sum: f64,
+    h_p_min: f64,
+    h_p_max: f64,
 ) -> PyResult<(Vec<Complex64>, usize, f64)> {
     let a_high = cfm4_a_high();
     let a_low = cfm4_a_low();
@@ -997,8 +1000,19 @@ pub(crate) fn cfm4_step_chebyshev(
     // stage 1: B_1 = a_high · H_1 + a_low · H_2 を (c_drv_1, c_diag_1) に畳み込む.
     let c_drv_1 = a_high * a_s1 + a_low * a_s2;
     let c_diag_1 = a_high * b_s1 + a_low * b_s2;
-    let (psi_mid, k_used_stage1, err_stage1) =
-        chebyshev_propagate(h_x, h_p_diag, c_drv_1, c_diag_1, psi, dt, chebyshev_tol, n);
+    let (psi_mid, k_used_stage1, err_stage1) = chebyshev_propagate(
+        h_x,
+        h_p_diag,
+        c_drv_1,
+        c_diag_1,
+        psi,
+        dt,
+        chebyshev_tol,
+        n,
+        h_x_abs_sum,
+        h_p_min,
+        h_p_max,
+    );
 
     // stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に畳み込む.
     let c_drv_2 = a_low * a_s1 + a_high * a_s2;
@@ -1012,6 +1026,9 @@ pub(crate) fn cfm4_step_chebyshev(
         dt,
         chebyshev_tol,
         n,
+        h_x_abs_sum,
+        h_p_min,
+        h_p_max,
     );
 
     Ok((
@@ -1030,12 +1047,19 @@ pub(crate) fn cfm4_step_chebyshev(
 ///     psi, h_x, h_p_diag,
 ///     a_s1, b_s1, a_s2, b_s2,
 ///     dt, chebyshev_tol,
+///     h_x_abs_sum, h_p_min, h_p_max,
 /// )
 /// ```
 ///
-/// として呼ぶ.
+/// として呼ぶ. 末尾 3 引数は Gershgorin 上下界の precompute 値で,
+/// `IsingProblem` 構築時に 1 度だけ計算して上位 driver から渡す.
 #[pyfunction]
-#[pyo3(signature = (psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, chebyshev_tol))]
+#[pyo3(signature = (
+    psi, h_x, h_p_diag,
+    a_s1, b_s1, a_s2, b_s2,
+    dt, chebyshev_tol,
+    h_x_abs_sum, h_p_min, h_p_max,
+))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cfm4_step_chebyshev_py<'py>(
     py: Python<'py>,
@@ -1048,6 +1072,9 @@ pub(crate) fn cfm4_step_chebyshev_py<'py>(
     b_s2: f64,
     dt: f64,
     chebyshev_tol: f64,
+    h_x_abs_sum: f64,
+    h_p_min: f64,
+    h_p_max: f64,
 ) -> PyResult<(Bound<'py, PyArray1<Complex64>>, usize, f64)> {
     let psi_slice = psi.as_slice()?;
     let h_x_slice = h_x.as_slice()?;
@@ -1082,6 +1109,9 @@ pub(crate) fn cfm4_step_chebyshev_py<'py>(
         dt,
         chebyshev_tol,
         n,
+        h_x_abs_sum,
+        h_p_min,
+        h_p_max,
     )?;
     Ok((psi_new.into_pyarray(py), k_used_sum, err_cheb_sum))
 }
@@ -1127,6 +1157,9 @@ pub fn cfm4_step_chebyshev_with_richardson_estimate(
     chebyshev_tol: f64,
     n: usize,
     extrapolate: bool,
+    h_x_abs_sum: f64,
+    h_p_min: f64,
+    h_p_max: f64,
 ) -> PyResult<(f64, usize, f64)> {
     // 1) full-step CFM4:2 (dt) chebyshev variant.
     let (psi_full, k_used_full, err_cheb_full) = cfm4_step_chebyshev(
@@ -1140,6 +1173,9 @@ pub fn cfm4_step_chebyshev_with_richardson_estimate(
         dt,
         chebyshev_tol,
         n,
+        h_x_abs_sum,
+        h_p_min,
+        h_p_max,
     )?;
 
     // 2) 前半 half-step CFM4:2 (dt/2).
@@ -1154,6 +1190,9 @@ pub fn cfm4_step_chebyshev_with_richardson_estimate(
         0.5 * dt,
         chebyshev_tol,
         n,
+        h_x_abs_sum,
+        h_p_min,
+        h_p_max,
     )?;
 
     // 3) 後半 half-step CFM4:2 (dt/2) — 前半出口から.
@@ -1168,6 +1207,9 @@ pub fn cfm4_step_chebyshev_with_richardson_estimate(
         0.5 * dt,
         chebyshev_tol,
         n,
+        h_x_abs_sum,
+        h_p_min,
+        h_p_max,
     )?;
 
     let k_used_total = k_used_full + k_used_h1 + k_used_h2;
@@ -1205,10 +1247,12 @@ pub fn cfm4_step_chebyshev_with_richardson_estimate(
 ///     a_s1_h1,   b_s1_h1,   a_s2_h1,   b_s2_h1,
 ///     a_s1_h2,   b_s1_h2,   a_s2_h2,   b_s2_h2,
 ///     dt, chebyshev_tol, extrapolate,
+///     h_x_abs_sum, h_p_min, h_p_max,
 /// )
 /// ```
 ///
-/// として呼ぶ.
+/// として呼ぶ. 末尾 3 引数は Gershgorin 上下界の precompute 値 (`IsingProblem`
+/// 構築時に 1 度だけ計算して渡す).
 #[pyfunction]
 #[pyo3(signature = (
     psi, h_x, h_p_diag,
@@ -1216,6 +1260,7 @@ pub fn cfm4_step_chebyshev_with_richardson_estimate(
     a_s1_h1, b_s1_h1, a_s2_h1, b_s2_h1,
     a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2,
     dt, chebyshev_tol, extrapolate,
+    h_x_abs_sum, h_p_min, h_p_max,
 ))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cfm4_step_chebyshev_with_richardson_estimate_py<'py>(
@@ -1238,6 +1283,9 @@ pub(crate) fn cfm4_step_chebyshev_with_richardson_estimate_py<'py>(
     dt: f64,
     chebyshev_tol: f64,
     extrapolate: bool,
+    h_x_abs_sum: f64,
+    h_p_min: f64,
+    h_p_max: f64,
 ) -> PyResult<(Bound<'py, PyArray1<Complex64>>, f64, usize, f64)> {
     let psi_slice = psi.as_slice()?;
     let h_x_slice = h_x.as_slice()?;
@@ -1282,6 +1330,9 @@ pub(crate) fn cfm4_step_chebyshev_with_richardson_estimate_py<'py>(
         chebyshev_tol,
         n,
         extrapolate,
+        h_x_abs_sum,
+        h_p_min,
+        h_p_max,
     )?;
     Ok((
         psi_owned.into_pyarray(py),
@@ -2441,11 +2492,28 @@ mod tests {
         let dt = total_t / n_steps as f64;
         let cheb_tol = 1e-13_f64;
 
+        let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
+        let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
+        let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
         let mut psi = psi0.clone();
         for _ in 0..n_steps {
-            let (psi_new, _k_used, _err_cheb) =
-                cfm4_step_chebyshev(&psi, &h_x, &h_p_diag, a_t, b_t, a_t, b_t, dt, cheb_tol, n)
-                    .expect("ok");
+            let (psi_new, _k_used, _err_cheb) = cfm4_step_chebyshev(
+                &psi,
+                &h_x,
+                &h_p_diag,
+                a_t,
+                b_t,
+                a_t,
+                b_t,
+                dt,
+                cheb_tol,
+                n,
+                h_x_abs_sum,
+                h_p_min,
+                h_p_max,
+            )
+            .expect("ok");
             psi = psi_new;
         }
 
@@ -2483,6 +2551,10 @@ mod tests {
         let c_1 = cfm4_c1();
         let c_2 = cfm4_c2();
 
+        let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
+        let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
+        let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
         let mut psi_lan = psi0.clone();
         let mut psi_che = psi0.clone();
         for k in 0..n_steps {
@@ -2501,7 +2573,19 @@ mod tests {
             psi_lan = psi_lan_new;
 
             let (psi_che_new, _k, _err_c) = cfm4_step_chebyshev(
-                &psi_che, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, tol, n,
+                &psi_che,
+                &h_x,
+                &h_p_diag,
+                a_s1,
+                b_s1,
+                a_s2,
+                b_s2,
+                dt,
+                tol,
+                n,
+                h_x_abs_sum,
+                h_p_min,
+                h_p_max,
             )
             .expect("chebyshev ok");
             psi_che = psi_che_new;
@@ -2541,6 +2625,10 @@ mod tests {
         let c_1 = cfm4_c1();
         let c_2 = cfm4_c2();
 
+        let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
+        let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
+        let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
         let step_err = |dt: f64| -> f64 {
             let a_s1_full = a_base * f(t0 + c_1 * dt);
             let b_s1_full = b_base * f(t0 + c_1 * dt);
@@ -2557,8 +2645,28 @@ mod tests {
 
             let mut psi = psi0.clone();
             let (err, _k_total, _err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate(
-                &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
-                b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, dt, tol, n, false,
+                &mut psi,
+                &h_x,
+                &h_p_diag,
+                a_s1_full,
+                b_s1_full,
+                a_s2_full,
+                b_s2_full,
+                a_s1_h1,
+                b_s1_h1,
+                a_s2_h1,
+                b_s2_h1,
+                a_s1_h2,
+                b_s1_h2,
+                a_s2_h2,
+                b_s2_h2,
+                dt,
+                tol,
+                n,
+                false,
+                h_x_abs_sum,
+                h_p_min,
+                h_p_max,
             )
             .expect("ok");
             err
@@ -2599,10 +2707,34 @@ mod tests {
         let (a_s1_h2, b_s1_h2) = (rng.signed(), rng.signed());
         let (a_s2_h2, b_s2_h2) = (rng.signed(), rng.signed());
 
+        let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
+        let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
+        let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
         let mut psi = psi0.clone();
         let (err, _k_total, _err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate(
-            &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
-            b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, 0.0, 1e-12, n, false,
+            &mut psi,
+            &h_x,
+            &h_p_diag,
+            a_s1_full,
+            b_s1_full,
+            a_s2_full,
+            b_s2_full,
+            a_s1_h1,
+            b_s1_h1,
+            a_s2_h1,
+            b_s2_h1,
+            a_s1_h2,
+            b_s1_h2,
+            a_s2_h2,
+            b_s2_h2,
+            0.0,
+            1e-12,
+            n,
+            false,
+            h_x_abs_sum,
+            h_p_min,
+            h_p_max,
         )
         .expect("ok");
 
@@ -2635,6 +2767,10 @@ mod tests {
         let dt = 0.25_f64;
         let tol = 1e-12_f64;
 
+        let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
+        let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
+        let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+
         // reference: cfm4_step_chebyshev を dt/2 で 2 回叩く.
         let (psi_mid_expected, _k_mid, _err_mid) = cfm4_step_chebyshev(
             &psi0,
@@ -2647,6 +2783,9 @@ mod tests {
             0.5 * dt,
             tol,
             n,
+            h_x_abs_sum,
+            h_p_min,
+            h_p_max,
         )
         .expect("ok");
         let (psi_expected, _k_h2, _err_h2) = cfm4_step_chebyshev(
@@ -2660,6 +2799,9 @@ mod tests {
             0.5 * dt,
             tol,
             n,
+            h_x_abs_sum,
+            h_p_min,
+            h_p_max,
         )
         .expect("ok");
 
@@ -2685,6 +2827,9 @@ mod tests {
             tol,
             n,
             false,
+            h_x_abs_sum,
+            h_p_min,
+            h_p_max,
         )
         .expect("ok");
 
