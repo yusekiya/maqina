@@ -153,10 +153,38 @@ $$
 無限和を有限 $K$ で打ち切ったときの末尾誤差は
 $$
 \|\,\text{truncation residual}\,\|
-\;\approx\; 2 \cdot |J_{K+1}(z)| \cdot \|\psi\|
+\;\lesssim\; 2 \cdot |J_{K+1}(z)| \cdot \|\psi\|
 $$
-($c_k$ の絶対値が支配項; Tal-Ezer & Kosloff 1984). したがって
-**「許容誤差 `tol` を切る最小 $K$」** を選びたい. 実装
+で押さえられる (Tal-Ezer & Kosloff 1984). 導出は **3 段** で完結:
+
+**(a) triangle inequality**: 残差ベクトルの L2 ノルムを項別に上から:
+$$
+\|R_K \psi\|_2 \;\le\; 2 \sum_{k > K} |J_k(z)| \cdot \|T_k(\tilde H) \psi\|_2.
+$$
+
+**(b) $T_k$ の minimax 性**: Step 2 の正規化で $\tilde H$ の固有値が $[-1, 1]$
+に収まり, スペクトル定理 + $\|T_k\|_{[-1, 1]} \le 1$ から
+$$
+\|T_k(\tilde H) \psi\|_2 \;\le\; \|\psi\|_2.
+$$
+
+**(c) Leibniz + 等比級数**: べき級数 $J_n(z) = \sum_q \frac{(-1)^q}{q!(n+q)!}(z/2)^{n+2q}$
+は $q$ について交代級数で, **Leibniz の交代級数評価** から
+$$
+|J_n(z)| \;\le\; \frac{(z/2)^n}{n!}.
+$$
+これを tail 和に代入. $k \ge z - 1$ で隣接比 $z/(2(k+1)) \le 1/2$ なので
+等比級数評価:
+$$
+\sum_{k > K} |J_k(z)| \;\le\; \sum_{k > K} \frac{(z/2)^k}{k!}
+\;\le\; 2 \cdot \frac{(z/2)^{K+1}}{(K+1)!}
+\;\approx\; 2 \, |J_{K+1}(z)|.
+$$
+
+**合成** (a) + (b) + (c) で $\|R_K \psi\|_2 \lesssim 2 \cdot |J_{K+1}(z)| \cdot \|\psi\|_2$.
+道具は **Leibniz の交代級数評価のみ** で完結 (Stirling 等の漸近形は不要).
+
+したがって **「許容誤差 `tol` を切る最小 $K$」** を選びたい. 実装
 (`determine_truncation`) は単純に
 $$
 K \;=\; \min \{\,k \ge 1 \;:\; |J_k(z)| < \mathrm{tol}/2 \,\}
