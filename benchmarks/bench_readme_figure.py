@@ -483,9 +483,11 @@ def main() -> None:
     parser.add_argument(
         "--chebyshev-atols",
         type=_parse_floats,
-        default=[1e-1, 1e-2, 1e-3, 1e-4],
+        default=[1e-2, 1e-3, 1e-4, 1e-5],
         help="cfm4_adaptive_richardson_chebyshev atol sweep (method=chebyshev のとき). "
-        "default は Krylov sweep より 2 桁 loose 側にシフト (accidental 高精度 #124).",
+        "default は Krylov sweep より loose 側にシフト (accidental 高精度 #124). "
+        "atol=1e-1 は実測で PI controller が発散し infidelity≈0.9 と失敗するため除外, "
+        "1e-5 は stiff scenario で machine precision 到達点の hedge として保持.",
     )
     parser.add_argument(
         "--qutip-tols",
