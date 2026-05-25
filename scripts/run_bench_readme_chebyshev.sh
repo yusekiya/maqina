@@ -3,16 +3,17 @@
 # コマンドで全実行する.
 #
 # 前提:
-#   1. Phase 1 (bench branch / kryanneal API) で
-#      benchmarks/data/0.8.0/bench_{non-stiff,stiff}.csv が収集済
-#      (variant=adaptive_multi / cfm4_multi / qutip).
-#   2. tools/migrate_existing_csv.sh で CSV を kinema 命名規約 (variant=
-#      krylov_adaptive / krylov_fixed) に変換済.
+#   1. 入力 npz (benchmarks/data/problem_*.npz / reference_*.npz) が main に
+#      cherry-pick 済 (Phase 1 で生成し bench branch から取り込んだもの).
+#   2. kinema build (uv run maturin develop --uv --release) 済.
 #
 # 構成: kinema cfm4_adaptive_richardson_chebyshev (multi-thread) で 2 scenario
 # 順次実行. 各 scenario は --chebyshev-atols [1e-1, 1e-2, 1e-3, 1e-4] sweep.
 # scenario 順次 (Step 1-2 と同方針, kinema multi が DRAM 帯域を使い切るため).
-# skip-existing が migration 後の既存 krylov_* / qutip 行を保持する.
+#
+# 出力 CSV (benchmarks/results/0.11.0/bench_<scenario>.csv) は Chebyshev cell
+# のみ. Krylov 0.8.0 は benchmarks/data/0.8.0/, QuTiP は benchmarks/data/qutip/
+# に独立して残り, plot 時に 3 dir を結合する.
 #
 # 実行 (repo root から起動する想定. log と pid も repo root に作られる):
 #   nohup bash scripts/run_bench_readme_chebyshev.sh \
@@ -37,7 +38,7 @@ SEED=20260518
 T_INT=10000   # ファイル名で使う整数 T (T=10000.0 を seed 名規約で 10000 と表記)
 
 PROBLEM_DIR="benchmarks/data"
-OUTPUT_DIR="benchmarks/data/0.8.0"
+OUTPUT_DIR="benchmarks/results/0.11.0"
 
 scenarios=(non-stiff stiff)
 
@@ -111,7 +112,11 @@ done
 echo ""
 echo "================================================================"
 echo "run_bench_readme_chebyshev.sh done: $(date)"
-echo "  output CSV: $OUTPUT_DIR/bench_<scenario>.csv"
-echo "    既存 Krylov / QuTiP 行 + 新規 Chebyshev 行が含まれる"
-echo "  next: plot_readme_figure.py で 4 系列散布図生成"
+echo "  output CSV: $OUTPUT_DIR/bench_<scenario>.csv (Chebyshev cells のみ)"
+echo "  next: 4 系列散布図生成 ="
+echo "    uv run python -m benchmarks.plot_readme_figure \\"
+echo "      --input-csv benchmarks/data/0.8.0/bench_*.csv \\"
+echo "                  benchmarks/data/qutip/bench_*.csv \\"
+echo "                  benchmarks/results/0.11.0/bench_*.csv \\"
+echo "      --version 0.11.0"
 echo "================================================================"
