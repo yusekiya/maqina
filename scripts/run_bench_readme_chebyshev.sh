@@ -12,7 +12,7 @@
 # scenario 順次 (Step 1-2 と同方針, kinema multi が DRAM 帯域を使い切るため).
 #
 # 出力 CSV (benchmarks/results/0.11.0/bench_<scenario>.csv) は Chebyshev cell
-# のみ. Krylov 0.8.0 は benchmarks/data/0.8.0/, QuTiP は benchmarks/data/qutip/
+# のみ. Krylov 0.8.0 は benchmarks/results/0.8.0/, QuTiP は benchmarks/results/qutip/
 # に独立して残り, plot 時に 3 dir を結合する.
 #
 # 実行 (repo root から起動する想定. log と pid も repo root に作られる):
@@ -115,8 +115,8 @@ echo "run_bench_readme_chebyshev.sh done: $(date)"
 echo "  output CSV: $OUTPUT_DIR/bench_<scenario>.csv (Chebyshev cells のみ)"
 echo "  next: 4 系列散布図生成 ="
 echo "    uv run python -m benchmarks.plot_readme_figure \\"
-echo "      --input-csv benchmarks/data/0.8.0/bench_*.csv \\"
-echo "                  benchmarks/data/qutip/bench_*.csv \\"
+echo "      --input-csv benchmarks/results/0.8.0/bench_*.csv \\"
+echo "                  benchmarks/results/qutip/bench_*.csv \\"
 echo "                  benchmarks/results/0.11.0/bench_*.csv \\"
 echo "      --version 0.11.0"
 echo "================================================================"

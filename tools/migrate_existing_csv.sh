@@ -16,13 +16,13 @@
 # 安全策: 各 CSV を `.csv.bak` として残し, 変換後に diff を表示する.
 #
 # 使用例 (CSV を含むディレクトリを引数で指定):
-#   bash tools/migrate_existing_csv.sh benchmarks/data/0.8.0/
+#   bash tools/migrate_existing_csv.sh benchmarks/results/0.8.0/
 
 set -euo pipefail
 
 if [ $# -ne 1 ]; then
     echo "Usage: $0 <csv_dir>" >&2
-    echo "  e.g.: $0 benchmarks/data/0.8.0/" >&2
+    echo "  e.g.: $0 benchmarks/results/0.8.0/" >&2
     exit 1
 fi
 

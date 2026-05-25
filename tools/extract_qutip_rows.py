@@ -15,8 +15,8 @@ version 別ディレクトリ (`0.8.0/`, `0.11.0/` 等) に重複保存するの
 使用例:
 
     uv run python tools/extract_qutip_rows.py \\
-        --input-dir benchmarks/data/0.8.0/ \\
-        --output-dir benchmarks/data/qutip/
+        --input-dir benchmarks/results/0.8.0/ \\
+        --output-dir benchmarks/results/qutip/
 
 冪等: 2 回目以降の実行では元 CSV に qutip 行が無いので no-op (`[skip]` ログ).
 """
@@ -66,13 +66,13 @@ def main() -> None:
         "--input-dir",
         type=Path,
         required=True,
-        help="bench_*.csv が並ぶ source dir (e.g. benchmarks/data/0.8.0/)",
+        help="bench_*.csv が並ぶ source dir (e.g. benchmarks/results/0.8.0/)",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
         required=True,
-        help="QuTiP 行の書出先 dir (e.g. benchmarks/data/qutip/). "
+        help="QuTiP 行の書出先 dir (e.g. benchmarks/results/qutip/). "
         "存在しなければ作成. 既存ファイルは上書き.",
     )
     args = parser.parse_args()

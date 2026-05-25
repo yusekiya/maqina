@@ -25,42 +25,36 @@ python/kinema/_rust*.dylib
 # benchmark 結果
 # 原則 `benchmarks/results/<timestamped-dir>/` 配下の生 CSV / markdown は
 # gitignore. ただし version finalize 時は `benchmarks/results/<X.Y.Z>/`
-# (semver そのまま, prefix なし) に **markdown のみ** をコミットして履歴を
-# 残す (CSV は引き続き ignore). semver 形式 (`*.*.*`) のディレクトリのみ
-# track 対象とし, timestamped dir (`20260512-153531` 等) や ad-hoc dir
+# (semver そのまま, prefix なし) に **markdown + README figure 用 CSV** を
+# コミットして履歴を残す. semver 形式 (`*.*.*`) のディレクトリのみ track
+# 対象とし, timestamped dir (`20260512-153531` 等) や ad-hoc dir
 # (`m_eff_loose_1` 等) は ignore のままに保つ. 詳細運用は
 # benchmarks/README.md と docs/conventions.md §2.3 を参照.
+#
+# README figure pipeline の例外 (詳細は benchmarks/README.md):
+#  - QuTiP CSV: 同一 hardware なら kinema version 非依存なので version
+#    dir の外 `benchmarks/results/qutip/` に切り出して共有
+#    (tools/extract_qutip_rows.py).
 /benchmarks/results/*
 !/benchmarks/results/*.*.*/
 /benchmarks/results/*.*.*/*
 !/benchmarks/results/*.*.*/*.md
+!/benchmarks/results/*.*.*/bench_*.csv
+!/benchmarks/results/qutip/
+/benchmarks/results/qutip/*
+!/benchmarks/results/qutip/bench_*.csv
 
 # tools/ 配下の検証スクリプト出力 (timestamped CSV / markdown)
 /tools/results/
 
-# README figure pipeline の artifact (詳細は benchmarks/README.md).
-#  - 問題 / 参照解 npz: 数学的に固定で kinema version に依存しないため
-#    `benchmarks/data/` **直下** に置き version 横断で reuse する.
-#    ファイル名 `problem_*.npz` / `reference_*.npz` のみ track.
-#  - bench CSV (Krylov 0.8.0 等): kinema version 固有の wall time なので
-#    `benchmarks/data/<X.Y.Z>/` (semver dir) 配下に置き track.
-#  - QuTiP CSV: 同一 hardware なら kinema version 非依存なので version
-#    dir の外 `benchmarks/data/qutip/` に切り出して共有
-#    (tools/extract_qutip_rows.py).
-#  - Chebyshev 0.11.0 以降の bench CSV: `benchmarks/results/<X.Y.Z>/` 配下
-#    (CLAUDE.md 規約準拠). bench_*.csv のみ track.
-#  - timestamp dir や ad-hoc 名 (`tmp_test` 等) はすべて ignore のまま.
+# README figure pipeline の input (詳細は benchmarks/README.md).
+# 問題 / 参照解 npz: 数学的に固定で kinema version に依存しないため
+# `benchmarks/data/` **直下** に置き version 横断で reuse する.
+# ファイル名 `problem_*.npz` / `reference_*.npz` のみ track.
+# 出力 (bench CSV) は version-finalize と同じ `benchmarks/results/<X.Y.Z>/` 配下.
 /benchmarks/data/*
 !/benchmarks/data/problem_*.npz
 !/benchmarks/data/reference_*.npz
-!/benchmarks/data/*.*.*/
-/benchmarks/data/*.*.*/*
-!/benchmarks/data/*.*.*/bench_*.csv
-!/benchmarks/data/qutip/
-/benchmarks/data/qutip/*
-!/benchmarks/data/qutip/bench_*.csv
-# benchmarks/results/<X.Y.Z>/bench_*.csv も track (既存 *.md whitelist と並列)
-!/benchmarks/results/*.*.*/bench_*.csv
 
 # BLAS 数値一致 artifact (test_blas_consistency.py が `blas_on.npz` /
 # `blas_off.npz` を書き込む). 詳細は同テストの docstring 参照.

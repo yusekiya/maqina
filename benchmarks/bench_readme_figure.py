@@ -55,7 +55,7 @@ uv run python -m benchmarks.bench_readme_figure --solver kinema \\
     --method chebyshev --variant-tag chebyshev_adaptive \\
     --problem-file   benchmarks/data/problem_non-stiff_n18_seed20260518.npz \\
     --reference-file benchmarks/data/reference_non-stiff_n18_T10000_seed20260518.npz \\
-    --output-dir     benchmarks/data/0.8.0/
+    --output-dir     benchmarks/results/0.11.0/
 ```
 """
 
@@ -498,9 +498,10 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("benchmarks/data"),
-        help="CSV 出力先 (default: benchmarks/data/). 本番は "
-        "benchmarks/data/<X.Y.Z>/ を明示指定する想定",
+        default=Path("benchmarks/results"),
+        help="CSV 出力先 (default: benchmarks/results/). 本番は "
+        "benchmarks/results/<X.Y.Z>/ を明示指定する想定 (CLAUDE.md / "
+        "conventions.md §2.3 規約準拠).",
     )
     parser.add_argument(
         "--solver",
