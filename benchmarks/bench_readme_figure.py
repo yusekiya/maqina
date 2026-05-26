@@ -177,6 +177,7 @@ def _run_kinema_adaptive_chebyshev(
     psi0: np.ndarray,
     T: float,
     atol: float,
+    propagator_tol: float | None = None,
 ) -> tuple[float, np.ndarray, int]:
     """``cfm4_adaptive_richardson_chebyshev`` (issue #122 Phase B) を ``atol`` で 1 回走らせる.
 
@@ -184,8 +185,12 @@ def _run_kinema_adaptive_chebyshev(
     3 項漸化に置き換わる. ``atol`` を緩めに設定しても accidental 高精度
     (CLAUDE.md #124) で infidelity が予想より小さくなる場合があるため,
     sweep は Krylov 版より loose 側 (atol ∈ [1e-1, 1e-4]) で振る運用.
+
+    issue #135: ``propagator_tol`` は Chebyshev 切り捨て次数 ``K_used`` を
+    決める許容誤差. ``None`` (default) で ``QuantumAnnealer`` 側の Chebyshev
+    default ``_KRYLOV_TOL_FIXED_DEFAULT`` (= 1e-12) 固定に resolve する.
     """
-    ann = QuantumAnnealer(prob, sched)
+    ann = QuantumAnnealer(prob, sched, propagator_tol=propagator_tol)
     t_start = time.perf_counter()
     res = ann.run(
         psi0,
@@ -254,6 +259,7 @@ def run_bench(
     solver: Literal["both", "kinema", "qutip"] = "both",
     method: Literal["adaptive", "cfm4", "chebyshev"] = "adaptive",
     variant_tag: str | None = None,
+    chebyshev_propagator_tol: float | None = None,
 ) -> Path:
     # 問題ファイル
     pdata = np.load(problem_file)
@@ -343,7 +349,23 @@ def run_bench(
         elif method == "chebyshev":
             knob_name = "atol"
             knob_sweep = list(chebyshev_atols)
-            runner = _run_kinema_adaptive_chebyshev
+
+            # issue #135: chebyshev_propagator_tol を closure で bake in.
+            def runner(
+                prob: IsingProblem,
+                sched: Schedule,
+                psi0: np.ndarray,
+                T: float,
+                atol: float,
+            ) -> tuple[float, np.ndarray, int]:
+                return _run_kinema_adaptive_chebyshev(
+                    prob,
+                    sched,
+                    psi0,
+                    T,
+                    atol,
+                    propagator_tol=chebyshev_propagator_tol,
+                )
         else:
             raise ValueError(f"unknown method: {method!r}")
 
@@ -490,6 +512,15 @@ def main() -> None:
         "1e-5 は stiff scenario で machine precision 到達点の hedge として保持.",
     )
     parser.add_argument(
+        "--propagator-tol",
+        type=float,
+        default=None,
+        help="cfm4_adaptive_richardson_chebyshev の propagator_tol (Chebyshev "
+        "切り捨て次数 K_used を決める許容誤差, issue #135 で krylov_tol から rename). "
+        "None (default) で QuantumAnnealer 側の Chebyshev default "
+        "(_KRYLOV_TOL_FIXED_DEFAULT = 1e-12) を使う. method=chebyshev でのみ意味を持つ.",
+    )
+    parser.add_argument(
         "--qutip-tols",
         type=_parse_floats,
         default=[1e-3, 1e-5, 1e-7, 1e-9],
@@ -559,6 +590,7 @@ def main() -> None:
         solver=args.solver,
         method=args.method,
         variant_tag=args.variant_tag,
+        chebyshev_propagator_tol=args.propagator_tol,
     )
 
 

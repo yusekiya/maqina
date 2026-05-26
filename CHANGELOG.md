@@ -11,6 +11,60 @@
   (`0.N.0` → `0.N+1.0`) で破壊的変更を吸収する (`docs/conventions.md`
   §2 参照).
 
+## 0.12.0 - 2026-05-26 — `krylov_tol` → `propagator_tol` rename + Chebyshev default 仕様変更 (issue #135)
+
+`cfm4_adaptive_richardson_chebyshev` method の精度パラメータを 2 軸で整理:
+parameter 名の semantic 統一 (Krylov 部分空間概念は Chebyshev には無いので
+misleading だった) + Chebyshev variant の default 変更 (atol↓ で精度が
+非単調に劣化する auto-coupling から, atol-vs-infidelity の monotonicity を
+担保する固定値 1e-12 に変更).
+
+### Breaking
+
+- **`QuantumAnnealer(..., krylov_tol=...)` → `propagator_tol=...`**: 公開
+  API シグネチャ rename. deprecation alias は残さない (旧 kwarg は
+  ``TypeError``). 影響: `QuantumAnnealer` / `AnnealingSimulator` の
+  constructor 引数, attribute (`self.krylov_tol` → `self.propagator_tol`),
+  関連 docstring. `tests/test_chebyshev.py` の
+  `test_old_krylov_tol_kwarg_raises_typeerror` で contract を保証.
+- **Chebyshev variant の `propagator_tol = None` default 変更**:
+  `cfm4_adaptive_richardson_chebyshev` 経路で `propagator_tol = None`
+  (未指定) のとき, 旧挙動 `tol_step · _KRYLOV_TOL_ATOL_RATIO` (auto-coupling)
+  から **固定値 `_KRYLOV_TOL_FIXED_DEFAULT` (= 1e-12)** に変更. 旧挙動を
+  再現したい場合は `propagator_tol=tol_step * 1e-3` を明示渡し. Lanczos
+  variant (`cfm4_adaptive_richardson_krylov`) は auto-coupling 維持
+  (Lanczos a posteriori 早期打切は atol scaling 連動が望ましいため).
+- **`benchmarks/bench_qutip_large.py --krylov-tols` → `--propagator-tols`**:
+  CLI flag rename. parse 関数も `_parse_krylov_tol_list` →
+  `_parse_propagator_tol_list`. 共通 sweep 軸として Lanczos / Chebyshev
+  両 method で機能する.
+
+### Added
+
+- `benchmarks/bench_readme_figure.py` に `--propagator-tol` flag 追加
+  (default `None` → Chebyshev は 1e-12 固定). `scripts/run_bench_readme_chebyshev.sh`
+  も `CHEBYSHEV_PROPAGATOR_TOL` shell 変数で明示 pass.
+
+### Tests
+
+- `tests/test_chebyshev.py::test_chebyshev_default_propagator_tol_is_fixed_1e_minus_12`:
+  atol を 2 桁振っても (1e-6 vs 1e-8) Chebyshev K_used 平均の変動が 20% 未満
+  であることで auto-coupling されていないことを確認.
+- `tests/test_chebyshev.py::test_old_krylov_tol_kwarg_raises_typeerror`:
+  旧 `krylov_tol` kwarg で `TypeError` (alias 残さない契約).
+
+### Motivation
+
+PR #134 (README figure pipeline) で `atol = 1e-5` のとき
+`atol = 1e-4` (machine precision 到達) より infidelity が悪化する非単調性
+を実測 (PI controller が小 dt を選び round-off accumulation, per-step
+Chebyshev 打切は既に machine precision floor なので atol tightening が
+無効). 固定 1e-12 で K_used を atol 非依存にし, Pareto curve の解釈性を
+上げる. K_used 増は non-stiff +16% / stiff +3.7% (R·dt 別の Bessel
+減衰見積もり) と限定的.
+
+詳細は `docs/design/05-3-propagator.md` "Chebyshev variant" 節.
+
 ## 0.11.0 - 2026-05-23 — Chebyshev variant 統合完了 (Phase B finalize) + パッケージリブランド
 
 Phase B 本体 (#122) で導入した `cfm4_adaptive_richardson_chebyshev` 経路を

@@ -69,20 +69,24 @@ class AnnealingSimulator:
         Lanczos / Krylov 部分空間次元. ``m >= 1``. default ``24``.
         ``trotter`` / ``trotter_suzuki4`` / ``cfm4_adaptive_richardson_chebyshev``
         経路では無視される (Lanczos 非使用; Chebyshev は K_used 動的決定).
-    krylov_tol
-        **Krylov 近似の許容誤差** (issue #98 / Phase 8 で意味再定義). 各
-        Lanczos iter で a posteriori 推定子
-        ``β · |c_last| · |dt| / m < krylov_tol`` を判定して部分空間を切る.
-        旧仕様の β 単体閾値ではない. 詳細は ``QuantumAnnealer.krylov_tol``
-        の docstring 参照. ``cfm4_adaptive_richardson_chebyshev`` 経路では
-        ``chebyshev_tol`` として機能し, Chebyshev 切り捨て次数 ``K_used`` を
-        動的決定する許容誤差になる.
+    propagator_tol
+        **短時間プロパゲータ U(dt) の per-step 許容誤差** (issue #135 で
+        ``krylov_tol`` から rename). Lanczos 経路では Krylov 近似の許容誤差
+        (a posteriori 推定子 ``est = β · |c_last| · |dt| / m`` を
+        ``est < propagator_tol`` で切る; issue #98 / Phase 8). Chebyshev
+        経路では Chebyshev 切り捨て次数 ``K_used`` を決める許容誤差.
+        詳細は ``QuantumAnnealer.propagator_tol`` の docstring 参照.
 
         ``None`` (default) のとき経路ごとに自動解決する (QuantumAnnealer と
         同じポリシー):
 
-        * adaptive 経路 (Krylov / Chebyshev 両方): ``effective = tol_step · 1e-3``
-          (``tol_step`` は ``atol`` で決まる; default ``atol=1e-8`` → ``1e-11``).
+        * adaptive Lanczos (``cfm4_adaptive_richardson_krylov``):
+          ``effective = tol_step · 1e-3`` (``tol_step`` は ``atol`` で決まる;
+          default ``atol=1e-8`` → ``1e-11``). atol scaling 連動.
+        * adaptive Chebyshev (``cfm4_adaptive_richardson_chebyshev``):
+          **固定 ``1e-12``** (issue #135 で auto-coupling から変更).
+          Chebyshev は K_used の対数依存で auto-coupling の動機が弱く,
+          固定値で atol-vs-infidelity の monotonicity を確保する.
         * 固定 dt 経路: ``1e-12`` (static fallback).
     atol
         adaptive 経路 (``cfm4_adaptive_richardson_krylov`` /
@@ -90,13 +94,13 @@ class AnnealingSimulator:
         誤差閾値 ``tol_step``. ``None`` (default) で driver default ``1e-8``
         を使う. 固定 dt method で指定すると ``ValueError``.
 
-        **Note (Chebyshev variant の atol 振舞い, issue #124)**: Chebyshev
-        では ``atol`` は **upper bound** として機能し, 実際の精度がそれより
-        良くなる場合がある (K_used を ``chebyshev_tol`` (auto-resolve で
-        ``tol_step · 1e-3``) から動的決定するため per-stage 誤差が ``tol_step``
-        より遥かに小さくなり, PI controller が見る誤差は Magnus 4 次成分のみ
-        になる). 詳細は ``QuantumAnnealer.run`` の ``atol`` docstring 注 +
-        ``docs/design/05-3-propagator.md`` "Chebyshev variant" 節.
+        **Note (Chebyshev variant の atol 振舞い, issue #124 / #135)**:
+        Chebyshev では ``atol`` は **upper bound** として機能し, 実際の精度
+        がそれより良くなる場合がある (K_used を ``propagator_tol`` (default
+        ``1e-12`` 固定, issue #135) から動的決定するため per-stage 誤差が
+        ``tol_step`` より遥かに小さくなり, PI controller が見る誤差は Magnus
+        4 次成分のみになる). 詳細は ``QuantumAnnealer.run`` の ``atol``
+        docstring 注 + ``docs/design/05-3-propagator.md`` "Chebyshev variant" 節.
     dt_init
         adaptive 経路専用. ``advance_to`` 時の初期 dt 提案 (driver の
         ``dt0`` に map). ``None`` (default) のとき ``advance_to`` の各
@@ -121,7 +125,7 @@ class AnnealingSimulator:
     NotImplementedError
         ``method`` がサポート対象外の場合.
     ValueError
-        ``m`` / ``krylov_tol`` / ``atol`` / ``dt_init`` / ``dt_max`` /
+        ``m`` / ``propagator_tol`` / ``atol`` / ``dt_init`` / ``dt_max`` /
         ``m_max`` が範囲外, ``psi0`` の shape / dtype / 非正規化,
         固定 dt method に adaptive 専用パラメータを渡した場合.
 
@@ -154,7 +158,7 @@ class AnnealingSimulator:
     schedule: Any
     _method: Any
     _m: Any
-    _krylov_tol_user: Any
+    _propagator_tol_user: Any
     _atol: Any
     _dt_init: Any
     _dt_max: Any
@@ -163,7 +167,7 @@ class AnnealingSimulator:
     _psi: Any
     _n_matvec: Any
 
-    def __init__(self, problem: IsingProblem, schedule: Schedule, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', m: int=24, krylov_tol: float | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> None:
+    def __init__(self, problem: IsingProblem, schedule: Schedule, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', m: int=24, propagator_tol: float | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> None:
         ...
 
     @property

@@ -130,7 +130,7 @@ class QuantumAnnealer:
         schedule: Schedule,
         *,
         m: int = 24,                   # Lanczos 部分空間次元 (旧 krylov_dim)
-        krylov_tol: float = 1e-12,
+        propagator_tol: float | None = None,  # 旧 krylov_tol (issue #135 rename)
     ): ...
 
     def run(
@@ -185,8 +185,11 @@ PI controller, §5.3) を追加. それ以外は `NotImplementedError`.
   各 `Observable.diag` 長が `2**n` と整合.
 
 `method="trotter"` / `method="trotter_suzuki4"` は Lanczos を使わないため,
-コンストラクタ引数 `m` / `krylov_tol` は無視される (`"m2"` / `"cfm4"` /
-`"cfm4_adaptive_richardson_krylov"` 経路でのみ意味を持つ). adaptive 経路の
+コンストラクタ引数 `m` / `propagator_tol` は無視される (`"m2"` / `"cfm4"` /
+`"cfm4_adaptive_richardson_krylov"` 経路でのみ意味を持つ).
+`"cfm4_adaptive_richardson_chebyshev"` 経路では `m` は使われず,
+`propagator_tol` は Chebyshev 切り捨て次数 `K_used` を決める許容誤差として
+機能する (issue #135 で `krylov_tol` から rename, semantic 統一). adaptive 経路の
 `atol` / `dt_init` は `method="cfm4_adaptive_richardson_krylov"` でのみ参照され,
 固定 dt 経路では無視される.
 
@@ -276,7 +279,7 @@ class AnnealingSimulator:
             "m2", "trotter", "trotter_suzuki4", "cfm4", "cfm4_adaptive_richardson_krylov"
         ] = "cfm4",
         m: int = 24,                  # Lanczos 部分空間次元 (QuantumAnnealer と統一)
-        krylov_tol: float | None = None,
+        propagator_tol: float | None = None,  # 旧 krylov_tol (issue #135 rename)
         # ↓ adaptive (`cfm4_adaptive_richardson_krylov`) 専用; 固定 dt method で
         #   非 None 指定すると ValueError
         atol: float | None = None,
@@ -313,7 +316,7 @@ class AnnealingSimulator:
 
 `QuantumAnnealer.create_simulator(psi0, t0, *, method=..., atol=..., dt_init=...,
 dt_max=..., m_max=...)` は QuantumAnnealer インスタンスから派生させる簡便
-ファクトリで, `m` / `krylov_tol` は QuantumAnnealer コンストラクタの値を
+ファクトリで, `m` / `propagator_tol` は QuantumAnnealer コンストラクタの値を
 そのまま引き継ぐ (Simulator 側で異なる値を使いたい場合は `AnnealingSimulator`
 を直接構築する).
 

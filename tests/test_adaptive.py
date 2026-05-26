@@ -871,13 +871,14 @@ def test_adaptive_richardson_save_tlist_records_states() -> None:
     assert obs_hist["M_z"].shape == (4,)
 
 
-def test_krylov_tol_none_resolves_to_atol_ratio_bit_exact() -> None:
-    """``krylov_tol=None`` (issue #54 で導入) と
-    ``krylov_tol = atol · _KRYLOV_TOL_ATOL_RATIO`` を明示的に渡す経路で
+def test_propagator_tol_none_resolves_to_atol_ratio_bit_exact() -> None:
+    """``propagator_tol=None`` (issue #54 で導入, issue #135 で rename) と
+    ``propagator_tol = atol · _KRYLOV_TOL_ATOL_RATIO`` を明示的に渡す経路で
     driver 出力 (psi_final / n_steps_actual / n_matvec) がビット一致する.
 
-    facade None → ``effective_krylov_tol = tol_step · 1e-3`` の resolution
-    が driver の ``krylov_tol`` に正しく流れていることの bit-exact 確認.
+    facade None → ``effective_propagator_tol = tol_step · 1e-3`` の resolution
+    が driver の ``krylov_tol`` に正しく流れていることの bit-exact 確認 (Lanczos
+    variant の auto-coupling 経路).
     """
     from kinema import QuantumAnnealer
     from kinema.annealer import _KRYLOV_TOL_ATOL_RATIO
@@ -891,7 +892,7 @@ def test_krylov_tol_none_resolves_to_atol_ratio_bit_exact() -> None:
 
     expected_resolved = atol * _KRYLOV_TOL_ATOL_RATIO  # = 1e-11
 
-    ann_none = QuantumAnnealer(prob, sched)  # krylov_tol=None default
+    ann_none = QuantumAnnealer(prob, sched)  # propagator_tol=None default
     res_none = ann_none.run(
         psi0,
         0.0,
@@ -900,7 +901,7 @@ def test_krylov_tol_none_resolves_to_atol_ratio_bit_exact() -> None:
         atol=atol,
     )
 
-    ann_explicit = QuantumAnnealer(prob, sched, krylov_tol=expected_resolved)
+    ann_explicit = QuantumAnnealer(prob, sched, propagator_tol=expected_resolved)
     res_explicit = ann_explicit.run(
         psi0,
         0.0,
@@ -914,15 +915,15 @@ def test_krylov_tol_none_resolves_to_atol_ratio_bit_exact() -> None:
     assert res_none.n_matvec == res_explicit.n_matvec
 
 
-def test_krylov_tol_none_vs_explicit_1e12_same_accuracy() -> None:
-    """同一問題で ``krylov_tol=None`` (新 default, atol·1e-3 = 1e-11 に解決)
-    と ``krylov_tol=1e-12`` (旧 default) の終端 ψ が ``rel < 1e-9`` 程度で
-    一致する (issue #54 acceptance: 新 default が旧 default の accuracy を
-    維持していることの担保).
+def test_propagator_tol_none_vs_explicit_1e12_same_accuracy() -> None:
+    """同一問題で ``propagator_tol=None`` (Lanczos variant の新 default,
+    atol·1e-3 = 1e-11 に解決) と ``propagator_tol=1e-12`` (旧 default) の
+    終端 ψ が ``rel < 1e-9`` 程度で一致する (issue #54 acceptance: 新 default
+    が旧 default の accuracy を維持していることの担保).
 
-    精度差の上界は β_k 早期打切による Lanczos 内打切誤差の差で支配される.
-    `1e-11` でも atol=1e-8 に対し 3 桁マージンが残るため終端 ψ は機械精度
-    近くで一致する.
+    精度差の上界は a posteriori 早期打切による Lanczos 内打切誤差の差で
+    支配される. `1e-11` でも atol=1e-8 に対し 3 桁マージンが残るため終端 ψ
+    は機械精度近くで一致する.
     """
     from kinema import QuantumAnnealer
 
@@ -933,7 +934,7 @@ def test_krylov_tol_none_vs_explicit_1e12_same_accuracy() -> None:
     sched = Schedule.linear(T=T)
     psi0 = uniform_superposition(n)
 
-    ann_default = QuantumAnnealer(prob, sched)  # krylov_tol=None → 1e-11
+    ann_default = QuantumAnnealer(prob, sched)  # propagator_tol=None → 1e-11
     res_default = ann_default.run(
         psi0,
         0.0,
@@ -942,7 +943,7 @@ def test_krylov_tol_none_vs_explicit_1e12_same_accuracy() -> None:
         atol=atol,
     )
 
-    ann_tight = QuantumAnnealer(prob, sched, krylov_tol=1e-12)
+    ann_tight = QuantumAnnealer(prob, sched, propagator_tol=1e-12)
     res_tight = ann_tight.run(
         psi0,
         0.0,
@@ -956,7 +957,7 @@ def test_krylov_tol_none_vs_explicit_1e12_same_accuracy() -> None:
         / max(np.linalg.norm(res_tight.psi_final), 1.0)
     )
     assert rel < 1e-9, (
-        f"krylov_tol=None (1e-11) vs 1e-12 mismatch: rel={rel} (expected < 1e-9)"
+        f"propagator_tol=None (1e-11) vs 1e-12 mismatch: rel={rel} (expected < 1e-9)"
     )
 
 

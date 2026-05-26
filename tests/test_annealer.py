@@ -413,7 +413,7 @@ def test_run_validates_psi0_shape() -> None:
 
 
 def test_constructor_validates_m_and_tol() -> None:
-    """``m < 1`` / ``krylov_tol < 0`` で ``ValueError``."""
+    """``m < 1`` / ``propagator_tol < 0`` で ``ValueError``."""
     n = 3
     prob = IsingProblem(
         n=n,
@@ -423,8 +423,8 @@ def test_constructor_validates_m_and_tol() -> None:
     sched = Schedule.linear(T=1.0)
     with pytest.raises(ValueError, match="m must"):
         QuantumAnnealer(prob, sched, m=0)
-    with pytest.raises(ValueError, match="krylov_tol"):
-        QuantumAnnealer(prob, sched, krylov_tol=-1e-12)
+    with pytest.raises(ValueError, match="propagator_tol"):
+        QuantumAnnealer(prob, sched, propagator_tol=-1e-12)
 
 
 # ---------------------------------------------------------------------------
@@ -485,8 +485,8 @@ def test_create_simulator_supports_same_methods_as_run() -> None:
         ann.create_simulator(psi0, 0.0, method="bogus")  # type: ignore[arg-type]
 
 
-def test_create_simulator_inherits_m_and_krylov_tol_from_annealer() -> None:
-    """``create_simulator`` は QuantumAnnealer の ``m`` / ``krylov_tol``
+def test_create_simulator_inherits_m_and_propagator_tol_from_annealer() -> None:
+    """``create_simulator`` は QuantumAnnealer の ``m`` / ``propagator_tol``
     を Simulator に引き継ぐ."""
     n = 3
     prob = IsingProblem(
@@ -496,7 +496,7 @@ def test_create_simulator_inherits_m_and_krylov_tol_from_annealer() -> None:
     )
     sched = Schedule.linear(T=1.0)
     psi0 = uniform_superposition(n)
-    ann = QuantumAnnealer(prob, sched, m=16, krylov_tol=1e-10)
+    ann = QuantumAnnealer(prob, sched, m=16, propagator_tol=1e-10)
 
     sim = ann.create_simulator(psi0, 0.0, method="cfm4")
     # 内部値の検証は public API 経由では難しいが, step を 1 回呼んで

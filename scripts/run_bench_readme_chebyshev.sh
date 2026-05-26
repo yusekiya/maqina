@@ -45,6 +45,11 @@ OUTPUT_DIR="benchmarks/results/0.11.0"
 # 使われるので, mismatch が起きないようにする.
 CHEBYSHEV_ATOLS="1e-2,1e-3,1e-4,1e-5"
 
+# Chebyshev variant の propagator_tol (issue #135 で krylov_tol から rename).
+# 1e-12 は QuantumAnnealer 側 default (_KRYLOV_TOL_FIXED_DEFAULT) と同値だが,
+# bench で「default に依存していること」を明示するため shell 変数化して渡す.
+CHEBYSHEV_PROPAGATOR_TOL="1e-12"
+
 scenarios=(non-stiff stiff)
 
 # 各 scenario について必要な npz が揃っているか確認
@@ -76,6 +81,7 @@ echo "  N=$N, T=$T_INT, seed=$SEED"
 echo "  scenarios: ${scenarios[*]}"
 echo "  method: cfm4_adaptive_richardson_chebyshev (multi-thread)"
 echo "  atol sweep: [${CHEBYSHEV_ATOLS}]"
+echo "  propagator_tol: ${CHEBYSHEV_PROPAGATOR_TOL} (issue #135 default; 固定)"
 echo "================================================================"
 
 # ----------------------------------------------------------------------------
@@ -97,6 +103,7 @@ run_chebyshev_cell() {
         --method chebyshev \
         --variant-tag chebyshev_adaptive \
         --chebyshev-atols "$CHEBYSHEV_ATOLS" \
+        --propagator-tol "$CHEBYSHEV_PROPAGATOR_TOL" \
         --problem-file   "$problem_npz" \
         --reference-file "$reference_npz" \
         --output-dir     "$OUTPUT_DIR"

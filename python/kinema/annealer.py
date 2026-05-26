@@ -10,7 +10,7 @@
 step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Observable``
 で測定して続きを発展させる workflow 用. ``QuantumAnnealer.create_simulator``
 で生成するのが簡便 (現 instance の ``problem`` / ``schedule`` / ``m`` /
-``krylov_tol`` を引き継ぐ).
+``propagator_tol`` を引き継ぐ).
 
 仕様 (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase B)
 ------------------------------------------------------
@@ -52,8 +52,8 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
   scope). step-doubling Richardson 推定子が Lanczos breakdown も embedded
   error として検出するため, ``m_max=16`` 等まで下げて per-step matvec を
   30% 程度削減しても fail-safe で動作する (本来 PI controller が dt を
-  絞ることで精度を担保). β_k < ``krylov_tol`` で Lanczos 早期打切が
-  既存実装で効くため, ``m_eff ≤ m_max`` の運用. ``m_eff`` 累積統計の
+  絞ることで精度を担保). a posteriori 推定子 ``est < propagator_tol``
+  (Lanczos) で早期打切が効くため, ``m_eff ≤ m_max`` の運用. ``m_eff`` 累積統計の
   ``QuantumResult`` 露出は Rust API 拡張 (``lanczos_propagate`` の戻り値
   追加) が必要なため本フェーズでは保留 (``docs/design/05-3-propagator.md`` §5.3 参照).
 
@@ -62,12 +62,12 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
 ``evolve_schedule_cfm4`` (固定 dt driver) / ``evolve_schedule_adaptive_richardson``
 (adaptive driver) を内部で呼ぶ薄いラッパ. 入力検証 (shape / dtype /
 L2-normalize) を本クラスで集中させ, krylov 層は数値計算に専念させる.
-``m`` / ``krylov_tol`` は ``"m2"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"``
+``m`` / ``propagator_tol`` は ``"m2"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"``
 経路でのみ意味を持ち, ``"trotter"`` / ``"trotter_suzuki4"`` 経路は Lanczos を
 使わないため両パラメータは無視される. ``"cfm4_adaptive_richardson_chebyshev"``
-経路では ``m`` (Lanczos 部分空間次元) は使われず, 代わりに
-``krylov_tol`` が ``chebyshev_tol`` (Chebyshev 切り捨て次数 K_used を決める
-許容誤差) として機能する.
+経路では ``m`` (Lanczos 部分空間次元) は使われず, ``propagator_tol`` は
+Chebyshev 切り捨て次数 ``K_used`` を決める許容誤差として機能する
+(issue #135 で ``krylov_tol`` から rename, semantic 統一).
 """
 
 from __future__ import annotations
@@ -120,44 +120,61 @@ class QuantumAnnealer:
     m
         Lanczos / Krylov 部分空間次元の既定値 (``run`` 内で使用).
         ``m >= 1``. 既定 ``24``.
-    krylov_tol
-        **Krylov 近似の許容誤差** (issue #98 / Phase 8 で意味再定義). 各
-        Lanczos iter ``k`` で Hochbruck-Lubich 1997 の a posteriori 推定子
-        ``est = β_k · |c_last| · |dt| / (k+1)`` を計算し,
-        ``est < krylov_tol`` で部分空間を切る (``‖ψ‖ = 1`` の Lanczos 内部
-        規約). 旧仕様 (``β_k < krylov_tol`` の β 単体閾値) ではない.
+    propagator_tol
+        **短時間プロパゲータ U(dt) の per-step 許容誤差** (issue #135 で
+        ``krylov_tol`` から rename, semantic 統一). method ごとに作用先が
+        異なるが, いずれも outer の ``atol`` (PI controller の per-step
+        累積誤差 bound) より内側の inner tol として機能する.
 
-        ``None`` (既定) のとき経路ごとに自動解決する (issue #54):
+        * Lanczos 経路 (``m2`` / ``cfm4`` / ``cfm4_adaptive_richardson_krylov``):
+          Krylov 近似の許容誤差 (issue #98 / Phase 8). 各 Lanczos iter ``k``
+          で Hochbruck-Lubich 1997 の a posteriori 推定子
+          ``est = β_k · |c_last| · |dt| / (k+1)`` を計算し,
+          ``est < propagator_tol`` で部分空間を切る (``‖ψ‖ = 1`` の Lanczos
+          内部規約). 旧仕様 (``β_k < tol`` の β 単体閾値) ではない.
+        * Chebyshev 経路 (``cfm4_adaptive_richardson_chebyshev``): Chebyshev
+          切り捨て次数 ``K_used`` を決める許容誤差. Bessel ``|J_K(R·dt)|``
+          の指数的減衰で ``K_used`` を動的決定する (詳細は
+          ``docs/design/05-3-propagator.md`` "Chebyshev variant" 節).
 
-        * ``cfm4_adaptive_richardson_krylov`` (adaptive Richardson):
+        ``None`` (既定) のとき経路ごとに自動解決する:
+
+        * ``cfm4_adaptive_richardson_krylov`` (adaptive Richardson, Lanczos):
           ``run`` 時の ``atol`` (実効 ``tol_step``) に対し
-          ``effective_krylov_tol = tol_step · _KRYLOV_TOL_ATOL_RATIO``
-          (既定 ``1e-3``). atol=1e-8 default で ``1e-11``.
+          ``effective_propagator_tol = tol_step · _KRYLOV_TOL_ATOL_RATIO``
+          (既定 ``1e-3``). atol=1e-8 default で ``1e-11``. Lanczos a
+          posteriori 早期打切は atol scaling で連動するのが望ましいため
+          auto-coupling を維持.
         * ``cfm4_adaptive_richardson_chebyshev`` (adaptive Richardson,
-          Chebyshev variant): 同じ式で ``chebyshev_tol`` を auto-resolve する.
-          ``chebyshev_tol`` は Chebyshev 切り捨て次数 ``K_used`` を決める
-          許容誤差 (詳細は ``docs/design/05-3-propagator.md`` "Chebyshev
-          variant" 節). atol との関係については本 docstring の ``atol`` 項
-          "upper bound" 注を参照.
+          Chebyshev variant): **固定値 ``_KRYLOV_TOL_FIXED_DEFAULT``
+          (= ``1e-12``)** (issue #135 で auto-coupling から変更). Chebyshev
+          は ``K_used ~ R·dt + log(1/propagator_tol)`` の対数依存で
+          propagator_tol を atol に連動させる動機が弱く, auto-coupling だと
+          atol↓ で K_used が単調に増えず machine precision 到達後は逆に
+          round-off accumulation で精度が悪化する非単調性が発生する.
+          固定 ``1e-12`` で atol-vs-infidelity の monotonicity を確保し
+          Pareto curve の解釈性を上げる.
         * 固定 dt 経路 (``m2`` / ``cfm4``): ``atol`` を取らないため
           ``1e-12`` フォールバック (``_KRYLOV_TOL_FIXED_DEFAULT``).
 
         float を明示するとどの経路でも一律に上書きする.
 
-        **設計方針 (Phase 8)**: a posteriori 判定式 ``β · |c| · |dt| / m``
-        は TFIM 等の実用問題サイズでも ``|c|`` の幾何級数減衰により早期打切
-        が実際に発火する (Phase 7 までの β 単体閾値では発火しなかった).
-        default (atol 連動 = 1e-11) で **m_eff < m_max が自然に起こる**
-        設定となり, Pareto win に直結する. 旧 ``1e-12`` 固定挙動 (= m_eff
-        = m_max 固定) を再現したいときは ``krylov_tol=1e-16`` 等の極小値を
-        渡す (推奨されない).
+        **設計方針 (Lanczos, Phase 8)**: a posteriori 判定式
+        ``β · |c| · |dt| / m`` は TFIM 等の実用問題サイズでも ``|c|`` の
+        幾何級数減衰により早期打切が実際に発火する (Phase 7 までの β 単体
+        閾値では発火しなかった). default (atol 連動 = 1e-11) で **m_eff <
+        m_max が自然に起こる** 設定となり, Pareto win に直結する. 旧
+        ``1e-12`` 固定挙動 (= m_eff = m_max 固定) を再現したいときは
+        ``propagator_tol=1e-16`` 等の極小値を渡す (推奨されない).
 
-        詳細は ``docs/design/05-2-lanczos.md`` の "a posteriori 早期打切" 節を参照.
+        詳細は ``docs/design/05-2-lanczos.md`` の "a posteriori 早期打切"
+        節 (Lanczos) と ``docs/design/05-3-propagator.md`` "Chebyshev
+        variant" 節 (Chebyshev) を参照.
 
     Raises
     ------
     ValueError
-        ``m < 1`` または ``krylov_tol`` が負値の場合.
+        ``m < 1`` または ``propagator_tol`` が負値の場合.
     """
 
     def __init__(
@@ -166,18 +183,20 @@ class QuantumAnnealer:
         schedule: Schedule,
         *,
         m: int = 24,
-        krylov_tol: float | None = None,
+        propagator_tol: float | None = None,
     ) -> None:
         if not isinstance(m, (int, np.integer)) or m < 1:
             raise ValueError(f"m must be a positive integer, got {m!r}")
-        if krylov_tol is not None and krylov_tol < 0.0:
-            raise ValueError(f"krylov_tol must be >= 0 or None, got {krylov_tol!r}")
+        if propagator_tol is not None and propagator_tol < 0.0:
+            raise ValueError(
+                f"propagator_tol must be >= 0 or None, got {propagator_tol!r}"
+            )
 
         self.problem: IsingProblem = problem
         self.schedule: Schedule = schedule
         self.m: int = int(m)
-        self.krylov_tol: float | None = (
-            float(krylov_tol) if krylov_tol is not None else None
+        self.propagator_tol: float | None = (
+            float(propagator_tol) if propagator_tol is not None else None
         )
 
     def run(
@@ -224,11 +243,11 @@ class QuantumAnnealer:
             を Chebyshev 3 項漸化に差し替えた variant). default を Chebyshev に
             しているのは issue #124 の判断による (N=18 で Lanczos 比 5.49× wall
             高速の Pareto win). Trotter 系経路は Lanczos を呼ばないため
-            ``m`` / ``krylov_tol`` は無視される. ``"cfm4"`` /
+            ``m`` / ``propagator_tol`` は無視される. ``"cfm4"`` /
             ``"cfm4_adaptive_richardson_krylov"`` は M2 と同じく Lanczos を
-            介すので ``m`` / ``krylov_tol`` が有効. Chebyshev variant では
-            ``m`` は使われず, ``krylov_tol`` が ``chebyshev_tol`` として機能
-            する.
+            介すので ``m`` / ``propagator_tol`` が有効. Chebyshev variant では
+            ``m`` は使われず, ``propagator_tol`` が Chebyshev 切り捨て次数
+            ``K_used`` を決める許容誤差として機能する.
         n_steps
             固定 dt 経路の step 数 (``n_steps >= 1``). 等間隔 ``dt =
             (t1 - t0) / n_steps`` で進める. adaptive 経路では渡さない
@@ -242,19 +261,22 @@ class QuantumAnnealer:
             テストの fidelity ``1 - 1e-6`` 要件を安全マージン付きで満たす
             ことを優先した値. 実用上 ``atol=1e-6`` / ``1e-5`` でも多くの
             応用で許容範囲で, その場合 PI step 数が減るうえ
-            ``krylov_tol = None`` ならば Lanczos 早期打切 (`atol · 1e-3`)
-            も自動的に緩んで二重に高速化される. 詳細は
-            ``docs/design/05-3-propagator.md`` §5.3 PI controller defaults 表のノート.
+            ``propagator_tol = None`` ならば Lanczos a posteriori 早期打切
+            (Krylov: ``atol · 1e-3``) も自動的に緩んで二重に高速化される
+            (Chebyshev variant では ``propagator_tol`` は固定 1e-12 default
+            なので連動しない, issue #135). 詳細は ``docs/design/05-3-propagator.md``
+            §5.3 PI controller defaults 表のノート.
 
-            **Note (Chebyshev variant の atol 振舞い, issue #124)**:
+            **Note (Chebyshev variant の atol 振舞い, issue #124 / #135)**:
             ``method="cfm4_adaptive_richardson_chebyshev"`` では ``atol`` は
             実際の精度ではなく **upper bound** として機能する. Chebyshev は
-            切り捨て次数 ``K_used`` を ``chebyshev_tol`` (auto-resolve で
-            ``tol_step · 1e-3``) から動的決定するため, ``tol_step`` より遥かに
-            小さい per-stage 誤差を生む. その結果 PI controller が見る誤差は
-            Magnus 4 次誤差 (``O(dt^5)``) のみとなり, dt は ``atol`` 制約下で
-            大きく取れる一方で実際の精度は machine precision 近くを維持する
-            (例: ``atol=1e-3`` 設定で n=10 の infidelity ``< 1e-16``). これは
+            切り捨て次数 ``K_used`` を ``propagator_tol`` (default
+            ``_KRYLOV_TOL_FIXED_DEFAULT = 1e-12`` 固定, issue #135) から
+            動的決定するため, ``tol_step`` より遥かに小さい per-stage 誤差
+            を生む. その結果 PI controller が見る誤差は Magnus 4 次誤差
+            (``O(dt^5)``) のみとなり, dt は ``atol`` 制約下で大きく取れる
+            一方で実際の精度は machine precision 近くを維持する (例:
+            ``atol=1e-3`` 設定で n=10 の infidelity ``< 1e-16``). これは
             "feature" であり (atol で要求した精度を上回ることはあっても下回る
             ことはない), 速度を取りたい場合は ``atol`` を大きくして PI step
             数を減らすのが正しい使い方. 詳細は
@@ -294,9 +316,9 @@ class QuantumAnnealer:
             breakdown も embedded error として検出する fail-safe を
             活かし, ``m_max=16`` 等で per-step matvec を 30% 程度削減
             する運用を許容する (Richardson が破綻を検知すれば PI
-            controller が dt を絞り精度を維持)。``β_k < krylov_tol``
-            の早期打切が既存実装で効くため, 実効次元は ``m_eff ≤
-            m_max`` になる。固定 dt 経路では無視される。
+            controller が dt を絞り精度を維持)。a posteriori 推定子
+            ``est < propagator_tol`` (Lanczos) の早期打切が既存実装で効くため,
+            実効次元は ``m_eff ≤ m_max`` になる。固定 dt 経路では無視される。
             ``m_eff`` 累積統計の ``QuantumResult`` 露出は Rust API 拡張
             (``lanczos_propagate`` の戻り値追加 + PyO3 plumbing) が
             必要なため本フェーズでは保留 (``docs/design/05-3-propagator.md`` §5.3 参照)。
@@ -401,14 +423,15 @@ class QuantumAnnealer:
             # 単一の安全 default で安定して満たすことを優先しており,
             # 実用上は ``atol=1e-6`` / ``1e-5`` も十分許容範囲. user が
             # 速度を取りたい場合は ``atol`` を緩めること (PI step 数が
-            # 減り, ``krylov_tol`` 連動も自動緩和される).
+            # 減り, ``propagator_tol`` 連動も自動緩和される).
             tol_step = float(atol) if atol is not None else 1e-8
-            # issue #54: ``krylov_tol = None`` のとき adaptive Richardson 経路は
-            # ``tol_step · _KRYLOV_TOL_ATOL_RATIO`` に解決する.
-            if self.krylov_tol is not None:
-                effective_krylov_tol = self.krylov_tol
+            # issue #54: ``propagator_tol = None`` のとき adaptive Richardson
+            # Lanczos 経路は ``tol_step · _KRYLOV_TOL_ATOL_RATIO`` に解決する.
+            # Chebyshev variant の default は固定 1e-12 (issue #135).
+            if self.propagator_tol is not None:
+                effective_propagator_tol = self.propagator_tol
             else:
-                effective_krylov_tol = tol_step * _KRYLOV_TOL_ATOL_RATIO
+                effective_propagator_tol = tol_step * _KRYLOV_TOL_ATOL_RATIO
             # issue #54: ``dt_init = None`` で旧 ``"auto"`` 相当の T-dep
             # auto resolution. float 明示時はそのまま渡す.
             if dt_init is None:
@@ -455,7 +478,7 @@ class QuantumAnnealer:
                 t0=t0,
                 t1=t1,
                 m=m_eff_param,
-                krylov_tol=effective_krylov_tol,
+                krylov_tol=effective_propagator_tol,
                 tol_step=tol_step,
                 dt0=dt0,
                 dt_max=dt_max_resolved,
@@ -515,10 +538,17 @@ class QuantumAnnealer:
             # 流用する (Chebyshev は breakdown しないので大きめの dt_max でも
             # 安全だが, 初期実装では Lanczos と同じ上限で挙動を観察する).
             tol_step = float(atol) if atol is not None else 1e-8
-            if self.krylov_tol is not None:
-                effective_chebyshev_tol = self.krylov_tol
+            # issue #135: Chebyshev variant の propagator_tol default を
+            # auto-coupling (``tol_step · _KRYLOV_TOL_ATOL_RATIO``) から
+            # 固定値 ``_KRYLOV_TOL_FIXED_DEFAULT`` (= 1e-12) に変更. atol↓
+            # で K_used が単調に増えず, machine precision 到達後は逆に
+            # round-off accumulation で精度が悪化する非単調性を解消するため.
+            # Krylov variant では auto-coupling 維持 (Lanczos a posteriori
+            # 早期打切が atol scaling で有効).
+            if self.propagator_tol is not None:
+                effective_propagator_tol = self.propagator_tol
             else:
-                effective_chebyshev_tol = tol_step * _KRYLOV_TOL_ATOL_RATIO
+                effective_propagator_tol = _KRYLOV_TOL_FIXED_DEFAULT
             if dt_init is None:
                 dt0 = _resolve_dt_init_auto(t0, t1)
             else:
@@ -558,7 +588,7 @@ class QuantumAnnealer:
                 psi0=psi0_arr,
                 t0=t0,
                 t1=t1,
-                chebyshev_tol=effective_chebyshev_tol,
+                chebyshev_tol=effective_propagator_tol,
                 tol_step=tol_step,
                 dt0=dt0,
                 dt_max=dt_max_resolved_cheb,
@@ -608,10 +638,10 @@ class QuantumAnnealer:
 
         # issue #54: 固定 dt 経路は ``atol`` を取らないため None → 旧 default
         # ``1e-12`` に static fallback (adaptive 経路の atol 連動とは別扱い).
-        if self.krylov_tol is not None:
-            effective_krylov_tol = self.krylov_tol
+        if self.propagator_tol is not None:
+            effective_propagator_tol = self.propagator_tol
         else:
-            effective_krylov_tol = _KRYLOV_TOL_FIXED_DEFAULT
+            effective_propagator_tol = _KRYLOV_TOL_FIXED_DEFAULT
 
         # Phase 5 (issue #47): 固定 dt driver は 3-tuple
         # `(psi, n_matvec, snapshot)` を返す. snapshot は save_tlist=None で
@@ -626,7 +656,7 @@ class QuantumAnnealer:
                 t1=t1,
                 n_steps=n_steps_int,
                 m=self.m,
-                krylov_tol=effective_krylov_tol,
+                krylov_tol=effective_propagator_tol,
                 observables=observables_validated,
                 save_tlist=save_tlist_arr,
                 store_states=store_states,
@@ -667,7 +697,7 @@ class QuantumAnnealer:
                 t1=t1,
                 n_steps=n_steps_int,
                 m=self.m,
-                krylov_tol=effective_krylov_tol,
+                krylov_tol=effective_propagator_tol,
                 observables=observables_validated,
                 save_tlist=save_tlist_arr,
                 store_states=store_states,
@@ -837,7 +867,7 @@ class QuantumAnnealer:
         """``AnnealingSimulator`` (step-wise stateful API) を生成する.
 
         ``QuantumAnnealer`` と同じ ``problem`` / ``schedule`` / ``m`` /
-        ``krylov_tol`` を引き継いだ Simulator を返す. ``psi0`` / ``t0`` /
+        ``propagator_tol`` を引き継いだ Simulator を返す. ``psi0`` / ``t0`` /
         ``method`` 以降は Simulator コンストラクタに直接渡される.
 
         Parameters
@@ -867,7 +897,7 @@ class QuantumAnnealer:
 
         Notes
         -----
-        ``m`` / ``krylov_tol`` を Simulator 側で上書きしたい場合は
+        ``m`` / ``propagator_tol`` を Simulator 側で上書きしたい場合は
         ``AnnealingSimulator`` を直接構築する.
         """
         from kinema.simulator import AnnealingSimulator
@@ -879,7 +909,7 @@ class QuantumAnnealer:
             t0,
             method=method,
             m=self.m,
-            krylov_tol=self.krylov_tol,
+            propagator_tol=self.propagator_tol,
             atol=atol,
             dt_init=dt_init,
             dt_max=dt_max,

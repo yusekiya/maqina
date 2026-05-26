@@ -1,6 +1,6 @@
 [project]
 name = "kinema"
-version = "0.11.0"
+version = "0.12.0"
 description = "Matrix-free transverse-field Ising kinetic quantum evolution via Magnus expansion"
 readme = "README.md"
 requires-python = ">=3.13"
