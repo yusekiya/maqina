@@ -68,11 +68,12 @@ CLI 例::
     uv run python benchmarks/bench_qutip_large.py \\
         --add-scenario "wide-range:T=1,h_p=100,h_x=1"
 
-    # Phase 7 (#93) acceptance: krylov_tol を緩めても Pareto 劣化しないこと
-    # を long-T で検証. 'auto' は ``tol_step * 1e-3`` 自動結合 (= 既定相当).
+    # Phase 7 (#93) acceptance: propagator_tol を緩めても Pareto 劣化しない
+    # ことを long-T で検証. Lanczos 経路では 'auto' = ``tol_step * 1e-3``
+    # 自動結合 (= 既定相当), Chebyshev 経路では 1e-12 固定 (issue #135 default).
     uv run python benchmarks/bench_qutip_large.py \\
         --scenarios long-T --n-values 8,10 \\
-        --krylov-tols auto,1e-8,1e-6
+        --propagator-tols auto,1e-8,1e-6
 """
 
 from __future__ import annotations
@@ -180,12 +181,15 @@ _DEFAULT_ADAPTIVE_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-11]
 _DEFAULT_QUTIP_TOLS: list[float] = [1e-3, 1e-5, 1e-7, 1e-9, 1e-12]
 
 # cfm4_adaptive_richardson_krylov / cfm4_adaptive_richardson_chebyshev の
-# krylov_tol (Chebyshev では chebyshev_tol として機能) sweep 既定値. ``None``
-# は QuantumAnnealer 内部の auto-coupling (= ``tol_step * 1e-3``) を意味する.
+# propagator_tol (issue #135 で krylov_tol から rename) sweep 既定値.
+# ``None`` は QuantumAnnealer 内部の default に委ねる挙動を意味する:
+# Lanczos variant では auto-coupling (= ``tol_step * 1e-3``), Chebyshev
+# variant では固定 ``_KRYLOV_TOL_FIXED_DEFAULT`` (= 1e-12).
 # 既定では 1 値 (= None) のみで sweep 無し → 既存 bench 挙動と等価. Phase 7
-# (#93) の "krylov_tol 緩和の安全性" を検証する際は CLI ``--krylov-tols
-# auto,1e-8,1e-6`` 等を渡して atol × krylov_tol のクロス sweep を有効化する.
-_DEFAULT_KRYLOV_TOLS: list[float | None] = [None]
+# (#93) の "propagator_tol 緩和の安全性" を検証する際は CLI
+# ``--propagator-tols auto,1e-8,1e-6`` 等を渡して atol × propagator_tol の
+# クロス sweep を有効化する.
+_DEFAULT_PROPAGATOR_TOLS: list[float | None] = [None]
 
 # 各 method の dt 下限. fixed-dt 経路は ``n_steps = round(T/dt)`` なので
 # long-T (T=1e4) と組合せると 1 cell が分単位の wall time になる. dt 下限を
@@ -298,15 +302,16 @@ def _run_kinema_adaptive(
     psi0: np.ndarray,
     T: float,
     atol: float,
-    krylov_tol: float | None,
+    propagator_tol: float | None,
 ) -> tuple[float, np.ndarray, int]:
     """kinema ``cfm4_adaptive_richardson_krylov`` 経路を ``atol`` 指定で走らせる.
 
     PI controller が実際に踏んだ step 数を ``n_steps_actual`` として返す.
-    ``krylov_tol = None`` のとき ``QuantumAnnealer`` の auto-coupling
-    (``tol_step * 1e-3``) が効き, 数値を渡すと explicit override される.
+    ``propagator_tol = None`` のとき ``QuantumAnnealer`` の Lanczos
+    auto-coupling (``tol_step * 1e-3``) が効き, 数値を渡すと explicit
+    override される (issue #135 で ``krylov_tol`` から rename).
     """
-    ann = QuantumAnnealer(prob, sched, krylov_tol=krylov_tol)
+    ann = QuantumAnnealer(prob, sched, propagator_tol=propagator_tol)
     t_start = time.perf_counter()
     res = ann.run(
         psi0,
@@ -328,16 +333,16 @@ def _run_kinema_adaptive_chebyshev(
     psi0: np.ndarray,
     T: float,
     atol: float,
-    chebyshev_tol: float | None,
+    propagator_tol: float | None,
 ) -> tuple[float, np.ndarray, int]:
     """kinema ``cfm4_adaptive_richardson_chebyshev`` 経路 (issue #122 Phase B).
 
     Lanczos 版と同じ PI controller 構造で短時間プロパゲータだけが Chebyshev
-    3 項漸化に置き換わる. ``chebyshev_tol = None`` で ``QuantumAnnealer`` の
-    auto-coupling (``krylov_tol = tol_step · 1e-3``) を流用 (Chebyshev では
-    K_used 切り捨て閾値の意味).
+    3 項漸化に置き換わる. ``propagator_tol = None`` で ``QuantumAnnealer``
+    側の Chebyshev default ``_KRYLOV_TOL_FIXED_DEFAULT`` (= 1e-12 固定,
+    issue #135) を使う (Lanczos の auto-coupling とは挙動が異なる).
     """
-    ann = QuantumAnnealer(prob, sched, krylov_tol=chebyshev_tol)
+    ann = QuantumAnnealer(prob, sched, propagator_tol=propagator_tol)
     t_start = time.perf_counter()
     res = ann.run(
         psi0,
@@ -389,9 +394,10 @@ class _CellRecord:
     ``psi_final`` と ``wall_sec`` と ``n_steps_effective`` を保持する.
 
     ``knob2_name`` / ``knob2_value`` は cfm4_adaptive_richardson_krylov の
-    ``krylov_tol`` のような **副次的な sweep 軸** を表す optional 拡張 (Phase 7
-    / #93). 単軸 sweep cell では ``knob2_name = None``. ``knob2_value = None``
-    かつ ``knob2_name != None`` は "auto" (自動結合) を表す sentinel.
+    ``propagator_tol`` (issue #135 で krylov_tol から rename) のような
+    **副次的な sweep 軸** を表す optional 拡張 (Phase 7 / #93). 単軸 sweep
+    cell では ``knob2_name = None``. ``knob2_value = None`` かつ
+    ``knob2_name != None`` は "auto" (自動 default 解決) を表す sentinel.
     """
 
     __slots__ = (
@@ -502,7 +508,7 @@ def _sweep_one_scenario_n(
     trotter_dt_min: float,
     cfm4_dt_min: float,
     adaptive_atols: list[float],
-    krylov_tols: list[float | None],
+    propagator_tols: list[float | None],
     qutip_tols: list[float],
     ref_tol: float,
     ref_validate: bool,
@@ -631,24 +637,24 @@ def _sweep_one_scenario_n(
             )
 
     if "cfm4_adaptive_richardson_krylov" in solvers:
-        # Phase 7 (#93): krylov_tols sweep. 既定 ([None]) では knob2 を伏せ
+        # Phase 7 (#93): propagator_tols sweep. 既定 ([None]) では knob2 を伏せ
         # (CSV/MD で空欄), 明示 sweep (len > 1 か 1 値だが非 None) のときに
         # secondary knob "kry" を MD/CSV に出す.
-        emit_kry_knob = (len(krylov_tols) > 1) or (
-            len(krylov_tols) == 1 and krylov_tols[0] is not None
+        emit_prop_knob = (len(propagator_tols) > 1) or (
+            len(propagator_tols) == 1 and propagator_tols[0] is not None
         )
-        kry_repr = ["auto" if k is None else f"{k:.1e}" for k in krylov_tols]
+        prop_repr = ["auto" if k is None else f"{k:.1e}" for k in propagator_tols]
         print(
             f"  cfm4_adaptive_richardson_krylov sweep atols={adaptive_atols} × "
-            f"krylov_tols={kry_repr} ...",
+            f"propagator_tols={prop_repr} ...",
             flush=True,
         )
         for atol in adaptive_atols:
-            for kry_tol in krylov_tols:
+            for kry_tol in propagator_tols:
                 wall, psi, n_steps_actual = _run_kinema_adaptive(
                     prob, sched, psi0, T, atol, kry_tol
                 )
-                if emit_kry_knob:
+                if emit_prop_knob:
                     knob2_name: str | None = "kry"
                     knob2_value: float | None = (
                         float(kry_tol) if kry_tol is not None else None
@@ -672,25 +678,25 @@ def _sweep_one_scenario_n(
                 )
 
     if "cfm4_adaptive_richardson_chebyshev" in solvers:
-        # issue #122 (Phase B): Chebyshev variant. ``krylov_tols`` を共有して
+        # issue #122 (Phase B): Chebyshev variant. ``propagator_tols`` を共有して
         # sweep する (semantically ``chebyshev_tol`` = Krylov 近似の許容誤差
         # 規約を流用; krylov.py の Phase 8 設計参照). knob 構造は Lanczos 版と
-        # 完全に同じため emit_kry_knob 判定もそのまま使い回す.
-        emit_kry_knob_cheb = (len(krylov_tols) > 1) or (
-            len(krylov_tols) == 1 and krylov_tols[0] is not None
+        # 完全に同じため emit_prop_knob 判定もそのまま使い回す.
+        emit_prop_knob_cheb = (len(propagator_tols) > 1) or (
+            len(propagator_tols) == 1 and propagator_tols[0] is not None
         )
-        kry_repr_cheb = ["auto" if k is None else f"{k:.1e}" for k in krylov_tols]
+        prop_repr_cheb = ["auto" if k is None else f"{k:.1e}" for k in propagator_tols]
         print(
             f"  cfm4_adaptive_richardson_chebyshev sweep atols={adaptive_atols} × "
-            f"krylov_tols={kry_repr_cheb} ...",
+            f"propagator_tols={prop_repr_cheb} ...",
             flush=True,
         )
         for atol in adaptive_atols:
-            for cheb_tol in krylov_tols:
+            for cheb_tol in propagator_tols:
                 wall, psi, n_steps_actual = _run_kinema_adaptive_chebyshev(
                     prob, sched, psi0, T, atol, cheb_tol
                 )
-                if emit_kry_knob_cheb:
+                if emit_prop_knob_cheb:
                     knob2_name_c: str | None = "kry"
                     knob2_value_c: float | None = (
                         float(cheb_tol) if cheb_tol is not None else None
@@ -923,10 +929,11 @@ def _write_md(
     lines.append(
         f"- **cfm4_adaptive_richardson_krylov atol sweep**: `{args.adaptive_tols}`"
     )
-    kry_repr_list = ["auto" if k is None else f"{k:.1e}" for k in args.krylov_tols]
+    prop_repr_list = ["auto" if k is None else f"{k:.1e}" for k in args.propagator_tols]
     lines.append(
-        f"- **cfm4_adaptive_richardson_krylov krylov_tol sweep**: `{kry_repr_list}` "
-        "(`auto` = `tol_step * 1e-3` 自動結合; Phase 7 / #93)"
+        f"- **propagator_tol sweep (Krylov/Chebyshev 共通軸)**: `{prop_repr_list}` "
+        "(`auto` = Lanczos: `tol_step * 1e-3` 連動 / Chebyshev: `1e-12` 固定; "
+        "Phase 7 / #93, issue #135 rename)"
     )
     lines.append(f"- **qutip tol sweep**: `{args.qutip_tols}`")
     lines.append("")
@@ -1009,7 +1016,7 @@ def _write_md(
                 if r.solver == "cfm4_adaptive_richardson_krylov"
             ]
             if kry_adaptive_cells:
-                # infid 最小 cell (= 最も accurate) を pick. krylov_tols sweep が
+                # infid 最小 cell (= 最も accurate) を pick. propagator_tols sweep が
                 # 入った場合, 単に atol で min を取ると意味のない代表点を選ぶ
                 # 恐れがあるため "accuracy で代表" を採用 (Phase 7 #93).
                 tightest = min(kry_adaptive_cells, key=lambda x: x[1])
@@ -1057,11 +1064,12 @@ def _parse_float_list(text: str) -> list[float]:
     return [float(p) for p in parts]
 
 
-def _parse_krylov_tol_list(text: str) -> list[float | None]:
+def _parse_propagator_tol_list(text: str) -> list[float | None]:
     """``"auto,1e-8,1e-6"`` を ``[None, 1e-8, 1e-6]`` に parse する.
 
-    ``auto`` キーワードは ``QuantumAnnealer`` 内部の自動結合 (= ``tol_step *
-    1e-3``) を表し ``None`` に変換される. それ以外は ``float`` として読む.
+    ``auto`` キーワードは ``QuantumAnnealer`` 内部の default 解決 (Lanczos =
+    ``tol_step * 1e-3`` 連動, Chebyshev = 1e-12 固定; issue #135) を表し
+    ``None`` に変換される. それ以外は ``float`` として読む.
     """
     parts = [p.strip() for p in text.split(",") if p.strip()]
     if not parts:
@@ -1075,7 +1083,7 @@ def _parse_krylov_tol_list(text: str) -> list[float | None]:
                 out.append(float(p))
             except ValueError as exc:
                 raise argparse.ArgumentTypeError(
-                    f"krylov_tol must be 'auto' or a float, got {p!r}"
+                    f"propagator_tol must be 'auto' or a float, got {p!r}"
                 ) from exc
     return out
 
@@ -1271,18 +1279,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--krylov-tols",
-        type=_parse_krylov_tol_list,
-        default=list(_DEFAULT_KRYLOV_TOLS),
+        "--propagator-tols",
+        type=_parse_propagator_tol_list,
+        default=list(_DEFAULT_PROPAGATOR_TOLS),
         help=(
-            "cfm4_adaptive_richardson_krylov の krylov_tol および "
-            "cfm4_adaptive_richardson_chebyshev の chebyshev_tol を共通の "
-            "Krylov 近似許容誤差として sweep する (semantically どちらも "
-            "短時間プロパゲータの内部精度). comma-separated; 'auto' で "
-            "QuantumAnnealer の自動結合 (= tol_step * 1e-3) を選ぶ. "
-            f"default: {['auto' if k is None else f'{k:.1e}' for k in _DEFAULT_KRYLOV_TOLS]}. "
-            "Phase 7 (#93) 評価例: --krylov-tols auto,1e-8,1e-6 で atol × "
-            "krylov_tol のクロス sweep."
+            "cfm4_adaptive_richardson_krylov / "
+            "cfm4_adaptive_richardson_chebyshev の propagator_tol "
+            "(短時間プロパゲータ U(dt) の per-step 許容誤差; "
+            "issue #135 で krylov_tol から rename) sweep. "
+            "comma-separated; 'auto' で QuantumAnnealer 側の default 解決を "
+            "使う (Lanczos = tol_step * 1e-3 連動, Chebyshev = 1e-12 固定). "
+            f"default: {['auto' if k is None else f'{k:.1e}' for k in _DEFAULT_PROPAGATOR_TOLS]}. "
+            "Phase 7 (#93) 評価例: --propagator-tols auto,1e-8,1e-6 で "
+            "atol × propagator_tol のクロス sweep."
         ),
     )
     parser.add_argument(
@@ -1398,7 +1407,7 @@ def main(argv: list[str] | None = None) -> int:
                 trotter_dt_min=args.trotter_dt_min,
                 cfm4_dt_min=args.cfm4_dt_min,
                 adaptive_atols=args.adaptive_tols,
-                krylov_tols=args.krylov_tols,
+                propagator_tols=args.propagator_tols,
                 qutip_tols=args.qutip_tols,
                 ref_tol=args.ref_tol,
                 ref_validate=args.ref_validate,

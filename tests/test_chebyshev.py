@@ -282,3 +282,83 @@ def test_chebyshev_rejects_m_max_param() -> None:
             method="cfm4_adaptive_richardson_chebyshev",
             m_max=16,
         )
+
+
+def test_chebyshev_default_propagator_tol_is_fixed_1e_minus_12() -> None:
+    """issue #135: Chebyshev variant の ``propagator_tol`` default は
+    ``_KRYLOV_TOL_FIXED_DEFAULT`` (= 1e-12) 固定.
+
+    atol を 2 桁振っても (1e-6 vs 1e-8) 同じ問題に対する平均 K_used が
+    僅かしか変わらないことで, propagator_tol が atol に連動していない
+    (auto-coupling されていない) ことを確認する. Lanczos variant とは
+    挙動が異なる軸 (Lanczos は atol scaling 連動).
+    """
+    from kinema.annealer import _KRYLOV_TOL_FIXED_DEFAULT
+
+    n = 5
+    T = 5.0
+    prob = _make_random_problem(n, seed=20260526)
+    sched = Schedule.linear(T=T)
+    psi0 = uniform_superposition(n)
+
+    # propagator_tol=None default で atol を 2 桁振る.
+    k_used_means: list[float] = []
+    for atol in (1e-6, 1e-8):
+        ann = QuantumAnnealer(prob, sched)  # propagator_tol=None default
+        result = ann.run(
+            psi0,
+            t0=0.0,
+            t1=T,
+            method="cfm4_adaptive_richardson_chebyshev",
+            atol=atol,
+        )
+        assert result.m_eff_stats is not None
+        k_used_means.append(float(result.m_eff_stats["mean"]))
+
+    # propagator_tol が atol 非連動 (固定 1e-12) なので, atol を変えても
+    # K_used 平均は per-step matvec 数 (= K_used) で ~10% 以内の変動に留まる
+    # (実測の上限見積もり; auto-coupling だと数倍動く).
+    k_mean_a, k_mean_b = k_used_means
+    rel_diff = abs(k_mean_a - k_mean_b) / max(k_mean_a, k_mean_b)
+    assert rel_diff < 0.20, (
+        f"propagator_tol が固定 1e-12 のはずだが atol 変動で K_used 平均が "
+        f"{rel_diff:.2%} 変動: atol=1e-6 mean={k_mean_a:.2f}, "
+        f"atol=1e-8 mean={k_mean_b:.2f}"
+    )
+
+    # 加えて, 明示的に propagator_tol=1e-12 を渡しても default と同等の結果.
+    ann_default = QuantumAnnealer(prob, sched)
+    ann_explicit = QuantumAnnealer(
+        prob, sched, propagator_tol=_KRYLOV_TOL_FIXED_DEFAULT
+    )
+    res_default = ann_default.run(
+        psi0,
+        t0=0.0,
+        t1=T,
+        method="cfm4_adaptive_richardson_chebyshev",
+        atol=1e-8,
+    )
+    res_explicit = ann_explicit.run(
+        psi0,
+        t0=0.0,
+        t1=T,
+        method="cfm4_adaptive_richardson_chebyshev",
+        atol=1e-8,
+    )
+    np.testing.assert_array_equal(res_default.psi_final, res_explicit.psi_final)
+
+
+def test_old_krylov_tol_kwarg_raises_typeerror() -> None:
+    """issue #135 (API 破壊変更): 旧 ``krylov_tol`` kwarg は受け付けない
+    (deprecation alias は残さない方針). 旧コードを誤って動かさないことを
+    保証するため ``TypeError`` を contract とする.
+    """
+    n = 3
+    prob = _make_random_problem(n, seed=20260526)
+    sched = Schedule.linear(T=1.0)
+    psi0 = uniform_superposition(n)
+
+    with pytest.raises(TypeError):
+        QuantumAnnealer(prob, sched, krylov_tol=1e-12)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        AnnealingSimulator(prob, sched, psi0, 0.0, krylov_tol=1e-12)  # type: ignore[call-arg]

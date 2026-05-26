@@ -519,9 +519,10 @@ Krylov 誤差を区別できない) を解消するための **infrastructure** 
   `n_krylov_insufficient`). PI controller の駆動量を `err_magnus = max(0,
   err - err_lanczos_total)` に切替え.
 - **`QuantumResult`**: `beta_m_stats` / `n_krylov_insufficient` フィールド追加.
-- **`benchmarks/bench_qutip_large.py`**: `--krylov-tols` sweep で `atol ×
-  krylov_tol` のクロス評価を可能に. `auto` キーワードで内部自動結合
-  (= `tol_step * 1e-3`) を表現.
+- **`benchmarks/bench_qutip_large.py`**: `--propagator-tols` sweep で
+  `atol × propagator_tol` のクロス評価を可能に (issue #135 で
+  `--krylov-tols` から rename). `auto` キーワードで内部 default 解決
+  (Lanczos = `tol_step * 1e-3` 連動, Chebyshev = `1e-12` 固定) を表現.
 
 後方互換性: default `krylov_tol = 1e-12` では `err_lanczos << tol_step` で
 `err_magnus ≈ err`. 既存 PI controller 挙動とほぼ等価
@@ -530,7 +531,8 @@ Krylov 誤差を区別できない) を解消するための **infrastructure** 
 bench acceptance (Linux AMD EPYC 7713P, 2026-05-18):
 
 - ✅ **Safety net 機能**: `bench_qutip_large.py --scenarios long-T
-  --n-values 8,10 --krylov-tols auto,1e-8,1e-6` で `krylov_tol` を 4 桁緩めても
+  --n-values 8,10 --propagator-tols auto,1e-8,1e-6` (issue #135 で
+  `--krylov-tols` から rename) で `propagator_tol` を 4 桁緩めても
   `n_steps_eff` 差 0.01-0.02%, wall time 差 ±2%. PI controller が relaxed
   Krylov 設定下でも安定動作.
 - ❌ **Pareto 劣位は未解消**: TFIM Lanczos の中間 β_j 値が O(‖H‖) で,
@@ -766,15 +768,18 @@ Chebyshev では `atol` (= PI controller の `tol_step`) は **upper bound** と
 
 - `atol` で要求した精度を下回ることはない (予防的上限として機能).
 - 速度を取りたいときは `atol` を大きくして PI step 数を減らすのが正しい使い方.
-  `chebyshev_tol` を直接緩めても K_used が数個減るだけで wall-time 効果は限定的.
-- default の auto-coupling 係数 `_KRYLOV_TOL_ATOL_RATIO = 1e-3` は変更しない.
+  `propagator_tol` (旧 `chebyshev_tol`, issue #135 で rename) を直接緩めても
+  K_used が数個減るだけで wall-time 効果は限定的.
+- default の auto-coupling 係数 `_KRYLOV_TOL_ATOL_RATIO = 1e-3` は Lanczos
+  variant でのみ有効 (Chebyshev variant の default は issue #135 で固定
+  1e-12 に変更, 下記 issue #135 節参照).
 
 明文化先:
 
 - `QuantumAnnealer.run` / `AnnealingSimulator.__init__` の `atol` docstring に
-  "Note (Chebyshev variant の atol 振舞い, issue #124)" 注を追加.
-- `docs/design/05-3-propagator.md` "Chebyshev variant" 節に "`chebyshev_tol` と
-  `atol` の関係 — accidental 高精度 (issue #124)" 小節を追加.
+  "Note (Chebyshev variant の atol 振舞い, issue #124 / #135)" 注を追加.
+- `docs/design/05-3-propagator.md` "Chebyshev variant" 節に "`propagator_tol`
+  と `atol` の関係 — accidental 高精度 (issue #124 / #135)" 小節を追加.
 - `docs/quickstart.md` の主例下に Note を追加.
 
 ### 詳細
@@ -782,6 +787,66 @@ Chebyshev では `atol` (= PI controller の `tol_step`) は **upper bound** と
 - `docs/design/12-release-plan.md` "Phase B follow-up: Default method を
   Chebyshev variant に切替 + atol 仕様明文化 (#124)" 節 (Definition of Done /
   migration note).
+
+## Phase B follow-up (issue #135): `krylov_tol` → `propagator_tol` rename + Chebyshev default 仕様変更
+
+PR #134 (README figure pipeline) で実測された Chebyshev variant の
+**atol-vs-infidelity 非単調性** (`atol=1e-4` で machine precision floor 到達後,
+`atol=1e-5` で逆に infidelity が悪化) を解消するための 2 軸 follow-up.
+API 破壊変更を含むため `0.11.0 → 0.12.0` minor bump.
+
+### parameter rename (semantic 統一)
+
+- `QuantumAnnealer(..., krylov_tol=...)` / `AnnealingSimulator(..., krylov_tol=...)`
+  を `propagator_tol=...` に hard rename (deprecation alias なし; 旧 kwarg は
+  `TypeError`).
+- attribute (`self.krylov_tol` → `self.propagator_tol`), internal helper
+  (`_resolved_krylov_tol_*` → `_resolved_propagator_tol_*`),
+  `_krylov_tol_user` → `_propagator_tol_user` も統一.
+- 命名意図: 「短時間プロパゲータ U(dt) の per-step 許容誤差」を表す
+  semantically 中立な名前. Chebyshev には Krylov 部分空間概念が無いので
+  旧名 `krylov_tol` は misleading だった. design docs
+  (`docs/design/05-3-propagator.md`) の章名と一致.
+- **Out of scope**: Rust 側 (`src/krylov.rs::lanczos_propagate` の kwarg
+  `krylov_tol` / `cfm4_step_chebyshev_*` の kwarg `chebyshev_tol`) は
+  rename せず. 各 method 内部文脈で適切なため. driver function
+  (`evolve_schedule_*`) の引数も同様で internal context は維持.
+- 内部定数 `_KRYLOV_TOL_ATOL_RATIO` / `_KRYLOV_TOL_FIXED_DEFAULT` は
+  private historical 名のまま据置.
+
+### Chebyshev variant の default 値変更
+
+- `cfm4_adaptive_richardson_chebyshev` 経路で `propagator_tol = None`
+  (未指定) のとき, 旧 `tol_step · _KRYLOV_TOL_ATOL_RATIO` (auto-coupling)
+  から **固定値 `_KRYLOV_TOL_FIXED_DEFAULT` (= 1e-12)** に変更.
+- Lanczos variant (`cfm4_adaptive_richardson_krylov`) は auto-coupling 維持
+  (Lanczos a posteriori 早期打切は atol scaling 連動が望ましいため).
+- 理由: Chebyshev は `K_used ~ R·dt + log(1/propagator_tol)` の対数依存で
+  auto-coupling の動機が弱く, atol↓ で K_used がほぼ変わらないまま
+  PI step 数だけ増えて round-off accumulation が顕在化する. 固定 1e-12
+  で atol-vs-infidelity の monotonicity を確保し Pareto curve の解釈性
+  を上げる. K_used 増は non-stiff +16% / stiff +3.7% (R·dt 別の Bessel
+  減衰見積もり) と限定的.
+
+### bench / CLI rename
+
+- `benchmarks/bench_qutip_large.py --krylov-tols` → `--propagator-tols`.
+  parse 関数 `_parse_krylov_tol_list` → `_parse_propagator_tol_list`,
+  internal `krylov_tols` → `propagator_tols`.
+- `benchmarks/bench_readme_figure.py` に新 flag `--propagator-tol` 追加
+  (default None → Chebyshev は 1e-12 固定).
+  `scripts/run_bench_readme_chebyshev.sh` も `CHEBYSHEV_PROPAGATOR_TOL` shell
+  変数で明示 pass.
+
+### 詳細
+
+- `docs/design/05-3-propagator.md` "Chebyshev variant" 節
+  (`propagator_tol` semantic + default 1e-12 固定の理由).
+- `tests/test_chebyshev.py::test_chebyshev_default_propagator_tol_is_fixed_1e_minus_12`
+  (atol 2 桁振っても K_used 平均 20% 未満変動の acceptance).
+- `tests/test_chebyshev.py::test_old_krylov_tol_kwarg_raises_typeerror`
+  (旧 kwarg は TypeError の contract).
+- `CHANGELOG.md` 0.12.0 entry.
 
 ## 設計判断の出典 (cv_ising 流用箇所)
 

@@ -384,15 +384,15 @@ def test_init_validates_psi0() -> None:
         AnnealingSimulator(prob, sched, bad_norm, 0.0, method="m2")
 
 
-def test_init_validates_m_and_krylov_tol() -> None:
+def test_init_validates_m_and_propagator_tol() -> None:
     n = 3
     prob = _build_problem(n)
     sched = Schedule.linear(T=1.0)
     psi0 = uniform_superposition(n)
     with pytest.raises(ValueError, match="m must be a positive integer"):
         AnnealingSimulator(prob, sched, psi0, 0.0, method="m2", m=0)
-    with pytest.raises(ValueError, match="krylov_tol must be"):
-        AnnealingSimulator(prob, sched, psi0, 0.0, method="m2", krylov_tol=-1.0)
+    with pytest.raises(ValueError, match="propagator_tol must be"):
+        AnnealingSimulator(prob, sched, psi0, 0.0, method="m2", propagator_tol=-1.0)
 
 
 @pytest.mark.parametrize("param_name", ["atol", "dt_init", "dt_max", "m_max"])
