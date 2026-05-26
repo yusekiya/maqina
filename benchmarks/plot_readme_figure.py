@@ -12,8 +12,9 @@
 `bench_qutip_large.py` の生 md と違い, 本図は **README に直接埋め込んで
 "一目で kinema の優位性が分かる"** ことを目的にしている. なので軸範囲は
 両端の極端 cell をクリップせず生データそのまま, marker は method ごとに
-形状を変えて視認性を確保, 精度 sweep は実線で連結して trade-off 曲線
-を見せる.
+形状を変えて視認性を確保する. データ点は markers only で描画
+(連結線は cell の sweep 順序を強調するだけで Pareto 形状の視認には
+邪魔と判明したため不採用).
 
 凡例:
 
@@ -51,13 +52,12 @@ COLUMNS = [
     "n_steps_eff",
 ]
 
-# 表示用ラベル / 色 / 線種 / marker.
+# 表示用ラベル / 色 / marker.
 # key = (solver, variant) tuple. variant は kinema の method を識別するタグ.
 # 視覚的な識別軸:
-#   - 色 = method 系統 (placeholder: red/green/orange/blue; 図確認時に調整予定)
+#   - 色 = method 系統 (red/green/orange/blue)
 #   - marker = method ごとに別形状 (+, x, o, s)
-#   - linestyle = solid 統一 (single thread 系列は削除済)
-# 4 系列が同 plot に描かれる前提で配色を分離.
+# 連結線は使わない (markers only; docstring 参照).
 #
 # markersize 注: ``+`` / ``x`` は線が細いので o/s と同サイズだと視覚的に小さく
 # 見える. _plot_scenario で markersize の per-style 上書きを実装し,
@@ -65,33 +65,29 @@ COLUMNS = [
 SOLVER_STYLE: dict[tuple[str, str], dict[str, object]] = {
     ("kinema", "krylov_adaptive"): {
         "label": "Krylov adapt. dt",
-        "color": "#d62728",  # red (placeholder)
+        "color": "#d62728",  # red
         "marker": "+",
-        "linestyle": "-",
         "alpha": 0.95,
         "markersize": 12,
     },
     ("kinema", "krylov_fixed"): {
         "label": "Krylov fixed dt",
-        "color": "#2ca02c",  # green (placeholder)
+        "color": "#2ca02c",  # green
         "marker": "x",
-        "linestyle": "-",
         "alpha": 0.95,
         "markersize": 12,
     },
     ("kinema", "chebyshev_adaptive"): {
         "label": "Chebyshev adapt. dt",
-        "color": "#ff7f0e",  # orange (placeholder)
+        "color": "#ff7f0e",  # orange
         "marker": "o",
-        "linestyle": "-",
         "alpha": 0.95,
         "markersize": 9,
     },
     ("qutip", "qutip"): {
         "label": "QuTiP",
-        "color": "#1f77b4",  # blue (placeholder)
+        "color": "#1f77b4",  # blue
         "marker": "s",
-        "linestyle": "-",
         "alpha": 0.95,
         "markersize": 9,
     },
@@ -155,7 +151,7 @@ def _plot_scenario(
     cells が無い variant は skip. CSV に variant 列が無い (legacy) 行は
     variant 空文字列扱いで SOLVER_STYLE と照合できず skip + warn.
     """
-    fig, ax = plt.subplots(figsize=(8.0, 5.5), dpi=120)
+    fig, ax = plt.subplots(figsize=(7.0, 5.5), dpi=120)
 
     unknown_keys: set[tuple[str, str]] = set()
 
@@ -175,13 +171,15 @@ def _plot_scenario(
         cells.sort(key=lambda r: float(r["knob_value"]), reverse=True)
         walls = [float(r["wall_sec"]) for r in cells]
         infs = [float(r["infidelity"]) for r in cells]
+        # 点のみ (連結線なし). markers only で煩雑さを抑え, Pareto 形状を
+        # 視覚的に把握しやすくする (連結線は cell の sweep 順序を強調する
+        # だけで Pareto 比較には邪魔だった).
         ax.plot(
             walls,
             infs,
             color=style["color"],
             marker=style["marker"],
-            linestyle=style["linestyle"],
-            linewidth=1.4,
+            linestyle="None",
             alpha=style["alpha"],
             markersize=style.get("markersize", 9),
             markeredgewidth=1.8 if style["marker"] in ("+", "x") else 1.0,
@@ -204,16 +202,21 @@ def _plot_scenario(
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("Runtime [sec]  (log, lower is better)")
-    ax.set_ylabel("Infidelity  $1 - F$  (log, lower is better)")
-    ax.set_title(
-        f"Fidelity vs runtime — {SCENARIO_TITLE.get(scenario, scenario)} "
-        f"(N={n}, T={T:.0f})"
-    )
+    ax.set_xlabel("Runtime [sec]")
+    ax.set_ylabel("Infidelity")
+    # タイトル / scenario 注記 / N=T= 表記は README markdown 側のテーブル header
+    # で表すので, 図そのものはシンプルに保つ.
     ax.grid(True, which="both", linestyle=":", alpha=0.4)
-    # 4 系列分の legend. 本番は kinema が左下に Pareto を握る形を想定して
-    # legend は右上に固定.
-    ax.legend(loc="upper right", framealpha=0.95, fontsize=9)
+    # 4 系列分の legend. データが左下に集まるが Pareto frontier 外の領域には
+    # 余白があるので legend は左下に置いて kinema の優位帯と被らないようにする.
+    # markerscale=0.6 で凡例マーカーを小さくして系列同士の重なりを防ぐ.
+    ax.legend(
+        loc="lower left",
+        framealpha=0.95,
+        fontsize=9,
+        markerscale=0.6,
+        handletextpad=0.5,
+    )
 
     # 右下 footer に version 表記
     fig.text(
@@ -229,7 +232,10 @@ def _plot_scenario(
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"{version}_pareto_{scenario.replace('-', '_')}.png"
     fig.tight_layout(rect=(0.0, 0.02, 1.0, 1.0))
-    fig.savefig(out_path, bbox_inches="tight")
+    # bbox_inches=None で figsize=(7.0, 5.5) inch のまま保存 (両 scenario で
+    # 同一幅). bbox_inches="tight" は title 文字数等で crop 範囲が変わって
+    # 最終 PNG の幅が scenario 間でずれる罠がある.
+    fig.savefig(out_path)
     plt.close(fig)
     return out_path
 

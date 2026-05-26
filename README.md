@@ -107,36 +107,12 @@ kinema build configuration
 
 ## Performance (work-precision diagram)
 
-Linux AMD EPYC 7713P / 64 core / `RAYON_NUM_THREADS=64` での N=18, T=10000
-end-to-end bench (`benchmarks/bench_readme_figure.py`)。各 solver の精度
-つまみ (`atol` / `dt` / QuTiP `tol`) を sweep して infidelity と wall time
-を測定し, 共通参照解 (QuTiP `sesolve atol=1e-12 / rtol=1e-10` で Adams 収束
-+ BDF 一致を別途確認済) に対する精度 vs 計算時間を log-log 散布で示す。
-両 scenario で Chebyshev variant (orange) が Pareto frontier を支配する。
+| Narrow dynamic range | Wide dynamic range |
+|---|---|
+| ![Pareto narrow](docs/figures/0.12.0_pareto_non_stiff.png) | ![Pareto wide](docs/figures/0.12.0_pareto_stiff.png) |
 
-### narrow dynamic range (h_p_scale=1)
-
-![Pareto non-stiff](docs/figures/0.12.0_pareto_non_stiff.png)
-
-- Chebyshev `atol=1e-5` で `infidelity = 3.3e-10`, `wall = 946 s`
-- 同精度帯の Krylov adaptive (`atol=1e-5`, `infidelity = 1.1e-10`, `wall =
-  4197 s`) 比で **約 4.4× 高速**
-- QuTiP `sesolve` の最 tight cell (`tol=1e-9`, `infidelity = 1.3e-10`,
-  `wall = 27388 s`) 比で **約 29× 高速**
-
-### wide dynamic range (h_p_scale=10, "stiff")
-
-![Pareto stiff](docs/figures/0.12.0_pareto_stiff.png)
-
-- Chebyshev `atol=1e-3` で `infidelity = 1.5e-4`, `wall = 787 s`
-- 同 atol の Krylov adaptive (`atol=1e-3`, `infidelity = 1.9e-5`, `wall =
-  9325 s`) 比で **約 11.8× 高速** (`propagator_tol=1e-12 固定` default に
-  よる accidental 高精度効果で n_steps が 3.4× 削減される領域)
-- 注: stiff scenario では QuTiP 参照解の Adams 法が non-convergence のため
-  infidelity 絶対値は ±1-2 桁の不確実性を含む。kinema 内 (Chebyshev vs
-  Krylov) の相対比較は同じ参照解を共有するため有効。
-
-詳細は [`benchmarks/results/0.12.0/SUMMARY.md`](benchmarks/results/0.12.0/SUMMARY.md)
+N=18, T=10000 / Linux AMD EPYC 7713P / 64 core. 詳細は
+[`benchmarks/results/0.12.0/SUMMARY.md`](benchmarks/results/0.12.0/SUMMARY.md)
 を参照。
 
 ## Documentation
