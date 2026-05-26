@@ -2,6 +2,7 @@
 name = "maqina"
 version = "0.12.0"
 edition = "2021"
+license = "MIT"
 publish = false
 
 [lib]

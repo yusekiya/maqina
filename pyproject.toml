@@ -3,6 +3,8 @@ name = "maqina"
 version = "0.12.0"
 description = "A Magnus-based quantum Ising numerical annealer: matrix-free time evolution of the transverse-field Ising model via Magnus expansion"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "numpy>=2.4.2",
