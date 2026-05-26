@@ -87,16 +87,6 @@ uv add 'git+https://github.com/yusekiya/maqina'
 pip install 'git+https://github.com/yusekiya/maqina'
 ```
 
-repo 同梱の `.cargo/config.toml` 経由で `-C target-cpu=native` が自動
-適用されるため, SIMD 経路 (`wide::f64x4`) が build マシン CPU の AVX2 /
-AVX-512 / NEON を最大限活かした状態でインストールされる (詳細は
-[`docs/design/11-build-infrastructure.md`](docs/design/11-build-infrastructure.md)
-§11.1)。
-
-**生成される `maqina._rust.*.so` は build マシン専用バイナリ**となる
-ため, 別 CPU マシンへの wheel 再配布には不向き。portable な build を
-要するときは `RUSTFLAGS=" "` で override してビルドし直す。
-
 ビルド構成 (どの target feature が有効になったか) は
 `maqina.show_config()` で確認できる (numpy.show_config() 相当):
 
