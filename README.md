@@ -15,6 +15,16 @@ H_driver  = -Σ_i h_x_i X_i              (サイト依存横磁場, bit-flip)
 H_problem = Z 演算子のみで書かれた k-local 多項式 (Z 基底で対角)
 ```
 
+## Performance (work-precision diagram)
+
+| Narrow dynamic range | Wide dynamic range |
+|---|---|
+| ![Pareto narrow](docs/figures/0.12.0_pareto_non_stiff.png) | ![Pareto wide](docs/figures/0.12.0_pareto_stiff.png) |
+
+N=18, T=10000. 詳細は
+[`benchmarks/results/0.12.0/SUMMARY.md`](benchmarks/results/0.12.0/SUMMARY.md)
+を参照。
+
 ## Getting started
 
 ```python
