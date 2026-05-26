@@ -8,7 +8,6 @@ work-precision diagram。
 
 - **timestamp_utc**: `2026-05-26T03:42:43+00:00` ~ `2026-05-26T04:22:25+00:00`
   (約 40 min)
-- **platform**: `Linux-x86_64`, AMD EPYC 7713P (64 core)
 - **scenario**: `non-stiff` (h_p_scale=1, h_x_scale=1, T=10000, n=18)
 - **seed**: `20260518`
 - **method**: `cfm4_adaptive_richardson_chebyshev`
