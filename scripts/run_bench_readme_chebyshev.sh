@@ -38,7 +38,7 @@ SEED=20260518
 T_INT=10000   # ファイル名で使う整数 T (T=10000.0 を seed 名規約で 10000 と表記)
 
 PROBLEM_DIR="benchmarks/data"
-OUTPUT_DIR="benchmarks/results/0.11.0"
+OUTPUT_DIR="benchmarks/results/0.12.0"
 
 # Chebyshev sweep 用 atol (シェル変数で 1 ヶ所管理).
 # このリストは echo (ログ表示) と --chebyshev-atols (Python 渡し) の両方に
@@ -130,6 +130,6 @@ echo "  next: 4 系列散布図生成 ="
 echo "    uv run python -m benchmarks.plot_readme_figure \\"
 echo "      --input-csv benchmarks/results/0.8.0/bench_*.csv \\"
 echo "                  benchmarks/results/qutip/bench_*.csv \\"
-echo "                  benchmarks/results/0.11.0/bench_*.csv \\"
-echo "      --version 0.11.0"
+echo "                  benchmarks/results/0.12.0/bench_*.csv \\"
+echo "      --version 0.12.0"
 echo "================================================================"
