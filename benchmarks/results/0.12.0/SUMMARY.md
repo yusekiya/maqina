@@ -1,10 +1,9 @@
 # 0.12.0 — Chebyshev README bench (issue #135 finalize)
 
-Linux AMD EPYC 7713P / cpu=64 / OpenBLAS / `RAYON_NUM_THREADS=unset` (=
-default 64) on issue #135 (PR #136) merge 後の `cfm4_adaptive_richardson_chebyshev`
-経路を `propagator_tol = 1e-12 固定` default で再計測。0.11.0 までの
-auto-coupling default (`tol_step · 1e-3`) で観測されていた
-**atol-vs-infidelity 非単調性** が解消されたことを確認する。
+issue #135 (PR #136) merge 後の `cfm4_adaptive_richardson_chebyshev` 経路を
+`propagator_tol = 1e-12 固定` default で再計測。0.11.0 までの auto-coupling
+default (`tol_step · 1e-3`) で観測されていた **atol-vs-infidelity 非単調性**
+が解消されたことを確認する。
 
 生 CSV (`bench_non-stiff.csv` / `bench_stiff.csv`) は通常 gitignore だが,
 本 finalize commit でのみ永続化 (0.8.0 / qutip と同じ運用)。生 markdown は
@@ -17,7 +16,6 @@ scenario 別に分けてある:
 
 - **timestamp_utc**: `2026-05-26T03:42:43+00:00` ~ `2026-05-26T05:51:46+00:00`
   (約 2h09m)
-- **platform**: `Linux-x86_64`, AMD EPYC 7713P (64 core)
 - **method**: `cfm4_adaptive_richardson_chebyshev`
 - **propagator_tol**: `1e-12` (issue #135 default; 固定)
 - **chebyshev atol sweep**: `[1e-2, 1e-3, 1e-4, 1e-5]`
