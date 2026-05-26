@@ -1,8 +1,18 @@
-# maqina
+<div style="text-align: center;" align="center">
 
-A **(Ma)gnus-based (Q)uantum (I)sing (N)umerical (A)nnealer** (the name is
-derived from the Latin `machina`): a matrix-free simulator for the
-transverse-field Ising model (TFIM) quantum dynamics.
+# `maqina`
+
+A **Ma**gnus-based **Q**uantum **I**sing **N**umerical **A**nnealer
+
+a matrix-free simulator for the transverse-field Ising model (TFIM) quantum dynamics.
+
+**Links:** [Getting started](#Getting started)
+— [Installation](#Installation)
+— [Quickstart guide](./docs/quickstart.md)
+
+</div>
+
+---
 
 - **Krylov (Lanczos)** short-time propagator approximation
 - **Chebyshev polynomial expansion** short-time propagator approximation
@@ -18,6 +28,9 @@ H(t) = A(s(t)) · H_driver + B(s(t)) · H_problem
 H_driver  = -Σ_i h_x_i X_i              (site-dependent transverse field, bit-flip)
 H_problem = a k-local polynomial in Z operators only (diagonal in the Z basis)
 ```
+
+---
+
 
 ## Performance (work-precision diagram)
 
