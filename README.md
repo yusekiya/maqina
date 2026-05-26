@@ -4,7 +4,7 @@
 
 A **Ma**gnus-based **Q**uantum **I**sing **N**umerical **A**nnealer
 
-a matrix-free simulator for the transverse-field Ising model (TFIM) quantum dynamics.
+Matrix-free simulator for the transverse-field Ising model (TFIM) quantum dynamics.
 
 **Links:** [Getting started](#Getting started)
 — [Installation](#Installation)
