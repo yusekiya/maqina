@@ -28,7 +28,7 @@ gen_api_stubs ドリフト二段運用 / BLAS 多プロセス制御の export.)
 
 このフローにより, ユーザー側で `RUSTFLAGS` を設定しなくても
 `production` profile + `target-cpu=native` の組み合わせが効いた状態の
-`kinema._rust.*.so` が install される.
+`maqina._rust.*.so` が install される.
 
 ### 既知の注意点
 
@@ -46,7 +46,7 @@ gen_api_stubs ドリフト二段運用 / BLAS 多プロセス制御の export.)
   `.cargo/config.toml::[build] rustflags` は無視される (cargo の rustflags
   precedence). 想定挙動.
 
-### ビルド構成の dump: `kinema.show_config()`
+### ビルド構成の dump: `maqina.show_config()`
 
 「target-cpu=native が本当に効いたか」「どの cargo feature でビルドしたか」を
 ユーザー側で確認するための numpy 風ヘルパ. 既存の `_rust.__has_blas__`
@@ -67,12 +67,12 @@ gen_api_stubs ドリフト二段運用 / BLAS 多プロセス制御の export.)
 | `__target_arch__` | `std::env::consts::ARCH` | "x86_64" / "aarch64" |
 | `__target_os__` | `std::env::consts::OS` | "linux" / "macos" |
 
-Python 側 `kinema.show_config()` は上記を集約し pretty-print する:
+Python 側 `maqina.show_config()` は上記を集約し pretty-print する:
 
 ```python
->>> import kinema
->>> kinema.show_config()
-kinema build configuration
+>>> import maqina
+>>> maqina.show_config()
+maqina build configuration
 --------------------------------------------------
   version       : 0.8.0
   target arch   : x86_64

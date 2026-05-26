@@ -37,14 +37,14 @@ from typing import Literal
 
 import numpy as np
 
-from kinema._helpers import (
+from maqina._helpers import (
     _KRYLOV_TOL_ATOL_RATIO,
     _KRYLOV_TOL_FIXED_DEFAULT,
     _resolve_dt_init_auto,
     _resolve_dt_max_auto,
     _validate_psi0,
 )
-from kinema.krylov import (
+from maqina.krylov import (
     evolve_schedule_adaptive_richardson,
     evolve_schedule_adaptive_richardson_chebyshev,
     evolve_schedule_cfm4,
@@ -52,9 +52,9 @@ from kinema.krylov import (
     evolve_schedule_trotter,
     evolve_schedule_trotter_suzuki4,
 )
-from kinema.observable import Observable
-from kinema.problem import IsingProblem
-from kinema.schedule import Schedule
+from maqina.observable import Observable
+from maqina.problem import IsingProblem
+from maqina.schedule import Schedule
 
 __all__ = ["AnnealingSimulator"]
 
@@ -159,10 +159,10 @@ class AnnealingSimulator:
     Examples
     --------
     >>> import numpy as np
-    >>> from kinema import IsingProblem, Observable, Schedule
-    >>> from kinema.builders import diag_from_J_h
-    >>> from kinema.initial_states import uniform_superposition
-    >>> from kinema.simulator import AnnealingSimulator
+    >>> from maqina import IsingProblem, Observable, Schedule
+    >>> from maqina.builders import diag_from_J_h
+    >>> from maqina.initial_states import uniform_superposition
+    >>> from maqina.simulator import AnnealingSimulator
     >>>
     >>> n = 4
     >>> J = np.zeros((n, n)); J[0, 1] = J[1, 0] = -1.0

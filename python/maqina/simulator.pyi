@@ -36,11 +36,11 @@ workflow.
 from __future__ import annotations as annotations
 from typing import Literal as Literal
 import numpy as np
-from kinema._helpers import _KRYLOV_TOL_ATOL_RATIO as _KRYLOV_TOL_ATOL_RATIO, _KRYLOV_TOL_FIXED_DEFAULT as _KRYLOV_TOL_FIXED_DEFAULT, _resolve_dt_init_auto as _resolve_dt_init_auto, _resolve_dt_max_auto as _resolve_dt_max_auto, _validate_psi0 as _validate_psi0
-from kinema.krylov import evolve_schedule_adaptive_richardson as evolve_schedule_adaptive_richardson, evolve_schedule_adaptive_richardson_chebyshev as evolve_schedule_adaptive_richardson_chebyshev, evolve_schedule_cfm4 as evolve_schedule_cfm4, evolve_schedule_m2 as evolve_schedule_m2, evolve_schedule_trotter as evolve_schedule_trotter, evolve_schedule_trotter_suzuki4 as evolve_schedule_trotter_suzuki4
-from kinema.observable import Observable as Observable
-from kinema.problem import IsingProblem as IsingProblem
-from kinema.schedule import Schedule as Schedule
+from maqina._helpers import _KRYLOV_TOL_ATOL_RATIO as _KRYLOV_TOL_ATOL_RATIO, _KRYLOV_TOL_FIXED_DEFAULT as _KRYLOV_TOL_FIXED_DEFAULT, _resolve_dt_init_auto as _resolve_dt_init_auto, _resolve_dt_max_auto as _resolve_dt_max_auto, _validate_psi0 as _validate_psi0
+from maqina.krylov import evolve_schedule_adaptive_richardson as evolve_schedule_adaptive_richardson, evolve_schedule_adaptive_richardson_chebyshev as evolve_schedule_adaptive_richardson_chebyshev, evolve_schedule_cfm4 as evolve_schedule_cfm4, evolve_schedule_m2 as evolve_schedule_m2, evolve_schedule_trotter as evolve_schedule_trotter, evolve_schedule_trotter_suzuki4 as evolve_schedule_trotter_suzuki4
+from maqina.observable import Observable as Observable
+from maqina.problem import IsingProblem as IsingProblem
+from maqina.schedule import Schedule as Schedule
 from typing import Any
 __all__ = ['AnnealingSimulator']
 
@@ -132,10 +132,10 @@ class AnnealingSimulator:
     Examples
     --------
     >>> import numpy as np
-    >>> from kinema import IsingProblem, Observable, Schedule
-    >>> from kinema.builders import diag_from_J_h
-    >>> from kinema.initial_states import uniform_superposition
-    >>> from kinema.simulator import AnnealingSimulator
+    >>> from maqina import IsingProblem, Observable, Schedule
+    >>> from maqina.builders import diag_from_J_h
+    >>> from maqina.initial_states import uniform_superposition
+    >>> from maqina.simulator import AnnealingSimulator
     >>>
     >>> n = 4
     >>> J = np.zeros((n, n)); J[0, 1] = J[1, 0] = -1.0

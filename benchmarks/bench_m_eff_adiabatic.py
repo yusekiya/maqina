@@ -1,11 +1,11 @@
-"""kinema cfm4_adaptive_richardson_krylov の Krylov 部分空間縮退 (m_eff) 計測.
+"""maqina cfm4_adaptive_richardson_krylov の Krylov 部分空間縮退 (m_eff) 計測.
 
 issue #65 review 中の議論: 量子断熱領域 (T 大, ψ が瞬時 H の固有状態に近い)
 では Krylov 基底 {ψ, Hψ, H²ψ, ...} が縮退し, Lanczos の β_k 早期打切で
 ``m_eff`` が default ``m=24`` から大幅に縮むと予想される. 本 bench は実測値を
 取って T 依存性を可視化する.
 
-**QuTiP 比較ではなく kinema 内部 driver の挙動分析専用** のため
+**QuTiP 比較ではなく maqina 内部 driver の挙動分析専用** のため
 ``bench_qutip_large.py`` とは別ファイル (出力先も別).
 
 各 (n, T, atol, m_max) に対し:
@@ -48,9 +48,9 @@ from pathlib import Path
 
 import numpy as np
 
-from kinema import IsingProblem, Schedule, set_blas_threads
-from kinema.initial_states import uniform_superposition
-from kinema.krylov import evolve_schedule_adaptive_richardson
+from maqina import IsingProblem, Schedule, set_blas_threads
+from maqina.initial_states import uniform_superposition
+from maqina.krylov import evolve_schedule_adaptive_richardson
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "benchmarks" / "results"
@@ -96,7 +96,7 @@ def _run_adaptive(
     QuantumAnnealer 経由だと m_eff_history が ``QuantumResult.m_eff_stats``
     に summary 化されるため, driver を直接呼んで raw array を得る.
 
-    ``krylov_tol_factor`` (default 1e-3) で kinema default ``atol·1e-3``
+    ``krylov_tol_factor`` (default 1e-3) で maqina default ``atol·1e-3``
     を再現. 大きい値 (例 0.1, 1.0) を渡すと早期打切が発火しやすくなり
     Krylov 圧縮の挙動を観察できる.
 
@@ -324,7 +324,7 @@ def _parse_float_list(text: str) -> list[float]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "kinema cfm4_adaptive_richardson_krylov の m_eff (Krylov 部分空間実効次元) "
+            "maqina cfm4_adaptive_richardson_krylov の m_eff (Krylov 部分空間実効次元) "
             "T 依存性 bench. 量子断熱領域での Krylov 縮退検証 (issue #65 review)."
         )
     )
@@ -365,7 +365,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=1e-3,
         help=(
             "krylov_tol = atol × factor で β_k 早期打切閾値を制御 "
-            "(default: 1e-3, kinema の QuantumAnnealer default と一致). "
+            "(default: 1e-3, maqina の QuantumAnnealer default と一致). "
             "1.0 や 0.1 を渡すと早期打切が発火しやすくなり Krylov 圧縮の "
             "観察が容易になる (精度は犠牲になる)."
         ),
@@ -386,7 +386,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--blas-threads",
         type=int,
         default=None,
-        help="kinema.set_blas_threads(N) で BLAS pool 統一. None で no-op.",
+        help="maqina.set_blas_threads(N) で BLAS pool 統一. None で no-op.",
     )
     parser.add_argument(
         "--results-dir",
@@ -415,7 +415,7 @@ def _build_machine_info(args: argparse.Namespace) -> dict[str, str]:
         ),
     }
     try:
-        rust_mod = importlib.import_module("kinema._rust")
+        rust_mod = importlib.import_module("maqina._rust")
         info["has_blas"] = str(bool(getattr(rust_mod, "__has_blas__", False)))
         info["has_rayon"] = str(bool(getattr(rust_mod, "__has_rayon__", False)))
         info["has_simd"] = str(bool(getattr(rust_mod, "__has_simd__", False)))
@@ -463,7 +463,7 @@ def _write_md(
     lines.append("# bench_m_eff_adiabatic.py")
     lines.append("")
     lines.append(
-        "kinema ``cfm4_adaptive_richardson_krylov`` の Krylov 部分空間実効次元 "
+        "maqina ``cfm4_adaptive_richardson_krylov`` の Krylov 部分空間実効次元 "
         "``m_eff`` を T 依存で計測 (issue #65 review). 量子断熱領域 (T 大) で "
         "ψ が瞬時 H の固有状態に近づき Lanczos β_k 早期打切で m_eff が default "
         "``m_max=24`` から縮むことを実測で示す."

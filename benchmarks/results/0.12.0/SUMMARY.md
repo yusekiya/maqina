@@ -21,7 +21,7 @@ scenario 別に分けてある:
 - **propagator_tol**: `1e-12` (issue #135 default; 固定)
 - **chebyshev atol sweep**: `[1e-2, 1e-3, 1e-4, 1e-5, 1e-6, 1e-7]` (6 cell)
 - **N**, **T**, **seed**: `18`, `10000`, `20260518`
-- **BLAS threads**: default (`OPENBLAS_NUM_THREADS=unset`; kinema Lanczos
+- **BLAS threads**: default (`OPENBLAS_NUM_THREADS=unset`; maqina Lanczos
   内部 BLAS の並列化を維持する用途指針通り)
 - **scenarios**: `non-stiff` (h_p_scale=1) / `stiff` (h_p_scale=10)
 
@@ -49,7 +49,7 @@ controller が見る誤差は純粋に Magnus 4 次成分 (`O(dt^5)`) のみ →
 要求した精度に向けて dt が単調に絞られる, という理論予測通りの挙動を確認。
 
 **stiff `atol=1e-7` の infidelity 上方反転** (`3.34e-10` → `4.38e-09`):
-これは kinema 側の数値破綻ではなく **参照解 (QuTiP sesolve Adams) の
+これは maqina 側の数値破綻ではなく **参照解 (QuTiP sesolve Adams) の
 non-convergence 由来の precision floor** に到達した症状 (§4.2 参照).
 non-stiff 側は `atol=1e-6` で reference precision (= machine precision)
 floor の `<1e-16` placeholder 到達, `atol=1e-7` でも同じ floor 位置で
@@ -83,7 +83,7 @@ reference precision floor (`<1e-16`) に到達。
 → stiff scenario で **5.5-11.8× 高速**。`atol=1e-3` の 11.8× は §3 の n_steps
 削減効果 (`accidental 高精度` upper-bound 効果) が乗っているため。`atol=1e-7`
 の 5.5× は **両 method 共に参照解 (Adams non-convergence) の precision floor
-~1e-10 に到達** している領域: kinema の infidelity 絶対値は ±1-2 桁の不確実性
+~1e-10 に到達** している領域: maqina の infidelity 絶対値は ±1-2 桁の不確実性
 を含むため絶対値比較ではなく "wall 軸での Pareto 比較" として読む (§4.2 参照)。
 
 ### 2.3 Chebyshev `atol=1e-6` cell の Pareto 上の位置 (追加 sweep の主結果)
@@ -193,8 +193,8 @@ fixed dt=0.5 と同じ position に, **2.7× 速く** 到達。
 
 reference は QuTiP `sesolve atol=1e-12 / rtol=1e-10` で生成 (build pipeline で
 Adams 収束 + BDF 一致確認済)。reference の effective precision は `~1e-13`
-〜 `~1e-15` 程度で, kinema infidelity がここを下回ると CSV では `0.0` (= log
-plot 上 `<1e-16` placeholder) として記録される。これは "kinema が reference
+〜 `~1e-15` 程度で, maqina infidelity がここを下回ると CSV では `0.0` (= log
+plot 上 `<1e-16` placeholder) として記録される。これは "maqina が reference
 precision 限界に到達した" 成功サイン (0.8.0 Krylov fixed dt=0.2/0.5 で既に
 観測済の現象と同じ)。
 
@@ -217,17 +217,17 @@ cell も非単調:
   から見た effective precision とは別)
 
 **Chebyshev も `atol=1e-7` で同じ reference floor に到達**して infidelity
-反転 (`3.34e-10` → `4.38e-09`)。これは kinema 側の数値破綻ではなく:
+反転 (`3.34e-10` → `4.38e-09`)。これは maqina 側の数値破綻ではなく:
 
 1. atol↓ で dt をさらに小さく取り n_steps が 1.87× 増 (59506 → 111402)
-2. kinema 内部の round-off accumulation + reference noise の両方が乗る
-3. reference precision floor (~1e-10) を kinema infidelity が下回ろうとすると
+2. maqina 内部の round-off accumulation + reference noise の両方が乗る
+3. reference precision floor (~1e-10) を maqina infidelity が下回ろうとすると
    reference noise が顕在化して infidelity が逆に増える
 
 solver 種類に依らない構造的現象 (Krylov adaptive も `atol=1e-7` で 4.33e-11
 を出すが, これも reference floor 内の数値で信頼区間 ±1-2 桁を含む)。
 
-**kinema が QuTiP に対して達成可能な infidelity の真の floor は ~1e-10** で,
+**maqina が QuTiP に対して達成可能な infidelity の真の floor は ~1e-10** で,
 この限界には `atol=1e-6` で到達済 (target: "wide dynamic range の QuTiP で
 達成している 10^-11 程度の infidelity"; 部分達成. 1e-11 達成には別 reference
 solver / より tight な reference tol が必要だが本 bench スコープ外)。

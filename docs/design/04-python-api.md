@@ -3,7 +3,7 @@
 ### 4.1 公開シンボル
 
 ```python
-from kinema import (
+from maqina import (
     IsingProblem,        # 問題定義 (n, H_p_diag, h_x)
     Schedule,            # アニーリングスケジュール
     QuantumAnnealer,     # one-shot 実行ドライバ
@@ -11,9 +11,9 @@ from kinema import (
     QuantumResult,
     Trajectory,
 )
-from kinema.builders import diag_from_pauli_terms, diag_from_J_h
-from kinema.initial_states import uniform_superposition
-from kinema.eigenstates import instantaneous_eigenstates
+from maqina.builders import diag_from_pauli_terms, diag_from_J_h
+from maqina.initial_states import uniform_superposition
+from maqina.eigenstates import instantaneous_eigenstates
 ```
 
 ### 4.2 `IsingProblem`
@@ -320,7 +320,7 @@ dt_max=..., m_max=...)` は QuantumAnnealer インスタンスから派生させ
 そのまま引き継ぐ (Simulator 側で異なる値を使いたい場合は `AnnealingSimulator`
 を直接構築する).
 
-**実装方針** (`python/kinema/simulator.py`): 内部では `evolve_schedule_*`
+**実装方針** (`python/maqina/simulator.py`): 内部では `evolve_schedule_*`
 driver を `[_t, _t + dt]` または `[_t, t_target]` 区間で呼ぶ薄いラッパ.
 `step` は `n_steps=1` の driver call, `advance_to` は `run` と同じ driver
 call で bit-identical な数値を得る (固定 dt 経路で `rel < 1e-13`).
@@ -413,13 +413,13 @@ v0.1 では **Python 標準例外のみ** を使う:
 | Rust 拡張のロード失敗 (`_rust` 未ビルド) | `ImportError` + `RuntimeWarning` |
 
 Rust 側からは PyO3 の `PyValueError::new_err(...)` / `PyRuntimeError::new_err(...)`
-で raise する。custom exception hierarchy (`KinemaError` ベース等) は
+で raise する。custom exception hierarchy (`MaqinaError` ベース等) は
 **v0.1 では定義しない**。必要性が出てきた場合は、v0.2 以降で
 
 ```python
-class KinemaError(Exception): ...
-class KineSchemaError(KinemaError, ValueError): ...
-class KineConvergenceError(KinemaError, RuntimeError): ...
+class MaqinaError(Exception): ...
+class MaqiSchemaError(MaqinaError, ValueError): ...
+class MaqiConvergenceError(MaqinaError, RuntimeError): ...
 ```
 
 のような多重継承で **既存の `except ValueError:` / `except RuntimeError:` を

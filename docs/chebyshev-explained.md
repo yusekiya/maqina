@@ -1,6 +1,6 @@
 # Chebyshev 法によるプロパゲータ近似 — 段階的解説
 
-`kinema` の `chebyshev_propagate` (`src/chebyshev.rs`) が短時間プロパゲータ
+`maqina` の `chebyshev_propagate` (`src/chebyshev.rs`) が短時間プロパゲータ
 `exp(-i H dt) · ψ` をどう近似しているかを, 数式と直感の両面から段階的に
 辿る. 既存 Lanczos 経路 (`src/krylov.rs`) との対比, および adaptive
 Richardson driver への組込 (`cfm4_step_chebyshev`) も最後に触れる.
@@ -204,7 +204,7 @@ $$
 ### Bessel 係数 $J_0, J_1, \ldots, J_{K+1}$ の計算 — Miller's downward recurrence
 
 Step 5 の漸化に入る前に, **「$J_k(z)$ という数値スカラーをそもそもどう計算するか」**
-という問題が残ります。kinema は **Miller の下降漸化** という古典的手法で
+という問題が残ります。maqina は **Miller の下降漸化** という古典的手法で
 $J_0(z), J_1(z), \ldots, J_{K+1}(z)$ を **一括かつ機械精度** (相対誤差
 $< 10^{-13}$) で求めます。Bessel 関数論を呼ばずに, **(a) 漸化式 (b) 急減衰
 (c) 総和恒等式** の 3 道具だけで仕組みを説明できます。
@@ -499,7 +499,7 @@ return (ψ_acc, K, 2·|J[K+1]|·‖ψ‖)
 
 ## 8. 時間依存 $H(t)$ への拡張: CFM4:2 Magnus に挿す
 
-ここまでは **時間独立 $H$** を前提にしていた. kinema の本来の目的は
+ここまでは **時間独立 $H$** を前提にしていた. maqina の本来の目的は
 時間依存 Schedule $H(t) = A(s(t)) H_\mathrm{drv} + B(s(t)) H_\mathrm{problem}$
 の量子アニーリングダイナミクスなので, Chebyshev 単体では使えない.
 
@@ -550,7 +550,7 @@ $(E_c, R)$ を再計算する必要があるが closed form O(N) なので 1 ste
 
 実測 (N=18, Linux AMD EPYC 7713P): per-step wall **Lanczos 比 5.49×
 高速**, branch-miss 158× 減, sys time 78× 減, parallel efficiency 27% → 44%.
-これが **`kinema` 0.11.0 で default method を Chebyshev variant に切り替えた
+これが **`maqina` 0.11.0 で default method を Chebyshev variant に切り替えた
 根拠** (issue #124).
 
 ---

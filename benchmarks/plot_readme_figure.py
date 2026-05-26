@@ -10,7 +10,7 @@
 - 左下が優勢領域 (Pareto front は左下に張り付く)
 
 `bench_qutip_large.py` の生 md と違い, 本図は **README に直接埋め込んで
-"一目で kinema の優位性が分かる"** ことを目的にしている. なので軸範囲は
+"一目で maqina の優位性が分かる"** ことを目的にしている. なので軸範囲は
 両端の極端 cell をクリップせず生データそのまま, marker は method ごとに
 形状を変えて視認性を確保する. データ点は markers only で描画
 (連結線は cell の sweep 順序を強調するだけで Pareto 形状の視認には
@@ -53,7 +53,7 @@ COLUMNS = [
 ]
 
 # 表示用ラベル / 色 / marker.
-# key = (solver, variant) tuple. variant は kinema の method を識別するタグ.
+# key = (solver, variant) tuple. variant は maqina の method を識別するタグ.
 # 視覚的な識別軸:
 #   - 色 = method 系統 (red/green/orange/blue)
 #   - marker = method ごとに別形状 (+, x, o, s)
@@ -63,21 +63,21 @@ COLUMNS = [
 # 見える. _plot_scenario で markersize の per-style 上書きを実装し,
 # +/x は 12, o/s は 9 を使う.
 SOLVER_STYLE: dict[tuple[str, str], dict[str, object]] = {
-    ("kinema", "krylov_adaptive"): {
+    ("maqina", "krylov_adaptive"): {
         "label": "Krylov adapt. dt",
         "color": "#d62728",  # red
         "marker": "+",
         "alpha": 0.95,
         "markersize": 12,
     },
-    ("kinema", "krylov_fixed"): {
+    ("maqina", "krylov_fixed"): {
         "label": "Krylov fixed dt",
         "color": "#2ca02c",  # green
         "marker": "x",
         "alpha": 0.95,
         "markersize": 12,
     },
-    ("kinema", "chebyshev_adaptive"): {
+    ("maqina", "chebyshev_adaptive"): {
         "label": "Chebyshev adapt. dt",
         "color": "#ff7f0e",  # orange
         "marker": "o",
@@ -208,7 +208,7 @@ def _plot_scenario(
     # で表すので, 図そのものはシンプルに保つ.
     ax.grid(True, which="both", linestyle=":", alpha=0.4)
     # 4 系列分の legend. データが左下に集まるが Pareto frontier 外の領域には
-    # 余白があるので legend は左下に置いて kinema の優位帯と被らないようにする.
+    # 余白があるので legend は左下に置いて maqina の優位帯と被らないようにする.
     # markerscale=0.6 で凡例マーカーを小さくして系列同士の重なりを防ぐ.
     ax.legend(
         loc="lower left",
@@ -222,7 +222,7 @@ def _plot_scenario(
     fig.text(
         0.99,
         0.01,
-        f"kinema v{version}",
+        f"maqina v{version}",
         ha="right",
         va="bottom",
         fontsize=7,

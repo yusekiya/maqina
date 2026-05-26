@@ -8,14 +8,14 @@
 │    psi0, H_p_diag, h_x, schedule(callable)                   │
 │         │                                                    │
 │         ▼                                                    │
-│  kinema.IsingProblem    (problem container)               │
-│  kinema.Schedule        (annealing schedule)              │
-│  kinema.QuantumAnnealer (driver: run / advance_to)        │
-│  kinema.AnnealingSimulator (step-wise stateful API)       │
+│  maqina.IsingProblem    (problem container)               │
+│  maqina.Schedule        (annealing schedule)              │
+│  maqina.QuantumAnnealer (driver: run / advance_to)        │
+│  maqina.AnnealingSimulator (step-wise stateful API)       │
 │         │                                                    │
 │         ▼ Python matvec callback                             │
 │  ┌────────────────────────────────────────────────────────┐  │
-│  │  kinema._rust  (PyO3 extension, maturin-built)      │  │
+│  │  maqina._rust  (PyO3 extension, maturin-built)      │  │
 │  │    lanczos_propagate  (matrix-free Lanczos M-step)     │  │
 │  │    cfm4_step          (CFM4:2 1 step)                  │  │
 │  │    m2_midpoint_step   (M2 中点則 1 step)               │  │
@@ -33,7 +33,7 @@
 
 | 層 | 責務 |
 |---|---|
-| Python (`python/kinema/`) | 公開 API、`IsingProblem` / `Schedule` / `Annealer` の組み立て、結果オブジェクト、瞬時固有状態への投影、入力検証、QuTiP 比較ヘルパ |
+| Python (`python/maqina/`) | 公開 API、`IsingProblem` / `Schedule` / `Annealer` の組み立て、結果オブジェクト、瞬時固有状態への投影、入力検証、QuTiP 比較ヘルパ |
 | Rust (`src/`) | Lanczos ループ (`lanczos_propagate`)、CFM4:2 / M2 / Richardson 推定子の段階指数積、Trotter step (Phase 2 以降)、三重対角固有分解 (hand-rolled QL)、BLAS 経由の Level-1/2 ops |
 | Rust matvec / primitives | `apply_h_kinema` (matvec, bit-flip + 対角積) と `apply_single_mode_axis_i` (Trotter 用 2×2 ユニタリ axis i 作用) を Python callback を介さず Rust 内で完結 |
 
@@ -63,10 +63,10 @@ per-mode GEMM が必要な場合) に対し、FFI 越境コスト削減 + Python
 具体的には:
 
 - `Cargo.toml` と `src/lib.rs` (Rust 側) を **プロジェクトルート**に置く
-- Python ソースは `python/kinema/` 配下に置き、`pyproject.toml` で
+- Python ソースは `python/maqina/` 配下に置き、`pyproject.toml` で
   `python-source = "python"` を宣言する
 - `.pyi` 型スタブは対応する `.py` と同じディレクトリに並べる
-- `py.typed` (PEP 561 マーカ) を `python/kinema/` に置く
+- `py.typed` (PEP 561 マーカ) を `python/maqina/` に置く
 
 この形が docs で「common `ImportError` pitfall」と呼ばれる事象
 ([PyO3/maturin#490](https://github.com/PyO3/maturin/issues/490)) を
@@ -77,7 +77,7 @@ per-mode GEMM が必要な場合) に対し、FFI 越境コスト削減 + Python
 可能だが docs 推奨形ではないため、本パッケージは標準形に従う。
 
 ```
-kinema/
+maqina/
 ├── pyproject.toml              # uv + maturin, python-source = "python"
 ├── Cargo.toml                  # ← Rust crate ルート (maturin 標準位置)
 ├── README.md
@@ -95,7 +95,7 @@ kinema/
 │   ├── tridiag.rs              # 実対称三重対角の implicit QL (hand-rolled)
 │   └── blas.rs                 # 内積 / axpy / nrm2 / scal ラッパ
 ├── python/                     # ← Python ソース (python-source = "python")
-│   └── kinema/
+│   └── maqina/
 │       ├── __init__.py         # 公開 API
 │       ├── __init__.pyi        # 自動生成 stub (.py と同所; maturin が wheel 同梱)
 │       ├── py.typed            # PEP 561 マーカ
@@ -147,7 +147,7 @@ build-backend = "maturin"
 
 [tool.maturin]
 python-source = "python"        # ← 標準推奨 (ImportError 回避)
-module-name = "kinema._rust" # Rust 側 #[pymodule] fn _rust の Python パス
+module-name = "maqina._rust" # Rust 側 #[pymodule] fn _rust の Python パス
 features = ["extension-module"]
 profile = "production"
 strip = true

@@ -196,7 +196,7 @@ pub(crate) fn m2_midpoint_step_py<'py>(
 /// alloc は残る**. 本 in-place 版が排するのは Python 境界の `into_pyarray`
 /// (numpy buffer alloc + GIL 越え) と caller 側 `psi = ...` 再代入による参照
 /// 切り替えコストに限定される. 主な call site:
-/// `python/kinema/krylov.py::evolve_schedule_m2` (Python リファレンス
+/// `python/maqina/krylov.py::evolve_schedule_m2` (Python リファレンス
 /// 経路と `__has_blas__ = False` fallback). 詳細は
 /// `docs/design/07-rust-extension.md` §7.3.
 #[pyfunction]

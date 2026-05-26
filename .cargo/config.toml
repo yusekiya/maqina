@@ -1,4 +1,4 @@
-# Project-local cargo config for kinema.
+# Project-local cargo config for maqina.
 #
 # `target-cpu=native` を全 cargo invocation に注入する目的:
 #
@@ -15,7 +15,7 @@
 #
 # 注意点:
 #
-#   * 生成される `kinema._rust.*.so` は **build マシン専用バイナリ**.
+#   * 生成される `maqina._rust.*.so` は **build マシン専用バイナリ**.
 #     別マシンへ wheel を再配布する用途には適さない (現状 wheel 配布なしの
 #     方針なので問題なし).
 #   * user 側で `RUSTFLAGS` env var を set している場合は env が優先されて

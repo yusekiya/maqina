@@ -18,29 +18,29 @@ work-precision diagram。
 
 reference: 0.11.0 で生成済 `reference_non-stiff_n18_T10000_seed20260518.npz`
 (QuTiP sesolve `atol=1e-12 / rtol=1e-10` で Adams 収束 + BDF 一致確認済)。
-reference の effective precision ~`1e-13` 〜 `1e-15`。kinema infidelity が
+reference の effective precision ~`1e-13` 〜 `1e-15`。maqina infidelity が
 ここを下回ると `<1e-16` placeholder にマップされる。
 
 | Pareto | solver | variant | knob | wall (s) | infidelity | n_steps_eff |
 |---|---|---|---|---:|---|---:|
-| ✓ | **kinema 0.12.0** | **chebyshev_adaptive** | **atol=1e-7** | **1975.58** | **`<1e-16` (floor)** | **21005** |
-| ✓ | **kinema 0.12.0** | **chebyshev_adaptive** | **atol=1e-6** | **1362.51** | **`<1e-16` (floor)** | **13139** |
-|   | kinema 0.8.0 | krylov_adaptive | atol=1e-09 | 22593.55 | `<1e-16` (floor) | 52964 |
-|   | kinema 0.8.0 | krylov_adaptive | atol=1e-07 | 9211.35 | `<1e-16` (floor) | 20987 |
-|   | kinema 0.8.0 | krylov_fixed (cfm4) | dt=0.2 | 7692.77 | `<1e-16` (floor) | 50000 |
-|   | kinema 0.8.0 | krylov_fixed (cfm4) | dt=0.5 | 3619.56 | `<1e-16` (floor) | 20000 |
+| ✓ | **maqina 0.12.0** | **chebyshev_adaptive** | **atol=1e-7** | **1975.58** | **`<1e-16` (floor)** | **21005** |
+| ✓ | **maqina 0.12.0** | **chebyshev_adaptive** | **atol=1e-6** | **1362.51** | **`<1e-16` (floor)** | **13139** |
+|   | maqina 0.8.0 | krylov_adaptive | atol=1e-09 | 22593.55 | `<1e-16` (floor) | 52964 |
+|   | maqina 0.8.0 | krylov_adaptive | atol=1e-07 | 9211.35 | `<1e-16` (floor) | 20987 |
+|   | maqina 0.8.0 | krylov_fixed (cfm4) | dt=0.2 | 7692.77 | `<1e-16` (floor) | 50000 |
+|   | maqina 0.8.0 | krylov_fixed (cfm4) | dt=0.5 | 3619.56 | `<1e-16` (floor) | 20000 |
 | ✓ | qutip | qutip | tol=1e-09 | 27387.64 | 1.286e-10 | - |
-| ✓ | **kinema 0.12.0** | **chebyshev_adaptive** | **atol=1e-5** | **946.10** | **3.308e-10** | **8104** |
-|   | kinema 0.8.0 | krylov_adaptive | atol=1e-05 | 4197.37 | 1.110e-10 | 8098 |
-| ✓ | **kinema 0.12.0** | **chebyshev_adaptive** | **atol=1e-4** | **676.88** | **5.455e-07** | **4754** |
+| ✓ | **maqina 0.12.0** | **chebyshev_adaptive** | **atol=1e-5** | **946.10** | **3.308e-10** | **8104** |
+|   | maqina 0.8.0 | krylov_adaptive | atol=1e-05 | 4197.37 | 1.110e-10 | 8098 |
+| ✓ | **maqina 0.12.0** | **chebyshev_adaptive** | **atol=1e-4** | **676.88** | **5.455e-07** | **4754** |
 |   | qutip | qutip | tol=1e-05 | 16524.60 | 1.145e-06 | - |
 |   | qutip | qutip | tol=1e-07 | 14221.90 | 5.767e-02 | - |
 |   | qutip | qutip | tol=1e-03 | 3369.31 | 4.394e-07 | - |
-|   | kinema 0.8.0 | krylov_fixed (cfm4) | dt=2.0 | 1547.21 | 1.937e-05 | 5000 |
-|   | kinema 0.8.0 | krylov_adaptive | atol=1e-03 | 1645.17 | 8.331e-05 | 1877 |
-| ✓ | **kinema 0.12.0** | **chebyshev_adaptive** | **atol=1e-3** | **413.78** | **1.045e-04** | **1884** |
-|   | kinema 0.8.0 | krylov_fixed (cfm4) | dt=5.0 | 741.07 | 8.771e-04 | 2000 |
-| ✓ | **kinema 0.12.0** | **chebyshev_adaptive** | **atol=1e-2** | **343.05** | **9.133e-04** | **1000** |
+|   | maqina 0.8.0 | krylov_fixed (cfm4) | dt=2.0 | 1547.21 | 1.937e-05 | 5000 |
+|   | maqina 0.8.0 | krylov_adaptive | atol=1e-03 | 1645.17 | 8.331e-05 | 1877 |
+| ✓ | **maqina 0.12.0** | **chebyshev_adaptive** | **atol=1e-3** | **413.78** | **1.045e-04** | **1884** |
+|   | maqina 0.8.0 | krylov_fixed (cfm4) | dt=5.0 | 741.07 | 8.771e-04 | 2000 |
+| ✓ | **maqina 0.12.0** | **chebyshev_adaptive** | **atol=1e-2** | **343.05** | **9.133e-04** | **1000** |
 
 → **non-stiff Pareto frontier は全 6 Chebyshev cell + QuTiP の最 tight cell
 (`tol=1e-9`) のみ**。Krylov adaptive / fixed cfm4 はいずれも Pareto frontier

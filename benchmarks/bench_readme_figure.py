@@ -1,13 +1,13 @@
 """README 用 fidelity-vs-runtime 散布図の **計測** スクリプト.
 
 `build_readme_problem.py` と `compute_readme_reference.py` で **事前生成済**
-の npz (問題ファイル + 参照解ファイル) を読み, kinema の 3 propagator method
+の npz (問題ファイル + 参照解ファイル) を読み, maqina の 3 propagator method
 (``cfm4_adaptive_richardson_krylov`` / 固定 dt ``cfm4`` /
 ``cfm4_adaptive_richardson_chebyshev``) と QuTiP ``sesolve`` (Adams, sparse)
 の精度パラメータ sweep を回して各 cell の wall time + infidelity を CSV に
 dump する. 描画は `plot_readme_figure.py` が担当 (本 script は描画しない).
 
-途中測定なし (``save_tlist=None``, kinema 最節約モード) で最終状態
+途中測定なし (``save_tlist=None``, maqina 最節約モード) で最終状態
 ``ψ(T)`` のみ取得し参照解との infidelity ``1 - |<ψ_ref|ψ>|^2`` を測る.
 
 ## 出力 CSV
@@ -16,7 +16,7 @@ dump する. 描画は `plot_readme_figure.py` が担当 (本 script は描画�
 
 ```
 scenario,n,T,seed,solver,variant,knob_name,knob_value,wall_sec,infidelity,n_steps_eff
-non-stiff,18,10000.0,20260518,kinema,krylov_adaptive,atol,1e-05,1234.5,4.218e-09,8766
+non-stiff,18,10000.0,20260518,maqina,krylov_adaptive,atol,1e-05,1234.5,4.218e-09,8766
 non-stiff,18,10000.0,20260518,qutip,qutip,tol,1e-05,9876.3,1.234e-06,
 ...
 ```
@@ -36,22 +36,22 @@ non-stiff,18,10000.0,20260518,qutip,qutip,tol,1e-05,9876.3,1.234e-06,
 bench branch (kryanneal API) で Phase 1 として収集した CSV
 (``solver=kryanneal, variant=adaptive_multi/cfm4_multi``) は
 ``tools/migrate_existing_csv.sh`` で本 script の命名規約
-(``solver=kinema, variant=krylov_adaptive/krylov_fixed``) に rename できる.
+(``solver=maqina, variant=krylov_adaptive/krylov_fixed``) に rename できる.
 migration 後は同じ CSV ファイルに本 script (``--method chebyshev``) で
 Chebyshev cell を append できる (skip-existing で既存 Krylov / QuTiP 行は
 保持される).
 
 ## `--solver` / `--method` フラグ
 
-* ``--solver {both, kinema, qutip}``: 戦略 B (scenario 順次 + QuTiP cells 2
+* ``--solver {both, maqina, qutip}``: 戦略 B (scenario 順次 + QuTiP cells 2
   scenario 並列) で使う実行対象 cells 選択.
-* ``--method {adaptive, cfm4, chebyshev}``: kinema の propagator. 各 method の
+* ``--method {adaptive, cfm4, chebyshev}``: maqina の propagator. 各 method の
   精度つまみが異なる (adaptive/chebyshev = atol, cfm4 = dt).
 
 典型運用 (本番 N=18, T=10^4, Chebyshev cell 追記):
 
 ```bash
-uv run python -m benchmarks.bench_readme_figure --solver kinema \\
+uv run python -m benchmarks.bench_readme_figure --solver maqina \\
     --method chebyshev --variant-tag chebyshev_adaptive \\
     --problem-file   benchmarks/data/problem_non-stiff_n18_seed20260518.npz \\
     --reference-file benchmarks/data/reference_non-stiff_n18_T10000_seed20260518.npz \\
@@ -76,11 +76,11 @@ from benchmarks._readme_figure_helpers import (
     infidelity,
     run_qutip,
 )
-from kinema import IsingProblem, QuantumAnnealer, Schedule
-from kinema.initial_states import uniform_superposition
+from maqina import IsingProblem, QuantumAnnealer, Schedule
+from maqina.initial_states import uniform_superposition
 
 # CSV のカラム順. plot_readme_figure.py と同期.
-# 'variant' 列は kinema の method を区別するタグ
+# 'variant' 列は maqina の method を区別するタグ
 # (e.g. "krylov_adaptive", "krylov_fixed", "chebyshev_adaptive").
 # qutip 系は "qutip" 固定.
 CSV_FIELDNAMES = [
@@ -101,7 +101,7 @@ CSV_FIELDNAMES = [
 # 値と CSV から読んだ文字列を相互変換しても一致するよう scientific 6 桁.
 _KNOB_FMT = "{:.6e}"
 
-# kinema solver の variant tag default mapping (--variant-tag を渡されない
+# maqina solver の variant tag default mapping (--variant-tag を渡されない
 # 場合に使う). method-prefix 形で plot 側 SOLVER_STYLE と整合.
 _METHOD_TO_DEFAULT_VARIANT: dict[str, str] = {
     "adaptive": "krylov_adaptive",
@@ -109,8 +109,8 @@ _METHOD_TO_DEFAULT_VARIANT: dict[str, str] = {
     "chebyshev": "chebyshev_adaptive",
 }
 
-# kinema solver の method → kinema 内部 method 文字列 mapping.
-_METHOD_TO_KINEMA_NAME: dict[str, str] = {
+# maqina solver の method → maqina 内部 method 文字列 mapping.
+_METHOD_TO_MAQINA_NAME: dict[str, str] = {
     "adaptive": "cfm4_adaptive_richardson_krylov",
     "cfm4": "cfm4",
     "chebyshev": "cfm4_adaptive_richardson_chebyshev",
@@ -122,7 +122,7 @@ def _normalize_knob(value: float) -> str:
     return _KNOB_FMT.format(float(value))
 
 
-def _run_kinema_cfm4_fixed_dt(
+def _run_maqina_cfm4_fixed_dt(
     prob: IsingProblem,
     sched: Schedule,
     psi0: np.ndarray,
@@ -149,7 +149,7 @@ def _run_kinema_cfm4_fixed_dt(
     return elapsed, np.ascontiguousarray(res.psi_final), n_steps
 
 
-def _run_kinema_adaptive_krylov(
+def _run_maqina_adaptive_krylov(
     prob: IsingProblem,
     sched: Schedule,
     psi0: np.ndarray,
@@ -171,7 +171,7 @@ def _run_kinema_adaptive_krylov(
     return elapsed, np.ascontiguousarray(res.psi_final), n_steps_actual
 
 
-def _run_kinema_adaptive_chebyshev(
+def _run_maqina_adaptive_chebyshev(
     prob: IsingProblem,
     sched: Schedule,
     psi0: np.ndarray,
@@ -251,12 +251,12 @@ def run_bench(
     *,
     problem_file: Path,
     reference_file: Path,
-    kinema_atols: Sequence[float],
-    kinema_cfm4_dts: Sequence[float],
+    maqina_atols: Sequence[float],
+    maqina_cfm4_dts: Sequence[float],
     chebyshev_atols: Sequence[float],
     qutip_tols: Sequence[float],
     output_dir: Path,
-    solver: Literal["both", "kinema", "qutip"] = "both",
+    solver: Literal["both", "maqina", "qutip"] = "both",
     method: Literal["adaptive", "cfm4", "chebyshev"] = "adaptive",
     variant_tag: str | None = None,
     chebyshev_propagator_tol: float | None = None,
@@ -314,16 +314,16 @@ def run_bench(
     # 既存 CSV をロードして skip-existing に使う
     rows, done_cells = _load_existing(csv_path)
 
-    # kinema cells 用 variant tag (default = method 名 → 既定 mapping).
+    # maqina cells 用 variant tag (default = method 名 → 既定 mapping).
     # qutip は固定 "qutip".
     if variant_tag is not None:
-        kinema_variant = variant_tag
+        maqina_variant = variant_tag
     else:
-        kinema_variant = _METHOD_TO_DEFAULT_VARIANT[method]
+        maqina_variant = _METHOD_TO_DEFAULT_VARIANT[method]
 
     print(
         f"\n=== bench: scenario={scenario}, n={n}, T={T:.0f}, seed={seed} "
-        f"(solver={solver}, method={method}, variant={kinema_variant!r}) ===",
+        f"(solver={solver}, method={method}, variant={maqina_variant!r}) ===",
         flush=True,
     )
     print(f"problem:   {problem_file}", flush=True)
@@ -336,16 +336,16 @@ def run_bench(
             flush=True,
         )
 
-    # ---- kinema cells ----
-    if solver in ("both", "kinema"):
+    # ---- maqina cells ----
+    if solver in ("both", "maqina"):
         if method == "adaptive":
             knob_name = "atol"
-            knob_sweep = list(kinema_atols)
-            runner = _run_kinema_adaptive_krylov
+            knob_sweep = list(maqina_atols)
+            runner = _run_maqina_adaptive_krylov
         elif method == "cfm4":
             knob_name = "dt"
-            knob_sweep = list(kinema_cfm4_dts)
-            runner = _run_kinema_cfm4_fixed_dt
+            knob_sweep = list(maqina_cfm4_dts)
+            runner = _run_maqina_cfm4_fixed_dt
         elif method == "chebyshev":
             knob_name = "atol"
             knob_sweep = list(chebyshev_atols)
@@ -358,7 +358,7 @@ def run_bench(
                 T: float,
                 atol: float,
             ) -> tuple[float, np.ndarray, int]:
-                return _run_kinema_adaptive_chebyshev(
+                return _run_maqina_adaptive_chebyshev(
                     prob,
                     sched,
                     psi0,
@@ -370,22 +370,22 @@ def run_bench(
             raise ValueError(f"unknown method: {method!r}")
 
         for knob in knob_sweep:
-            knob_key = ("kinema", kinema_variant, _normalize_knob(knob))
+            knob_key = ("maqina", maqina_variant, _normalize_knob(knob))
             if knob_key in done_cells:
                 print(
-                    f"[skip] kinema {kinema_variant} {knob_name}={knob:.3g} "
+                    f"[skip] maqina {maqina_variant} {knob_name}={knob:.3g} "
                     f"(既存 cell, CSV に保存済み)",
                     flush=True,
                 )
                 continue
             print(
-                f"\n[kinema/{kinema_variant}] {knob_name}={knob:.3g} running ...",
+                f"\n[maqina/{maqina_variant}] {knob_name}={knob:.3g} running ...",
                 flush=True,
             )
             wall, psi, n_steps = runner(prob, sched, psi0, T, knob)
             inf = infidelity(psi, psi_ref)
             print(
-                f"[kinema/{kinema_variant}] {knob_name}={knob:.3g}: "
+                f"[maqina/{maqina_variant}] {knob_name}={knob:.3g}: "
                 f"wall={wall:.2f}s, infidelity={inf:.3e}, n_steps={n_steps}",
                 flush=True,
             )
@@ -395,8 +395,8 @@ def run_bench(
                     "n": n,
                     "T": T,
                     "seed": seed,
-                    "solver": "kinema",
-                    "variant": kinema_variant,
+                    "solver": "maqina",
+                    "variant": maqina_variant,
                     "knob_name": knob_name,
                     "knob_value": knob,
                     "wall_sec": wall,
@@ -472,7 +472,7 @@ def main() -> None:
         "--method",
         choices=["adaptive", "cfm4", "chebyshev"],
         default="adaptive",
-        help="kinema の propagator method. "
+        help="maqina の propagator method. "
         "adaptive = cfm4_adaptive_richardson_krylov (atol sweep), "
         "cfm4 = 固定 dt CFM4:2 (dt sweep), "
         "chebyshev = cfm4_adaptive_richardson_chebyshev (atol sweep). "
@@ -482,13 +482,13 @@ def main() -> None:
         "--variant-tag",
         type=str,
         default=None,
-        help="CSV の variant 列に書く識別子 (kinema cells 用). "
+        help="CSV の variant 列に書く識別子 (maqina cells 用). "
         "None なら method に応じて 'krylov_adaptive' / 'krylov_fixed' / "
         "'chebyshev_adaptive' を自動選択. "
         "qutip cells は常に variant='qutip' 固定.",
     )
     parser.add_argument(
-        "--kinema-atols",
+        "--maqina-atols",
         type=_parse_floats,
         default=[1e-3, 1e-5, 1e-7],
         help="cfm4_adaptive_richardson_krylov atol sweep (method=adaptive のとき). "
@@ -536,10 +536,10 @@ def main() -> None:
     )
     parser.add_argument(
         "--solver",
-        choices=["both", "kinema", "qutip"],
+        choices=["both", "maqina", "qutip"],
         default="both",
         help="実行する solver の cells を選択する. "
-        "both=両方 (default), kinema=kinema cells のみ, qutip=QuTiP cells のみ. "
+        "both=両方 (default), maqina=maqina cells のみ, qutip=QuTiP cells のみ. "
         "戦略 B (scenario 順次 + QuTiP cells 2 scenario 並列実行) で使う.",
     )
     parser.add_argument(
@@ -548,10 +548,10 @@ def main() -> None:
         default=None,
         help="全 BLAS pool (numpy bundled + system OpenBLAS) の thread 数を "
         "指定する (default None = 制御しない = OpenBLAS default thread).\n"
-        "kinema の adaptive Richardson は Lanczos 内部で Gram-Schmidt + 終端 "
+        "maqina の adaptive Richardson は Lanczos 内部で Gram-Schmidt + 終端 "
         "gemv (BLAS Level-1/2) を多用するため, BLAS=1 にすると wall time が "
         "1.5× 程度遅くなる (実測 Linux EPYC 7713P, N=18, atol=1e-3 で 27.5 min "
-        "→ 40+ min). したがって kinema cell では明示指定しない (default).\n"
+        "→ 40+ min). したがって maqina cell では明示指定しない (default).\n"
         "QuTiP cells を 2 scenario 並列実行する場合のみ spin wait + 2 process "
         "間競合を避けるため --blas-threads 1 を明示渡す (sparse matvec は "
         "BLAS を使わないので thread 数が wall time に影響しない).",
@@ -560,13 +560,13 @@ def main() -> None:
 
     # `--blas-threads` を渡された場合のみ set_blas_threads を呼ぶ. 渡されない場合
     # (default = None) は OpenBLAS の default thread (= 物理コア数) のまま. これに
-    # より kinema の Lanczos 内部 BLAS calls (Gram-Schmidt / 終端 gemv) が並列化
+    # より maqina の Lanczos 内部 BLAS calls (Gram-Schmidt / 終端 gemv) が並列化
     # を維持できる. (set_blas_threads は threadpoolctl 経由で numpy bundled +
     # system OpenBLAS の両方を制御するが rayon pool には影響しない.)
     if args.blas_threads is not None:
-        import kinema as _kinema  # noqa: PLC0415  (CLI 引数解決後)
+        import maqina as _maqina  # noqa: PLC0415  (CLI 引数解決後)
 
-        _kinema.set_blas_threads(args.blas_threads)
+        _maqina.set_blas_threads(args.blas_threads)
         print(
             f"[config] BLAS threads = {args.blas_threads} "
             f"(明示指定; spin wait 排除 / 2 scenario 並列時の競合回避用)",
@@ -575,15 +575,15 @@ def main() -> None:
     else:
         print(
             "[config] BLAS threads = default (制御しない). "
-            "kinema Lanczos 内部 BLAS の並列化を維持.",
+            "maqina Lanczos 内部 BLAS の並列化を維持.",
             flush=True,
         )
 
     run_bench(
         problem_file=args.problem_file,
         reference_file=args.reference_file,
-        kinema_atols=args.kinema_atols,
-        kinema_cfm4_dts=args.cfm4_dts,
+        maqina_atols=args.maqina_atols,
+        maqina_cfm4_dts=args.cfm4_dts,
         chebyshev_atols=args.chebyshev_atols,
         qutip_tols=args.qutip_tols,
         output_dir=args.output_dir,

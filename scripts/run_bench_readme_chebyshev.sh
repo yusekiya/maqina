@@ -5,11 +5,11 @@
 # 前提:
 #   1. 入力 npz (benchmarks/data/problem_*.npz / reference_*.npz) が main に
 #      cherry-pick 済 (Phase 1 で生成し bench branch から取り込んだもの).
-#   2. kinema build (uv run maturin develop --uv --release) 済.
+#   2. maqina build (uv run maturin develop --uv --release) 済.
 #
-# 構成: kinema cfm4_adaptive_richardson_chebyshev (multi-thread) で 2 scenario
+# 構成: maqina cfm4_adaptive_richardson_chebyshev (multi-thread) で 2 scenario
 # 順次実行. 各 scenario は --chebyshev-atols [1e-1, 1e-2, 1e-3, 1e-4] sweep.
-# scenario 順次 (Step 1-2 と同方針, kinema multi が DRAM 帯域を使い切るため).
+# scenario 順次 (Step 1-2 と同方針, maqina multi が DRAM 帯域を使い切るため).
 #
 # 出力 CSV (benchmarks/results/0.11.0/bench_<scenario>.csv) は Chebyshev cell
 # のみ. Krylov 0.8.0 は benchmarks/results/0.8.0/, QuTiP は benchmarks/results/qutip/
@@ -66,10 +66,10 @@ for scenario in "${scenarios[@]}"; do
     fi
 done
 
-# kinema build の確認 (Chebyshev は main 以降の機能なので kryanneal build では
+# maqina build の確認 (Chebyshev は main 以降の機能なので kryanneal build では
 # 動かない). import 試行 + method 名チェック.
-if ! uv run python -c "import kinema; print(kinema.__name__)" >/dev/null 2>&1; then
-    echo "ERROR: kinema が import できません. 'uv run maturin develop --uv --release' を実行してください." >&2
+if ! uv run python -c "import maqina; print(maqina.__name__)" >/dev/null 2>&1; then
+    echo "ERROR: maqina が import できません. 'uv run maturin develop --uv --release' を実行してください." >&2
     exit 1
 fi
 
@@ -85,7 +85,7 @@ echo "  propagator_tol: ${CHEBYSHEV_PROPAGATOR_TOL} (issue #135 default; 固定)
 echo "================================================================"
 
 # ----------------------------------------------------------------------------
-# 内部ヘルパ: kinema Chebyshev cell sweep を 1 scenario 起動する.
+# 内部ヘルパ: maqina Chebyshev cell sweep を 1 scenario 起動する.
 # ----------------------------------------------------------------------------
 run_chebyshev_cell() {
     local scenario=$1
@@ -95,11 +95,11 @@ run_chebyshev_cell() {
 
     echo ""
     echo "================================================================"
-    echo "=== kinema chebyshev_adaptive $scenario start: $(date) ==="
+    echo "=== maqina chebyshev_adaptive $scenario start: $(date) ==="
     echo "================================================================"
 
     uv run python -u -m benchmarks.bench_readme_figure \
-        --solver kinema \
+        --solver maqina \
         --method chebyshev \
         --variant-tag chebyshev_adaptive \
         --chebyshev-atols "$CHEBYSHEV_ATOLS" \
@@ -108,7 +108,7 @@ run_chebyshev_cell() {
         --reference-file "$reference_npz" \
         --output-dir     "$OUTPUT_DIR"
 
-    echo "=== kinema chebyshev_adaptive $scenario done: $(date) ==="
+    echo "=== maqina chebyshev_adaptive $scenario done: $(date) ==="
 }
 
 # ============================================================================
@@ -116,7 +116,7 @@ run_chebyshev_cell() {
 # ============================================================================
 echo ""
 echo "################################################################"
-echo "### Chebyshev cells (kinema cfm4_adaptive_richardson_chebyshev) ###"
+echo "### Chebyshev cells (maqina cfm4_adaptive_richardson_chebyshev) ###"
 echo "################################################################"
 for scenario in "${scenarios[@]}"; do
     run_chebyshev_cell "$scenario"

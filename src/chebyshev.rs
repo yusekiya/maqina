@@ -478,7 +478,7 @@ pub fn gershgorin_bounds(h_x: &[f64], h_p_diag: &[f64], a_t: f64, b_t: f64) -> (
 /// 1 度だけ計算して上位 driver から渡せば, per-step の Gershgorin 計算は
 /// O(2^N + N) → O(1) に縮む.
 ///
-/// `b_t` の符号で min / max が swap することに注意 (現状の `kinema` schedule は
+/// `b_t` の符号で min / max が swap することに注意 (現状の `maqina` schedule は
 /// `b_t ∈ [0, 1]` だが, ロバスト性のため分岐を持つ).
 #[inline]
 pub fn gershgorin_bounds_cached(

@@ -15,9 +15,9 @@ build/
 dist/
 
 # maturin develop の配置先 (.so のみ無視; .py / .pyi は VCS 管理)
-python/kinema/_rust*.so
-python/kinema/_rust*.pyd
-python/kinema/_rust*.dylib
+python/maqina/_rust*.so
+python/maqina/_rust*.pyd
+python/maqina/_rust*.dylib
 
 # uv
 .venv/

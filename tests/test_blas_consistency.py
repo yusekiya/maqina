@@ -15,11 +15,11 @@
 3. ``uv run python tools/diff_blas_artifacts.py tests/artifacts/blas_on.npz tests/artifacts/blas_off.npz``
    で全 array を ``rel < 1e-13`` で diff
 
-artifact 出力先は ``KINEMA_ARTIFACT_DIR`` env var で上書き可能
+artifact 出力先は ``MAQINA_ARTIFACT_DIR`` env var で上書き可能
 (default は ``tests/artifacts/``). ファイル名は ``_rust.__has_blas__`` で
 自動分岐 (``blas_on.npz`` / ``blas_off.npz``)。
 
-``KINEMA_EXPECT_BLAS`` env var で「期待する build mode」を pin できる
+``MAQINA_EXPECT_BLAS`` env var で「期待する build mode」を pin できる
 (``=1`` で BLAS on を期待, ``=0`` で off を期待). 期待と
 ``_rust.__has_blas__`` が不一致なら test を skip + 明示メッセージ
 (間違った build を回したときに silent に上書き保存しないため)。
@@ -37,10 +37,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from kinema import IsingProblem, Observable, QuantumAnnealer, Schedule
-from kinema.initial_states import uniform_superposition
+from maqina import IsingProblem, Observable, QuantumAnnealer, Schedule
+from maqina.initial_states import uniform_superposition
 
-_rust = pytest.importorskip("kinema._rust")
+_rust = pytest.importorskip("maqina._rust")
 
 
 # --- artifact 出力先解決 ---------------------------------------------------
@@ -52,31 +52,31 @@ _DEFAULT_ARTIFACT_DIR = _REPO_ROOT / "tests" / "artifacts"
 def _resolve_artifact_dir() -> Path:
     """artifact 出力先ディレクトリを返す (env var override 可).
 
-    ``KINEMA_ARTIFACT_DIR`` が設定されていればその path を Path 化して
+    ``MAQINA_ARTIFACT_DIR`` が設定されていればその path を Path 化して
     返す. 未設定なら ``<repo>/tests/artifacts/`` を返す. どちらの場合も
     ディレクトリは本関数では作らない (caller が ``mkdir`` する).
     """
-    env_dir = os.environ.get("KINEMA_ARTIFACT_DIR")
+    env_dir = os.environ.get("MAQINA_ARTIFACT_DIR")
     if env_dir:
         return Path(env_dir)
     return _DEFAULT_ARTIFACT_DIR
 
 
 def _check_expected_blas() -> None:
-    """``KINEMA_EXPECT_BLAS`` env var と ``_rust.__has_blas__`` の整合をチェック.
+    """``MAQINA_EXPECT_BLAS`` env var と ``_rust.__has_blas__`` の整合をチェック.
 
     env var が未設定ならスキップしない. 設定済みで build mode と不一致なら
     ``pytest.skip`` で明示的にスキップする (誤った build に対して artifact を
     silent に上書きしないため).
     """
-    expect = os.environ.get("KINEMA_EXPECT_BLAS")
+    expect = os.environ.get("MAQINA_EXPECT_BLAS")
     if expect is None:
         return
     expect_blas = expect.strip() in ("1", "true", "True", "on", "ON")
     has_blas = bool(_rust.__has_blas__)
     if expect_blas != has_blas:
         pytest.skip(
-            f"KINEMA_EXPECT_BLAS={expect!r} but _rust.__has_blas__={has_blas!r}; "
+            f"MAQINA_EXPECT_BLAS={expect!r} but _rust.__has_blas__={has_blas!r}; "
             "rebuild with the requested feature set before regenerating the artifact."
         )
 

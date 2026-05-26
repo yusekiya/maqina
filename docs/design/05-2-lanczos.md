@@ -168,7 +168,7 @@ per-iter で T_{k+1} の三重対角固有分解 + c_last 計算が必要 (O(k²
 
 ### Python リファレンス実装
 
-`python/kinema/krylov.py::_python_lanczos_propagate` も完全に同一ロジックで
+`python/maqina/krylov.py::_python_lanczos_propagate` も完全に同一ロジックで
 書かれており, Rust 経路と `rel < 1e-13` で一致するのが契約
 (`tests/test_krylov.py::test_rust_lanczos_matches_python_reference`).
 内部の `_tridiag_c_last_abs` ヘルパも対応する.

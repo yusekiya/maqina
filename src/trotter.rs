@@ -315,7 +315,7 @@ pub(crate) fn trotter_step_py<'py>(
 /// ```
 ///
 /// として呼ぶ. `trotter_step_py` と同じ shape 検査を行い, 不整合は
-/// `PyValueError`. 主な call site: `python/kinema/krylov.py` の Trotter
+/// `PyValueError`. 主な call site: `python/maqina/krylov.py` の Trotter
 /// 経路 step loop, `benchmarks/bench_block_fusion.py` /
 /// `benchmarks/bench_parallel_scaling.py` (計測内 alloc/copy 排除).
 /// 詳細は `docs/design/07-rust-extension.md` §7.3.
@@ -487,7 +487,7 @@ pub(crate) fn trotter_suzuki4_step_py<'py>(
 /// ```
 ///
 /// として呼ぶ. `trotter_suzuki4_step_py` と同じ shape 検査を行い, 不整合は
-/// `PyValueError`. 主な call site: `python/kinema/krylov.py` の
+/// `PyValueError`. 主な call site: `python/maqina/krylov.py` の
 /// trotter_suzuki4 経路 step loop. 詳細は `docs/design/07-rust-extension.md` §7.3.
 #[pyfunction]
 #[pyo3(signature = (psi, h_x, h_p_diag, a_t_list, b_t_list, dt, n))]

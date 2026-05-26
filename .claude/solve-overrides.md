@@ -1,4 +1,4 @@
-# solve overrides for kinema
+# solve overrides for maqina
 
 `/solve` skill の達成基準・権限境界に対するプロジェクト固有の追記。skill 側の基底規約を override するものではなく、delta を追加するためのファイル。
 
@@ -9,8 +9,8 @@
 - `.claude/skills/test-runner/SKILL.md`: テスト・lint・build 実行手順の一次資料。テスト規約や実行方法を変えたら同コミットに反映する (`docs/testing.md` はポインタなので drift しない)。
 - `docs/benchmarks.md` (存在する場合): 性能計測手順や結果の参照規約。
 - `CLAUDE.md`: プロジェクトガイド (Claude 向け)。レイアウト・コマンド・物理的取り決めが変わったら同コミットで更新する。
-- 既存コードの docstring 慣習: 数式や物理的意味を持つ変数は **日本語** docstring で意味を記述する (cv_ising 流)。`python/kinema/__init__.py` の既存 docstring を参考にする。
-- 自動生成スタブ: `python/kinema/*.pyi` は `tools/gen_api_stubs.py` で再生成。`python/kinema/**/*.py` または `tools/gen_api_stubs.py` を変更したら **同コミットに再生成済み `.pyi` を含める**。`.pre-commit-config.yaml` の `gen-api-stubs` フックがセーフティネットとして drift を検出する。
+- 既存コードの docstring 慣習: 数式や物理的意味を持つ変数は **日本語** docstring で意味を記述する (cv_ising 流)。`python/maqina/__init__.py` の既存 docstring を参考にする。
+- 自動生成スタブ: `python/maqina/*.pyi` は `tools/gen_api_stubs.py` で再生成。`python/maqina/**/*.py` または `tools/gen_api_stubs.py` を変更したら **同コミットに再生成済み `.pyi` を含める**。`.pre-commit-config.yaml` の `gen-api-stubs` フックがセーフティネットとして drift を検出する。
 
 ## テスト実行規約
 
@@ -43,8 +43,8 @@
 
 `autonomous` ラベル付き issue の処理中、以下に該当する変更が必要と判明した時点で skill の中止プロトコルへ移行する。
 
-1. **公開 API の破壊的変更**: `python/kinema/__init__.py` の `__all__` に含まれる名前、または `IsingProblem` / `Schedule` / `QuantumAnnealer` / `QuantumResult` / `Trajectory` 等の公開シグネチャ・セマンティクスの非互換変更。バージョン bump を伴う変更も同様。
-2. **数値計算の再現性・精度に影響する変更**: Lanczos / CFM4:2 / M2 / Trotter / Richardson の係数・演算順序・収束判定・PI controller 既定値、`apply_h_kinema` の bit-flip 規約、BLAS feature on/off 経路の数値一致 (`rel < 1e-13`) を壊しうる変更、デフォルト dt / max_m / tol などの既定値変更。
+1. **公開 API の破壊的変更**: `python/maqina/__init__.py` の `__all__` に含まれる名前、または `IsingProblem` / `Schedule` / `QuantumAnnealer` / `QuantumResult` / `Trajectory` 等の公開シグネチャ・セマンティクスの非互換変更。バージョン bump を伴う変更も同様。
+2. **数値計算の再現性・精度に影響する変更**: Lanczos / CFM4:2 / M2 / Trotter / Richardson の係数・演算順序・収束判定・PI controller 既定値、`apply_h_maqina` の bit-flip 規約、BLAS feature on/off 経路の数値一致 (`rel < 1e-13`) を壊しうる変更、デフォルト dt / max_m / tol などの既定値変更。
 
 将来追加候補 (現時点では未定義):
 

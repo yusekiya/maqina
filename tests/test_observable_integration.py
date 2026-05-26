@@ -20,8 +20,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kinema import IsingProblem, Observable, QuantumAnnealer, Schedule
-from kinema.initial_states import uniform_superposition
+from maqina import IsingProblem, Observable, QuantumAnnealer, Schedule
+from maqina.initial_states import uniform_superposition
 
 
 def _make_problem(n: int = 3, seed: int = 7) -> IsingProblem:

@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kinema.initial_states import uniform_superposition
+from maqina.initial_states import uniform_superposition
 
 
 @pytest.mark.parametrize("n", [1, 2, 3, 5, 8])

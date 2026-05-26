@@ -27,7 +27,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kinema.krylov import (
+from maqina.krylov import (
     _SUZUKI4_COEFFS,
     _SUZUKI4_MID_OFFSETS,
     _python_trotter_step,
@@ -35,7 +35,7 @@ from kinema.krylov import (
 )
 
 try:
-    from kinema import _rust as _rust_mod
+    from maqina import _rust as _rust_mod
 except ImportError:  # pragma: no cover
     _rust_mod = None  # type: ignore[assignment]
 
@@ -83,7 +83,7 @@ def _dense_exp_minus_i_dt_h(
     return u @ np.diag(np.exp(-1j * dt * lam)) @ u.conj().T
 
 
-@pytest.mark.skipif(not _HAS_RUST, reason="kinema._rust extension not built")
+@pytest.mark.skipif(not _HAS_RUST, reason="maqina._rust extension not built")
 @pytest.mark.parametrize("n", [2, 3, 4, 5])
 @pytest.mark.parametrize("seed", [11, 137, 8675309])
 def test_python_trotter_matches_rust(n: int, seed: int) -> None:
@@ -233,7 +233,7 @@ def test_suzuki4_coeffs_consistency() -> None:
     assert abs(offsets[2] - 0.5) < 1e-15
 
 
-@pytest.mark.skipif(not _HAS_RUST, reason="kinema._rust extension not built")
+@pytest.mark.skipif(not _HAS_RUST, reason="maqina._rust extension not built")
 @pytest.mark.parametrize("n", [2, 3, 4, 5])
 @pytest.mark.parametrize("seed", [11, 137, 8675309])
 def test_python_trotter_suzuki4_matches_rust(n: int, seed: int) -> None:
@@ -409,7 +409,7 @@ def test_python_trotter_suzuki4_more_accurate_than_strang() -> None:
     )
 
 
-@pytest.mark.skipif(not _HAS_RUST, reason="kinema._rust extension not built")
+@pytest.mark.skipif(not _HAS_RUST, reason="maqina._rust extension not built")
 @pytest.mark.parametrize("n", [2, 3, 4, 5])
 @pytest.mark.parametrize("seed", [11, 137, 8675309])
 def test_trotter_step_inplace_py_matches_alloc_variant_bitwise(
@@ -439,7 +439,7 @@ def test_trotter_step_inplace_py_matches_alloc_variant_bitwise(
     )
 
 
-@pytest.mark.skipif(not _HAS_RUST, reason="kinema._rust extension not built")
+@pytest.mark.skipif(not _HAS_RUST, reason="maqina._rust extension not built")
 @pytest.mark.parametrize("n", [2, 3, 4, 5])
 @pytest.mark.parametrize("seed", [11, 137, 8675309])
 def test_trotter_suzuki4_step_inplace_py_matches_alloc_variant_bitwise(

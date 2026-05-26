@@ -8,7 +8,7 @@ Claude Code 向けのプロジェクトガイド。
 
 ## プロジェクト概要
 
-`kinema` ((Kine)tic quantum evolution by (Ma)gnus expansion): 横磁場
+`maqina` (a (Ma)gnus-based (Q)uantum (I)sing (N)umerical (A)nnealer; 名前はラテン語 `machina` に由来): 横磁場
 イジングモデル (TFIM) の量子ダイナミクスを matrix-free に計算する
 シミュレータ。Krylov 法 (Lanczos) または Chebyshev 多項式展開で短時間
 プロパゲータを近似し、Magnus 展開 (CFM4:2) で時間依存 Hamiltonian の
@@ -19,7 +19,7 @@ Richardson + PI 制御) も提供。
 (同じ Krylov + CFM4:2 カーネルの連続変数版)。
 
 - パッケージマネージャ: `uv` (Python `>=3.13`)
-- ビルドバックエンド: `maturin` (Rust 拡張 `kinema._rust` を PyO3 経由でビルド)
+- ビルドバックエンド: `maturin` (Rust 拡張 `maqina._rust` を PyO3 経由でビルド)
 - Lint: `ruff`
 - 型チェック: `ty`
 - 主要依存: `numpy`, `threadpoolctl`
@@ -55,7 +55,7 @@ mixed Rust/Python project 標準形 (`python-source = "python"`, Rust ルート
 直下に `Cargo.toml` + `src/`)。
 
 ```
-kinema/
+maqina/
 ├── pyproject.toml
 ├── Cargo.toml                  # Rust crate ルート (maturin 標準位置)
 ├── src/                        # Rust ソース
@@ -65,7 +65,7 @@ kinema/
 │   ├── cfm4.rs                 # CFM4:2 / M2 / Richardson 推定子
 │   ├── tridiag.rs              # 実対称三重対角の implicit QL (hand-rolled)
 │   └── blas.rs                 # 内積 / axpy / nrm2 / scal ラッパ
-├── python/kinema/           # Python ソース (python-source = "python")
+├── python/maqina/           # Python ソース (python-source = "python")
 │   ├── __init__.py             # 公開 API
 │   ├── __init__.pyi            # 自動生成 stub (wheel 同梱)
 │   ├── py.typed                # PEP 561 マーカ
@@ -160,27 +160,27 @@ artifact フローで検証する:
 ```bash
 # 1. BLAS on build で artifact 生成
 uv run maturin develop --uv --release
-KINEMA_EXPECT_BLAS=1 uv run pytest tests/test_blas_consistency.py
+MAQINA_EXPECT_BLAS=1 uv run pytest tests/test_blas_consistency.py
 
 # 2. BLAS off build に切り替えて再生成 (scalar fallback; rayon/simd は ON 維持)
 uv run maturin develop --uv --release --no-default-features \
     --features extension-module,rayon,simd
-KINEMA_EXPECT_BLAS=0 uv run pytest tests/test_blas_consistency.py
+MAQINA_EXPECT_BLAS=0 uv run pytest tests/test_blas_consistency.py
 
 # 3. 2 つの artifact を diff
 uv run python tools/diff_blas_artifacts.py \
     tests/artifacts/blas_on.npz tests/artifacts/blas_off.npz
 ```
 
-`KINEMA_EXPECT_BLAS` を渡しておくと「誤った build に対する silent 上書き
+`MAQINA_EXPECT_BLAS` を渡しておくと「誤った build に対する silent 上書き
 保存」を防ぐ (build mode と env var が不一致なら test 自身が skip). diff
 script は default で rel < 1e-13 / atol < 1e-13 を assert. ローカル切替の
 都度 BLAS on/off build を行うため小規模 (n ∈ {4,6,8}) sample のみ.
 
 ## API リファレンス
 
-`python/kinema/*.pyi` (per-module PEP 484 stub) に公開 API のシグネチャと
-**full docstring** がダンプされている。**`kinema` を使うスクリプトを
+`python/maqina/*.pyi` (per-module PEP 484 stub) に公開 API のシグネチャと
+**full docstring** がダンプされている。**`maqina` を使うスクリプトを
 書く際はまず該当モジュールの `.pyi` を読み、必要に応じてソース実装を
 参照する** (cv_ising と同方式)。`.pyi` は手書きしない。再生成:
 
@@ -191,7 +191,7 @@ uv run python tools/gen_api_stubs.py
 `.pyi` ドリフト防止は二段階:
 
 1. **Claude 編集時 (一次)**: `.claude/rules/api-stubs-sync.md` (path-scoped rule)
-   が `python/kinema/**/*.py` または `tools/gen_api_stubs.py` 編集時にロード
+   が `python/maqina/**/*.py` または `tools/gen_api_stubs.py` 編集時にロード
    され、再生成スクリプトを同じコミットに含めるよう Claude 側で運用する。
 2. **コミット時 (セーフティネット)**: `.pre-commit-config.yaml` の `gen-api-stubs`
    フックが人間の手編集も含めて取りこぼしを拾う。
@@ -204,7 +204,7 @@ uv run python tools/gen_api_stubs.py
 uv run python benchmarks/bench_per_step.py
 uv run python benchmarks/bench_blas_compare.py   # BLAS feature on/off 同一マシン比較
 uv run python benchmarks/bench_vs_qutip.py
-uv run python benchmarks/bench_qutip_large.py    # work-precision diagram で QuTiP vs kinema を Pareto 比較 (issue #65)
+uv run python benchmarks/bench_qutip_large.py    # work-precision diagram で QuTiP vs maqina を Pareto 比較 (issue #65)
 ```
 
 性能改善の主張をするときの方法 (cv_ising 流):
@@ -267,7 +267,7 @@ thread pool が 2 系統並走するため運用ルール:
     macOS Apple Accelerate は `VECLIB_MAXIMUM_THREADS`, fallback の
     OpenMP 系は `OMP_NUM_THREADS`。複数 pool 同居時は全 env を揃える。
   - **active thread 数** (= 並列 BLAS op で実際に使う thread): Python 側
-    `kinema.set_blas_threads(n)` で動的に変えられる
+    `maqina.set_blas_threads(n)` で動的に変えられる
     (`threadpoolctl.threadpool_limits` 経由)。**pool size 自体は縮まらない**
     (sleeping thread の stack / kernel resource は残る) ので, per-process
     thread budget の隔離が要件なら env 設定が必須。
@@ -277,7 +277,7 @@ thread pool が 2 系統並走するため運用ルール:
   実証された。NT=8 で **1.52× speedup** (NT=1 baseline 比), NT=16-32 でも
   +2% 程度の劣化で許容範囲, NT=64 で -9% に明確な劣化という curve。
   **新方針**:
-  - 既定値は `kinema.set_blas_threads_auto()` を import 後に 1 度呼ぶ。
+  - 既定値は `maqina.set_blas_threads_auto()` を import 後に 1 度呼ぶ。
     内部で `os.process_cpu_count() // 8` を 1-16 でクランプし
     (EPYC SMT2 で 16, 32-core で 4, 8-core 以下で 1), さらに
     `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS` / `VECLIB_MAXIMUM_THREADS` /
@@ -303,7 +303,7 @@ thread pool が 2 系統並走するため運用ルール:
     independent baseline (= 純シリアル比較) 用途で本番 perf bench とは別の
     意味づけ。
 - **並列ジョブ実行 (multiprocessing / Slurm job array 等)**: 1 プロセス
-  あたりの thread budget を絞るには **`kinema` / `numpy` を import する前**
+  あたりの thread budget を絞るには **`maqina` / `numpy` を import する前**
   に上記 env (`RAYON_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS`
   / `VECLIB_MAXIMUM_THREADS` / `OMP_NUM_THREADS`) を一括 set する必要がある
   (BLAS / rayon の pool size は最初の op で確定し以降縮小不可)。具体的な
@@ -353,7 +353,7 @@ i ∈ {0, 1, 2} を SIMD 特化 (`feature = "simd"`, default ON)。
   `__has_avx512f__` / `__has_neon__` (各 bool, `cfg!(target_feature = ...)`
   由来), ビルドターゲットを `_rust.__target_arch__` / `__target_os__`
   (各 str, `std::env::consts` 由来) が expose する (`m.add` 経由, build.rs
-  不要)。ユーザー向けには `kinema.show_config()` (numpy.show_config 相当)
+  不要)。ユーザー向けには `maqina.show_config()` (numpy.show_config 相当)
   でこれらを集約 dump できる (issue #103, 詳細は
   `docs/design/11-build-infrastructure.md` §11.1)。bench スクリプト
   (`bench_simd_scaling.py`) はこれで build を識別する。bench は C2 と C2.5 で
@@ -593,7 +593,7 @@ krylov_tol` が `‖ψ‖ = 1` 規約と意味的に整合し, `c_m_abs` (return
 - `docs/design/05-2-lanczos.md` "a posteriori 早期打切 (issue #98 Phase 8)" 節
   (旧仕様の問題 / 判定式 / overhead 試算).
 - `docs/design/12-release-plan.md` Phase 8 (Definition of Done / Bench acceptance).
-- `src/krylov.rs::tridiag_c_last_abs` / `python/kinema/krylov.py::_tridiag_c_last_abs`
+- `src/krylov.rs::tridiag_c_last_abs` / `python/maqina/krylov.py::_tridiag_c_last_abs`
   (per-iter ヘルパ; Rust ↔ Python ref `rel < 1e-13` 一致).
 
 ## Phase 8 follow-up (issue #100): Richardson iter-0 matvec memoization
