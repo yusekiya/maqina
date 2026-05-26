@@ -1,4 +1,4 @@
-//! `kinema._rust`: Rust 実装の Krylov / CFM4 / Trotter / matvec 高速経路.
+//! `maqina._rust`: Rust 実装の Krylov / CFM4 / Trotter / matvec 高速経路.
 //!
 //! Phase 1 (MVP) では以下を提供する:
 //!   - `apply_h_kinema` (matvec: bit-flip + 対角積)
@@ -29,7 +29,7 @@
 //!
 //! BLAS / rayon / SIMD 経路でビルドされたかどうかは `__has_blas__`,
 //! `__has_rayon__`, `__has_simd__` の各 `bool` 属性で参照可能.
-//! Python 側 `kinema.krylov` は import 時に `__has_blas__` を読み, BLAS
+//! Python 側 `maqina.krylov` は import 時に `__has_blas__` を読み, BLAS
 //! 無効ビルド (scalar fallback) の場合に `RuntimeWarning` を 1 度だけ発する.
 //! `__has_rayon__` / `__has_simd__` は bench / 計測時の build profile 確認用.
 //!
@@ -38,9 +38,9 @@
 //! `__has_avx512f__` / `__has_neon__` (`cfg!(target_feature = "...")` 由来) と,
 //! ビルドターゲットを示す `__target_arch__` / `__target_os__`
 //! (`std::env::consts::ARCH` / `OS`) を expose する. ユーザー側では
-//! `kinema.show_config()` でこれらを集約 dump できる (numpy.show_config 相当).
+//! `maqina.show_config()` でこれらを集約 dump できる (numpy.show_config 相当).
 //!
-//! Python 側 (`kinema.krylov`) は本モジュールの import 可否で fast path を
+//! Python 側 (`maqina.krylov`) は本モジュールの import 可否で fast path を
 //! 切替える silent-fallback 設計. Rust 拡張がない環境では Python リファレンス
 //! 実装で動作する.
 

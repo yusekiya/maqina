@@ -6,7 +6,7 @@
 
 公開する 4 つ:
 
-- ``build_qutip_hamiltonian``: kinema の ``(h_x, h_p_diag)`` を QuTiP の
+- ``build_qutip_hamiltonian``: maqina の ``(h_x, h_p_diag)`` を QuTiP の
   ``[[H_drv, A(t)], [H_p, B(t)]]`` sparse 表現に変換.
 - ``run_qutip``: ``qutip.sesolve`` を 1 回走らせ ``(wall_sec, psi_final)``.
   ``method`` で ``"adams"`` (default, non-stiff) / ``"bdf"`` (stiff) を切替.
@@ -41,7 +41,7 @@ def ensure_qutip() -> None:
 def build_qutip_hamiltonian(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) -> list:
     """``[[H_drv, A(t)], [H_p, B(t)]]`` の QuTiP sparse 表現を構築する.
 
-    kinema の LSB-first ``σ_i = 1 - 2·b_i`` 規約と QuTiP の MSB-first
+    maqina の LSB-first ``σ_i = 1 - 2·b_i`` 規約と QuTiP の MSB-first
     tensor 規約を吸収するため X を tensor list の位置 ``n-1-i`` に挿入.
     n=18 以上の規模では dense backing がメモリに乗らないので sparse 固定.
     """

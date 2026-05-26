@@ -1,7 +1,7 @@
 [project]
-name = "kinema"
+name = "maqina"
 version = "0.12.0"
-description = "Matrix-free transverse-field Ising kinetic quantum evolution via Magnus expansion"
+description = "A Magnus-based quantum Ising numerical annealer: matrix-free time evolution of the transverse-field Ising model via Magnus expansion"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -15,11 +15,11 @@ build-backend = "maturin"
 
 [tool.maturin]
 # maturin 公式 docs 推奨の mixed Rust/Python project レイアウト.
-# Python ソースを python/kinema/ に置き、Cargo.toml + src/lib.rs は
+# Python ソースを python/maqina/ に置き、Cargo.toml + src/lib.rs は
 # プロジェクトルート直下. PyO3/maturin#490 で報告されている
 # ModuleNotFoundError pitfall を回避するため "python" を明示する.
 python-source = "python"
-module-name = "kinema._rust"
+module-name = "maqina._rust"
 features = ["extension-module"]
 profile = "production"
 strip = true

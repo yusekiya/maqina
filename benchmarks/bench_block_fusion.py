@@ -47,7 +47,7 @@ per-step time を計測する.
 
 - rayon thread 数: ``RAYON_NUM_THREADS`` 環境変数で **プロセス起動時に** 固定
   (rayon global pool は最初の rayon op で構築され, それ以降は変更不可).
-- BLAS thread 数: 本 script 冒頭で ``kinema.set_blas_threads(args.blas_threads)``
+- BLAS thread 数: 本 script 冒頭で ``maqina.set_blas_threads(args.blas_threads)``
   を呼び 1 thread に固定 (default 1). rayon と BLAS の thread pool が同時に
   cpu_count 個ずつ thread を張ると context-switch で性能劣化するため.
 
@@ -110,7 +110,7 @@ def _measure_trotter_step(n: int, repeat: int, warmup: int, dt: float) -> list[f
     (issue #86; 旧 ``trotter_step_py`` は per-call で ``dim · 16 B`` の新規
     array を allocate するため Rust kernel の micro 効果が埋もれる).
     """
-    from kinema import _rust  # pyright: ignore[reportMissingImports]
+    from maqina import _rust  # pyright: ignore[reportMissingImports]
 
     dim = 1 << n
     rng = np.random.default_rng(0xC3_B10C_F0_7807_7E40 ^ n)
@@ -147,7 +147,7 @@ def _measure_apply_h_kinema(n: int, repeat: int, warmup: int) -> list[float]:
     ``dim · 16 B`` の新規 alloc/copy が計測域に混入し Rust kernel の micro
     効果が埋もれる (issue #79 / #85).
     """
-    from kinema import _rust  # pyright: ignore[reportMissingImports]
+    from maqina import _rust  # pyright: ignore[reportMissingImports]
 
     dim = 1 << n
     rng = np.random.default_rng(0xC3_B10C_F0_AA77EC ^ n)
@@ -186,15 +186,15 @@ def _machine_info(label: str) -> dict[str, Any]:
         "rayon_num_threads_env": os.environ.get("RAYON_NUM_THREADS"),
     }
     try:
-        import kinema
-        from kinema import _rust  # pyright: ignore[reportMissingImports]
+        import maqina
+        from maqina import _rust  # pyright: ignore[reportMissingImports]
 
-        info["kinema_version"] = getattr(kinema, "__version__", "unknown")
+        info["maqina_version"] = getattr(maqina, "__version__", "unknown")
         info["__has_blas__"] = bool(getattr(_rust, "__has_blas__", False))
         info["__has_rayon__"] = bool(getattr(_rust, "__has_rayon__", False))
         info["__has_simd__"] = bool(getattr(_rust, "__has_simd__", False))
     except ImportError:
-        info["kinema_version"] = "import-failed"
+        info["maqina_version"] = "import-failed"
         info["__has_blas__"] = None
         info["__has_rayon__"] = None
         info["__has_simd__"] = None
@@ -303,7 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=1,
         help=(
-            "kinema.set_blas_threads(N) で BLAS thread 数を固定 "
+            "maqina.set_blas_threads(N) で BLAS thread 数を固定 "
             "(default 1; rayon × BLAS 干渉を分離)"
         ),
     )
@@ -327,10 +327,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    import kinema
+    import maqina
 
     if args.blas_threads is not None:
-        kinema.set_blas_threads(args.blas_threads)
+        maqina.set_blas_threads(args.blas_threads)
 
     machine = _machine_info(args.label)
 

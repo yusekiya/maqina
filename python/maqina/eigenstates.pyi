@@ -27,8 +27,8 @@ from __future__ import annotations as annotations
 import importlib
 from typing import Literal as Literal
 import numpy as np
-from kinema.problem import IsingProblem as IsingProblem
-from kinema.schedule import Schedule as Schedule
+from maqina.problem import IsingProblem as IsingProblem
+from maqina.schedule import Schedule as Schedule
 from typing import Any
 __all__ = ['instantaneous_eigenstates']
 
@@ -88,8 +88,8 @@ def instantaneous_eigenstates(problem: IsingProblem, schedule: Schedule, t: floa
     Examples
     --------
     >>> import numpy as np
-    >>> from kinema import IsingProblem, Schedule
-    >>> from kinema.eigenstates import instantaneous_eigenstates
+    >>> from maqina import IsingProblem, Schedule
+    >>> from maqina.eigenstates import instantaneous_eigenstates
     >>> n = 4
     >>> prob = IsingProblem(
     ...     n=n,

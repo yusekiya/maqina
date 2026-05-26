@@ -1,7 +1,7 @@
 # §6. ビルダー (k-local → 対角ベクトル)
 
 ```python
-# src/kinema/builders.py
+# src/maqina/builders.py
 def diag_from_pauli_terms(
     n: int,
     terms: list[PauliTerm],

@@ -41,7 +41,7 @@ parent/child 自動切替はせず, **操作員が異なる build で 2 回 meas
         uv run maturin develop --uv --release \\
         --no-default-features --features extension-module,blas,rayon
     # build flag 確認 (期待: __has_simd__ = False)
-    uv run python -c "from kinema import _rust; print('simd:', _rust.__has_simd__)"
+    uv run python -c "from maqina import _rust; print('simd:', _rust.__has_simd__)"
     uv run python benchmarks/bench_simd_scaling.py \\
         --mode measure --label simd-off \\
         --output benchmarks/results/bench_simd/simd-off.json
@@ -130,7 +130,7 @@ def _measure_apply_h(n: int, h_x: np.ndarray, repeat: int, warmup: int) -> list[
     旧 ``apply_h_kinema_py`` だと毎 call で ``dim · 16 B`` の新規 alloc/copy
     が計測域に混入する (issue #79 / #85).
     """
-    from kinema import _rust  # pyright: ignore[reportMissingImports]
+    from maqina import _rust  # pyright: ignore[reportMissingImports]
 
     dim = 1 << n
     rng = np.random.default_rng(0xBEEF_FACE ^ n)
@@ -168,7 +168,7 @@ def _measure_single_mode(n: int, i: int, repeat: int, warmup: int) -> list[float
     per-call で ``dim · 16 B`` の新規 array を allocate するため SIMD kernel の
     micro 効果が埋もれる).
     """
-    from kinema import _rust  # pyright: ignore[reportMissingImports]
+    from maqina import _rust  # pyright: ignore[reportMissingImports]
 
     dim = 1 << n
     rng = np.random.default_rng(0xC0FE_FACE ^ n ^ (i << 20))
@@ -232,15 +232,15 @@ def _machine_info(label: str) -> dict[str, Any]:
         "rayon_num_threads_env": os.environ.get("RAYON_NUM_THREADS"),
     }
     try:
-        import kinema
-        from kinema import _rust  # pyright: ignore[reportMissingImports]
+        import maqina
+        from maqina import _rust  # pyright: ignore[reportMissingImports]
 
-        info["kinema_version"] = getattr(kinema, "__version__", "unknown")
+        info["maqina_version"] = getattr(maqina, "__version__", "unknown")
         info["__has_blas__"] = bool(getattr(_rust, "__has_blas__", False))
         info["__has_rayon__"] = bool(getattr(_rust, "__has_rayon__", False))
         info["__has_simd__"] = bool(getattr(_rust, "__has_simd__", False))
     except ImportError:
-        info["kinema_version"] = "import-failed"
+        info["maqina_version"] = "import-failed"
         info["__has_blas__"] = None
         info["__has_rayon__"] = None
         info["__has_simd__"] = None
@@ -249,10 +249,10 @@ def _machine_info(label: str) -> dict[str, Any]:
 
 def mode_measure(args: argparse.Namespace) -> int:
     """1 build profile 分の measure を走らせて JSON に書き出す."""
-    import kinema
+    import maqina
 
     if args.blas_threads is not None:
-        kinema.set_blas_threads(args.blas_threads)
+        maqina.set_blas_threads(args.blas_threads)
 
     machine = _machine_info(args.label)
 

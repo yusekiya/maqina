@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Literal
 import numpy as np
 
 if TYPE_CHECKING:
-    from kinema.problem import IsingProblem
+    from maqina.problem import IsingProblem
 
 __all__ = ["Observable"]
 

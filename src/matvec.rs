@@ -32,7 +32,7 @@
 //!
 //! rayon thread 数は環境変数 `RAYON_NUM_THREADS` で **プロセス起動時に** 設定
 //! する (rayon の global pool は最初の rayon op で構築される). 一方 BLAS
-//! thread 数は Python 側 `kinema.set_blas_threads(n)` で動的に変えられる.
+//! thread 数は Python 側 `maqina.set_blas_threads(n)` で動的に変えられる.
 //! 両者が `cpu_count` × `cpu_count` の総スレッド数を取ると context-switch で
 //! 性能が落ちるため, **rayon 経路で並列化する場合は `set_blas_threads(1)` に
 //! 落として BLAS pool を 1 thread に固定する** 運用が推奨 (詳細は `CLAUDE.md`
@@ -1262,7 +1262,7 @@ pub(crate) const MAX_FUSED_K: usize = 6;
 /// `trotter_step` で `Π_{i=0..n} R_i(dt)` を 1 軸ずつ
 /// `apply_single_mode_axis_i` で in-place 適用すると per-step rayon barrier が
 /// **2n+2** 個入って scaling が頭打ちになる (issue #68 follow-up bench で
-/// 1.55× @ 16 threads で飽和観測). 本関数は kinema の
+/// 1.55× @ 16 threads で飽和観測). 本関数は maqina の
 /// `H_drv = -Σ h_x_i X_i` が per-site で commuting であることを利用して
 /// 連続 k qubit の R_i を **1 つの chunk closure 内で逐次適用** する. これに
 /// より `trotter_step` の barrier 数は `2n+2 → n/k + 2` に縮み (n=20, k=4 で
@@ -1276,7 +1276,7 @@ pub(crate) const MAX_FUSED_K: usize = 6;
 /// 適用する qsim `MultiQubitGateFuser` 同型実装. **Linux サーバー本番 bench で
 /// `trotter_step` が 0.81× regression** したため放棄. 理由: per-axis × k の
 /// compute は `2k·dim` ops だが dense matmul は `2^k·dim` ops で k=4 のとき
-/// 2× 多く, kinema の TFIM 規模では memory-bandwidth gain よりも compute
+/// 2× 多く, maqina の TFIM 規模では memory-bandwidth gain よりも compute
 /// 増のほうが勝ったため.
 ///
 /// **現実装**: chunk closure 内で k 個の axis に対して **per-axis 2-pair
@@ -1631,7 +1631,7 @@ pub(crate) fn apply_h_kinema_py<'py>(
 /// `dim = 2^n` は `len(h_p_diag)` から取り出す. `y_out.len() == dim`
 /// を境界で検査し, 不整合は `PyValueError`.
 ///
-/// 主な call site: `python/kinema/eigenstates.py` (m=64 Krylov loop /
+/// 主な call site: `python/maqina/eigenstates.py` (m=64 Krylov loop /
 /// dim 列ループ), `benchmarks/bench_*.py` (計測内 alloc/copy 排除).
 /// 詳細は `docs/design/07-rust-extension.md` §7.3 / `docs/design/05-1-matvec.md`
 /// §5.1.4 末尾.

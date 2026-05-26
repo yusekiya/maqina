@@ -45,8 +45,8 @@ from pathlib import Path
 import numpy as np
 
 # 内部 API (Phase 7 着手前なので production 経路は触らず, raw matvec を直接使う)
-from kinema._rust import apply_h_kinema_py
-from kinema.initial_states import uniform_superposition
+from maqina._rust import apply_h_kinema_py
+from maqina.initial_states import uniform_superposition
 
 
 def make_tfim(n: int, seed: int = 42) -> tuple[np.ndarray, np.ndarray]:

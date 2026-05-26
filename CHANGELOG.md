@@ -1,6 +1,6 @@
 # Changelog
 
-`kinema` の公開 API 破壊的変更と Phase 単位の差分を集約する.
+`maqina` の公開 API 破壊的変更と Phase 単位の差分を集約する.
 
 - 運用ポリシー: `docs/conventions.md` §2 (バージョニング) / §2.2 を一次
   資料とする. **mid-Phase で取り込まれた破壊的変更も本ファイルに時系列
@@ -11,7 +11,7 @@
   (`0.N.0` → `0.N+1.0`) で破壊的変更を吸収する (`docs/conventions.md`
   §2 参照).
 
-## 0.12.0 - 2026-05-26 — `krylov_tol` → `propagator_tol` rename + Chebyshev default 仕様変更 (issue #135)
+## 0.12.0 - 2026-05-26 — `krylov_tol` → `propagator_tol` rename + Chebyshev default 仕様変更 (issue #135) + パッケージ rename `kinema → maqina`
 
 `cfm4_adaptive_richardson_chebyshev` method の精度パラメータを 2 軸で整理:
 parameter 名の semantic 統一 (Krylov 部分空間概念は Chebyshev には無いので
@@ -64,6 +64,22 @@ Chebyshev 打切は既に machine precision floor なので atol tightening が
 減衰見積もり) と限定的.
 
 詳細は `docs/design/05-3-propagator.md` "Chebyshev variant" 節.
+
+### Breaking (rename)
+
+- **パッケージ rename: `kinema` → `maqina`**: 公開名・import path・PyPI 名
+  すべて変更. `maqina` は "A **Ma**gnus-based **Q**uantum **I**sing
+  **N**umerical **A**nnealer" の頭文字 + ラテン語 `machina` (機械/装置;
+  Romance 系の `máquina` / `macchina` / `machine` の語源) からの造語.
+  semantic は本パッケージの positioning と一致する形に再整理 (旧 `kinema` の
+  "Kinetic … Magnus" は本質を捉えていなかった).
+  影響範囲は Python パッケージ名 (`python/kinema/` → `python/maqina/`,
+  `git mv` で履歴保持), Rust crate / `[tool.maturin] module-name`,
+  `.cargo/config.toml` コメント, env var (`KINEMA_EXPECT_BLAS` /
+  `KINEMA_ARTIFACT_DIR` → `MAQINA_EXPECT_BLAS` / `MAQINA_ARTIFACT_DIR`),
+  docs 全般. Rust 内部関数名 (`apply_h_kinema*` 等) は据置 (後続 issue で
+  別途検討). 移行は `from kinema import X` → `from maqina import X` と
+  env var prefix の単純置換のみで完了.
 
 ## 0.11.0 - 2026-05-23 — Chebyshev variant 統合完了 (Phase B finalize) + パッケージリブランド
 

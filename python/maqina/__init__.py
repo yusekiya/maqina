@@ -1,4 +1,4 @@
-"""kinema: 横磁場イジングモデル (TFIM) の量子アニーリングシミュレータ
+"""maqina: 横磁場イジングモデル (TFIM) の量子アニーリングシミュレータ
 =====================================================================
 
 Hamiltonian:
@@ -16,9 +16,9 @@ Hamiltonian:
 Usage
 -----
 >>> import numpy as np
->>> from kinema import IsingProblem, Schedule, QuantumAnnealer
->>> from kinema.initial_states import uniform_superposition
->>> from kinema.builders import diag_from_J_h
+>>> from maqina import IsingProblem, Schedule, QuantumAnnealer
+>>> from maqina.initial_states import uniform_superposition
+>>> from maqina.builders import diag_from_J_h
 >>>
 >>> n = 4
 >>> J = np.random.default_rng(0).normal(size=(n, n)) / np.sqrt(n)
@@ -36,19 +36,19 @@ Usage
 >>> print(np.abs(res.psi_final[:8]) ** 2)   # 最終状態 |ψ(T)|^2 の冒頭 8 成分
 
 設計詳細は ``docs/design/INDEX.md`` 参照. 各公開モジュールに対応する ``.pyi``
-スタブ (``python/kinema/*.pyi``) を一次 API リファレンスとして読むことを
+スタブ (``python/maqina/*.pyi``) を一次 API リファレンスとして読むことを
 推奨する.
 """
 
 import warnings
 
-from kinema.annealer import QuantumAnnealer
-from kinema.eigenstates import instantaneous_eigenstates
-from kinema.observable import Observable
-from kinema.problem import IsingProblem
-from kinema.result import QuantumResult, Trajectory
-from kinema.schedule import Schedule
-from kinema.simulator import AnnealingSimulator
+from maqina.annealer import QuantumAnnealer
+from maqina.eigenstates import instantaneous_eigenstates
+from maqina.observable import Observable
+from maqina.problem import IsingProblem
+from maqina.result import QuantumResult, Trajectory
+from maqina.schedule import Schedule
+from maqina.simulator import AnnealingSimulator
 
 __all__ = [
     "AnnealingSimulator",
@@ -84,7 +84,7 @@ def _warn_if_no_blas() -> None:
     Python リファレンス fallback に任せる.
 
     動的 import (``importlib.import_module``) を使う理由: Rust 拡張は
-    maturin develop 後にしか存在しないモジュールで, ``from kinema
+    maturin develop 後にしか存在しないモジュールで, ``from maqina
     import _rust`` を静的に書くと ty 等の型チェッカが解決失敗で fail
     する. ``importlib`` 経由なら静的解析から見えず, 実行時のみ可用性を
     判定する形にできる.
@@ -92,13 +92,13 @@ def _warn_if_no_blas() -> None:
     import importlib
 
     try:
-        rust_mod = importlib.import_module("kinema._rust")
+        rust_mod = importlib.import_module("maqina._rust")
     except ImportError:
         return
     has_blas = bool(getattr(rust_mod, "__has_blas__", False))
     if not has_blas:
         warnings.warn(
-            "kinema._rust was built without the 'blas' feature. "
+            "maqina._rust was built without the 'blas' feature. "
             "Lanczos / matvec primitives will use the Rust scalar fallback "
             "path which is significantly slower than the CBLAS path. "
             "Rebuild with `uv run maturin develop --uv --release` (default "
@@ -114,7 +114,7 @@ _warn_if_no_blas()
 def set_blas_threads(n: int) -> None:
     """ロード済みの全 OpenBLAS pool のスレッド上限を ``n`` に統一する.
 
-    Rust kernel が system BLAS に動的リンクするため, kinema を import した
+    Rust kernel が system BLAS に動的リンクするため, maqina を import した
     Python プロセスには numpy bundled / scipy bundled / system OpenBLAS の
     最大 3 つの BLAS pool が同居しうる. bundled 版はシンボル prefix が
     ``libscipy_openblas`` にリネームされており, ``OPENBLAS_NUM_THREADS``
@@ -141,7 +141,7 @@ def set_blas_threads(n: int) -> None:
       ``set_blas_threads(1)`` を直接呼ぶ.
     - **per-process thread budget の隔離** が要件のシナリオ
       (multiprocessing / Slurm job array で 1 プロセスあたりの thread 数を
-      物理的に制限したい) では, ``kinema`` / ``numpy`` を import する
+      物理的に制限したい) では, ``maqina`` / ``numpy`` を import する
       **前** に環境変数 (``OPENBLAS_NUM_THREADS`` / ``MKL_NUM_THREADS`` /
       ``VECLIB_MAXIMUM_THREADS`` / ``OMP_NUM_THREADS`` / ``RAYON_NUM_THREADS``)
       を set すること. 詳細パターンは ``docs/quickstart.md`` 末尾節
@@ -268,10 +268,10 @@ def set_blas_threads_auto() -> int:
 
     Examples
     --------
-    >>> import kinema
-    >>> kinema.set_blas_threads_auto()   # 推奨 default を適用  # doctest: +SKIP
+    >>> import maqina
+    >>> maqina.set_blas_threads_auto()   # 推奨 default を適用  # doctest: +SKIP
     8
-    >>> kinema.set_blas_threads(1)       # 明示 override            # doctest: +SKIP
+    >>> maqina.set_blas_threads(1)       # 明示 override            # doctest: +SKIP
 
     Returns
     -------
@@ -294,7 +294,7 @@ def show_config() -> None:
 
     出力項目:
 
-    * ``version``: ``importlib.metadata.version("kinema")`` で取得.
+    * ``version``: ``importlib.metadata.version("maqina")`` で取得.
     * ``target arch`` / ``target OS``: Rust 拡張のビルドターゲット
       (``_rust.__target_arch__`` / ``__target_os__``, ``std::env::consts``
       由来).
@@ -304,7 +304,7 @@ def show_config() -> None:
       ``__has_avx512f__`` / ``__has_neon__`` (``cfg!(target_feature = "...")``
       由来). ``target-cpu=native`` の効きを反映.
 
-    Rust 拡張 (``kinema._rust``) が import できない環境では各行を
+    Rust 拡張 (``maqina._rust``) が import できない環境では各行を
     ``unavailable`` と表示する.
     """
     import importlib
@@ -312,12 +312,12 @@ def show_config() -> None:
     from importlib.metadata import version as _pkg_version
 
     try:
-        rust_mod = importlib.import_module("kinema._rust")
+        rust_mod = importlib.import_module("maqina._rust")
     except ImportError:
         rust_mod = None
 
     try:
-        ver = _pkg_version("kinema")
+        ver = _pkg_version("maqina")
     except PackageNotFoundError:
         ver = "unknown"
 
@@ -326,7 +326,7 @@ def show_config() -> None:
             return "unavailable"
         return getattr(rust_mod, name, "unavailable")
 
-    print("kinema build configuration")
+    print("maqina build configuration")
     print("-" * 50)
     print(f"  version       : {ver}")
     print(f"  target arch   : {_attr('__target_arch__')}")

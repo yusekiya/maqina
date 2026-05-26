@@ -14,8 +14,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kinema import IsingProblem, Schedule, instantaneous_eigenstates
-from kinema import _rust as _rust_mod
+from maqina import IsingProblem, Schedule, instantaneous_eigenstates
+from maqina import _rust as _rust_mod
 
 
 def _make_problem(n: int, seed: int = 0) -> IsingProblem:

@@ -1,6 +1,6 @@
 """QuTiP ``sesolve`` を参照実装としたバリデーション用エントリポイント.
 
-``kinema`` の Krylov / CFM4:2 / M2 propagator の数値結果を QuTiP の
+``maqina`` の Krylov / CFM4:2 / M2 propagator の数値結果を QuTiP の
 高精度 ODE ソルバ (``sesolve``) と比較するための薄いラッパ. テスト
 (``tests/test_reference_qutip.py``) と ad-hoc な手動検証で利用する.
 

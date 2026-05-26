@@ -12,7 +12,7 @@
 * ``m_max`` を Chebyshev method で渡すと ``ValueError`` (semantic 不一致を
   silent 無視しない契約).
 
-Rust 拡張 (``kinema._rust.cfm4_step_chebyshev_with_richardson_estimate_py``)
+Rust 拡張 (``maqina._rust.cfm4_step_chebyshev_with_richardson_estimate_py``)
 が必須. fallback path は提供しない設計のため, 拡張が無い環境では本テスト
 ファイルは ``importorskip`` で skip.
 """
@@ -22,14 +22,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kinema import IsingProblem, Schedule
-from kinema.annealer import QuantumAnnealer
-from kinema.initial_states import uniform_superposition
-from kinema.krylov import (
+from maqina import IsingProblem, Schedule
+from maqina.annealer import QuantumAnnealer
+from maqina.initial_states import uniform_superposition
+from maqina.krylov import (
     evolve_schedule_adaptive_richardson,
     evolve_schedule_adaptive_richardson_chebyshev,
 )
-from kinema.simulator import AnnealingSimulator
+from maqina.simulator import AnnealingSimulator
 
 
 qutip = pytest.importorskip("qutip")
@@ -37,10 +37,10 @@ qutip = pytest.importorskip("qutip")
 # Rust 拡張が無いと Chebyshev driver は NotImplementedError を上げる. 本ファイル
 # 全体を skip.
 try:
-    from kinema import _rust as _rust_mod  # noqa: F401
+    from maqina import _rust as _rust_mod  # noqa: F401
 except ImportError:  # pragma: no cover - 拡張なし環境
     pytest.skip(
-        "kinema._rust extension required for Chebyshev tests",
+        "maqina._rust extension required for Chebyshev tests",
         allow_module_level=True,
     )
 
@@ -293,7 +293,7 @@ def test_chebyshev_default_propagator_tol_is_fixed_1e_minus_12() -> None:
     (auto-coupling されていない) ことを確認する. Lanczos variant とは
     挙動が異なる軸 (Lanczos は atol scaling 連動).
     """
-    from kinema.annealer import _KRYLOV_TOL_FIXED_DEFAULT
+    from maqina.annealer import _KRYLOV_TOL_FIXED_DEFAULT
 
     n = 5
     T = 5.0

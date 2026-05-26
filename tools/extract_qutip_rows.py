@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """bench_readme_figure.py が吐いた CSV から QuTiP 行を別ディレクトリに切出.
 
-QuTiP の per-cell wall_sec は kinema build version に依存しない
-(QuTiP は外部 sparse sesolve, kinema を import せず動作するため). したがって
+QuTiP の per-cell wall_sec は maqina build version に依存しない
+(QuTiP は外部 sparse sesolve, maqina を import せず動作するため). したがって
 version 別ディレクトリ (`0.8.0/`, `0.11.0/` 等) に重複保存するのは無駄で,
 **1 度測ったら version 横断で reuse** したい. 本 script はこれを実現するため:
 

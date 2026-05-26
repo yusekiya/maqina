@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kinema.krylov import (
+from maqina.krylov import (
     _CFM4_A_HIGH,
     _CFM4_A_LOW,
     _CFM4_C1,
@@ -29,7 +29,7 @@ from kinema.krylov import (
 )
 
 try:
-    from kinema import _rust as _rust_mod
+    from maqina import _rust as _rust_mod
 except ImportError:  # pragma: no cover
     _rust_mod = None  # type: ignore[assignment]
 
@@ -90,7 +90,7 @@ def test_cfm4_constants_match_formula() -> None:
     assert _CFM4_A_LOW < 0.25 < _CFM4_A_HIGH
 
 
-@pytest.mark.skipif(not _HAS_RUST, reason="kinema._rust extension not built")
+@pytest.mark.skipif(not _HAS_RUST, reason="maqina._rust extension not built")
 @pytest.mark.parametrize("n", [2, 3, 4, 5])
 @pytest.mark.parametrize("seed", [11, 137, 8675309])
 def test_python_cfm4_matches_rust(n: int, seed: int) -> None:

@@ -1,13 +1,13 @@
-"""QuTiP ``sesolve`` vs kinema の work-precision diagram ベンチ (issue #65 Phase 6 C4).
+"""QuTiP ``sesolve`` vs maqina の work-precision diagram ベンチ (issue #65 Phase 6 C4).
 
 比較指標を **「精度 (1 - fidelity) vs 計算時間 (wall sec)」** の 2 軸 Pareto
-にした (issue #65 user review). 旧版は dt sweep で QuTiP/kinema を同じ dt
+にした (issue #65 user review). 旧版は dt sweep で QuTiP/maqina を同じ dt
 で比較していたが, QuTiP の adaptive solver では dt が必ずしも step を律しない
 ため指標として不公平だった. 本版では:
 
 * 各 solver は固有の **「精度つまみ」** を持ち, 独自 sweep する.
-  - kinema m2 / trotter / cfm4 (固定 dt): ``dt``
-  - kinema cfm4_adaptive_richardson_krylov: ``atol``
+  - maqina m2 / trotter / cfm4 (固定 dt): ``dt``
+  - maqina cfm4_adaptive_richardson_krylov: ``atol``
   - QuTiP: ``tol`` (内部で ``atol = rtol = tol`` として渡す.
     TFIM の量子状態は |ψ_k| ≤ 1/√dim 級なので atol/rtol の影響は同オーダ,
     1 軸 sweep で十分捕らえられる)
@@ -31,8 +31,8 @@
 
 * **reference state** は QuTiP ``sesolve`` at ``tol=ref_tol`` で
   (scenario, n) ごとに 1 回だけ計算 (default ``ref_tol=1e-11``; long-T では
-  ``1e-13`` まで絞ると分単位かかるため緩めて使う). kinema を reference に
-  しないことで「kinema vs QuTiP」の公平性を保つ.
+  ``1e-13`` まで絞ると分単位かかるため緩めて使う). maqina を reference に
+  しないことで「maqina vs QuTiP」の公平性を保つ.
 
 * 各 sweep cell は **1 回だけ実行** し state と wall_sec を同時記録. fidelity
   は事後計算 (issue #65 user 指示: 不要な計算反復を避ける).
@@ -60,7 +60,7 @@ CLI 例::
     uv run python benchmarks/bench_qutip_large.py \\
         --scenarios standard,long-T,stiff,stiff-long-T
 
-    # kinema の dt sweep を絞って bench wall time を節約
+    # maqina の dt sweep を絞って bench wall time を節約
     uv run python benchmarks/bench_qutip_large.py \\
         --m2-dts 0.01,0.001 --cfm4-dts 0.05,0.01
 
@@ -93,8 +93,8 @@ from typing import Literal
 
 import numpy as np
 
-from kinema import IsingProblem, QuantumAnnealer, Schedule, set_blas_threads
-from kinema.initial_states import uniform_superposition
+from maqina import IsingProblem, QuantumAnnealer, Schedule, set_blas_threads
+from maqina.initial_states import uniform_superposition
 
 # QuTiP は dev dep のみ. 未 install で明示的に失敗させる (sesolve 無しでは
 # 本ベンチの目的が成立しないため pytest 系 importorskip は使わない).
@@ -136,7 +136,7 @@ class _Scenario:
 #   縮小領域. T 短いので N は中規模で取れる)
 # - large-N: T=1, h_p_scale=1, N=12-16 (大規模 Hilbert. dim=65536 まで.
 #   QuTiP sparse matvec が次元に sublinear で効くので N が大きい領域で
-#   kinema matrix-free との比較が情報量大)
+#   maqina matrix-free との比較が情報量大)
 # - stiff-long-T: T=1e4, h_p_scale=10, N=6-8 (最も重い組合せ; opt-in)
 _BUILTIN_SCENARIOS: dict[str, _Scenario] = {
     "standard": _Scenario(
@@ -169,7 +169,7 @@ _VALID_SOLVERS: tuple[str, ...] = (
     "cfm4_adaptive_richardson_chebyshev",
 )
 
-# 各 solver の sweep 既定値. kinema 固定 dt 経路は **dt** で sweep する
+# 各 solver の sweep 既定値. maqina 固定 dt 経路は **dt** で sweep する
 # (n_steps は T/dt で自動算出). dt は T-invariant なので長時間 scenario と
 # 短時間 scenario で同じ sweep 値を使える. global error order:
 # - m2 / trotter (p=2): err ~ T·dt^2 → 高精度には小 dt 必要
@@ -225,7 +225,7 @@ def _build_qutip_hamiltonian(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) ->
     """QuTiP ``sesolve`` 用 ``[[H_drv, A(t)], [H_p, B(t)]]`` を sparse で組む.
 
     ``H_drv = -Σ_i h_x[i] X_i`` を ``qutip.tensor`` (kron) ベースで CSR sparse
-    構築. kinema の LSB bit 規約と QuTiP の MSB-first tensor 規約の差を
+    構築. maqina の LSB bit 規約と QuTiP の MSB-first tensor 規約の差を
     吸収するため X は tensor list の位置 ``n-1-i`` に挿入する.
 
     全 n で sparse 経路に固定 (dense backing は TFIM 構造に対して dim^2
@@ -274,7 +274,7 @@ def _run_qutip(
     return elapsed, psi_final
 
 
-def _run_kinema_fixed_dt(
+def _run_maqina_fixed_dt(
     prob: IsingProblem,
     sched: Schedule,
     psi0: np.ndarray,
@@ -282,7 +282,7 @@ def _run_kinema_fixed_dt(
     method: Literal["m2", "trotter", "cfm4"],
     n_steps: int,
 ) -> tuple[float, np.ndarray]:
-    """kinema 固定 dt 経路 (m2 / trotter / cfm4) を ``n_steps`` 回走らせる."""
+    """maqina 固定 dt 経路 (m2 / trotter / cfm4) を ``n_steps`` 回走らせる."""
     ann = QuantumAnnealer(prob, sched)
     t_start = time.perf_counter()
     res = ann.run(
@@ -296,7 +296,7 @@ def _run_kinema_fixed_dt(
     return elapsed, np.ascontiguousarray(res.psi_final)
 
 
-def _run_kinema_adaptive(
+def _run_maqina_adaptive(
     prob: IsingProblem,
     sched: Schedule,
     psi0: np.ndarray,
@@ -304,7 +304,7 @@ def _run_kinema_adaptive(
     atol: float,
     propagator_tol: float | None,
 ) -> tuple[float, np.ndarray, int]:
-    """kinema ``cfm4_adaptive_richardson_krylov`` 経路を ``atol`` 指定で走らせる.
+    """maqina ``cfm4_adaptive_richardson_krylov`` 経路を ``atol`` 指定で走らせる.
 
     PI controller が実際に踏んだ step 数を ``n_steps_actual`` として返す.
     ``propagator_tol = None`` のとき ``QuantumAnnealer`` の Lanczos
@@ -327,7 +327,7 @@ def _run_kinema_adaptive(
     return elapsed, np.ascontiguousarray(res.psi_final), int(res.n_steps_actual)
 
 
-def _run_kinema_adaptive_chebyshev(
+def _run_maqina_adaptive_chebyshev(
     prob: IsingProblem,
     sched: Schedule,
     psi0: np.ndarray,
@@ -335,7 +335,7 @@ def _run_kinema_adaptive_chebyshev(
     atol: float,
     propagator_tol: float | None,
 ) -> tuple[float, np.ndarray, int]:
-    """kinema ``cfm4_adaptive_richardson_chebyshev`` 経路 (issue #122 Phase B).
+    """maqina ``cfm4_adaptive_richardson_chebyshev`` 経路 (issue #122 Phase B).
 
     Lanczos 版と同じ PI controller 構造で短時間プロパゲータだけが Chebyshev
     3 項漸化に置き換わる. ``propagator_tol = None`` で ``QuantumAnnealer``
@@ -479,7 +479,7 @@ class _ValidationData:
 
     QuTiP を ``ref_tol`` から段階的に緩めた tol (default factor 10, 100) で
     走らせ, 隣接 tol 間の state L2 差を取って ``QuTiP 自身の収束系列`` を
-    可視化する. 「reference が本当に収束しているか」「kinema の
+    可視化する. 「reference が本当に収束しているか」「maqina の
     cross-validation 値とどう比較するか」を MD レポートで示すために使う.
 
     fields:
@@ -515,7 +515,7 @@ def _sweep_one_scenario_n(
 ) -> tuple[list[_CellRecord], _CellRecord, _ValidationData | None]:
     """1 つの (scenario, n) について全 sweep cell と reference cell を計算する.
 
-    kinema 固定 dt 経路は ``n_steps = round(T/dt)`` で各 dt を n_steps に
+    maqina 固定 dt 経路は ``n_steps = round(T/dt)`` で各 dt を n_steps に
     変換して呼び出す. T が大きい scenario では n_steps が大きくなり, per-cell
     wall time が線形に伸びる. ``--m2-dts`` 等の sweep を CLI で絞れば bench
     総時間を抑えられる.
@@ -622,7 +622,7 @@ def _sweep_one_scenario_n(
             flush=True,
         )
         for dt, n_steps in zip(dt_sweep, n_steps_list, strict=True):
-            wall, psi = _run_kinema_fixed_dt(prob, sched, psi0, T, method, n_steps)
+            wall, psi = _run_maqina_fixed_dt(prob, sched, psi0, T, method, n_steps)
             records.append(
                 _CellRecord(
                     scenario=scenario.name,
@@ -651,7 +651,7 @@ def _sweep_one_scenario_n(
         )
         for atol in adaptive_atols:
             for kry_tol in propagator_tols:
-                wall, psi, n_steps_actual = _run_kinema_adaptive(
+                wall, psi, n_steps_actual = _run_maqina_adaptive(
                     prob, sched, psi0, T, atol, kry_tol
                 )
                 if emit_prop_knob:
@@ -693,7 +693,7 @@ def _sweep_one_scenario_n(
         )
         for atol in adaptive_atols:
             for cheb_tol in propagator_tols:
-                wall, psi, n_steps_actual = _run_kinema_adaptive_chebyshev(
+                wall, psi, n_steps_actual = _run_maqina_adaptive_chebyshev(
                     prob, sched, psi0, T, atol, cheb_tol
                 )
                 if emit_prop_knob_cheb:
@@ -772,7 +772,7 @@ def _build_machine_info(args: argparse.Namespace) -> dict[str, str]:
         "ref_tol": f"{args.ref_tol:.1e}",
     }
     try:
-        rust_mod = importlib.import_module("kinema._rust")
+        rust_mod = importlib.import_module("maqina._rust")
         info["has_blas"] = str(bool(getattr(rust_mod, "__has_blas__", False)))
         info["has_rayon"] = str(bool(getattr(rust_mod, "__has_rayon__", False)))
         info["has_simd"] = str(bool(getattr(rust_mod, "__has_simd__", False)))
@@ -895,7 +895,7 @@ def _write_md(
     lines.append("# bench_qutip_large.py")
     lines.append("")
     lines.append(
-        "Work-precision diagram ベンチ: QuTiP ``sesolve`` vs kinema 各 method "
+        "Work-precision diagram ベンチ: QuTiP ``sesolve`` vs maqina 各 method "
         "(issue #65 Phase 6 C4)."
     )
     lines.append("")
@@ -1008,7 +1008,7 @@ def _write_md(
                     diff_str = "(★ reference)"
                 lines.append(f"| {tol:.1e} | {wall:.3f} | {diff_str} |")
             lines.append("")
-            # Cross-check: kinema cfm4_adaptive_richardson_krylov の最 tightest atol cell
+            # Cross-check: maqina cfm4_adaptive_richardson_krylov の最 tightest atol cell
             # の infidelity (= 既存 sweep に含まれている).
             kry_adaptive_cells = [
                 (r, infids[k])
@@ -1025,7 +1025,7 @@ def _write_md(
                 psi_diff_est = float(np.sqrt(max(infid_tight, 0.0)))
                 tight_knob_str = _format_combined_knob(r_tight)
                 lines.append(
-                    f"**Cross-check**: kinema cfm4_adaptive_richardson_krylov at "
+                    f"**Cross-check**: maqina cfm4_adaptive_richardson_krylov at "
                     f"{tight_knob_str} (independent algorithm family) "
                     f"reproduces reference with 1-fid="
                     f"{('<1e-16' if infid_tight == 0.0 else f'{infid_tight:.3e}')} "
@@ -1150,7 +1150,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """CLI 引数を parse する."""
     parser = argparse.ArgumentParser(
         description=(
-            "Work-precision diagram ベンチ: QuTiP sesolve vs kinema の "
+            "Work-precision diagram ベンチ: QuTiP sesolve vs maqina の "
             "全 method 比較. 複数 scenario (T × dynamic range) を 1 invocation で "
             "回す. issue #65 Phase 6 C4."
         )
@@ -1207,7 +1207,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help=(
-            "kinema.set_blas_threads(N) で BLAS pool を統一. None で no-op. "
+            "maqina.set_blas_threads(N) で BLAS pool を統一. None で no-op. "
             "machine-independent baseline には `--blas-threads 1` 推奨."
         ),
     )
@@ -1320,7 +1320,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "and check |psi(tol_i+1) - psi(tol_i)|_2 decreases geometrically. "
             "Adds 2 QuTiP cells per (scenario, n), extending bench wall time by "
             "20-30 percent. MD report gets a per-(scenario, n) 'Reference validation' "
-            "section with kinema cfm4_adaptive cross-check."
+            "section with maqina cfm4_adaptive cross-check."
         ),
     )
     return parser.parse_args(argv)

@@ -138,7 +138,7 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   - **A. multi-qubit gate fusion (per-axis 逐次経路)**: 連続 k qubit (default
     k=4) の R_i を **1 つの rayon chunk closure 内で per-axis 2-pair update を
     逐次** 実行. trotter_step の barrier 数を `2n+2` → `n/k + 2` に縮める.
-    kinema の `H_drv = -Σ h_x_i X_i` が **per-site commuting** で逐次適用が
+    maqina の `H_drv = -Σ h_x_i X_i` が **per-site commuting** で逐次適用が
     exact (Trotter 誤差なし) という TFIM 固有の性質を活用. 初版 (PR #78 v1) は
     qsim 流 dense 2^k × 2^k matmul を採用したが Linux 本番 bench で
     `trotter_step` が **0.81× regression** したため per-axis 逐次経路に
@@ -219,8 +219,8 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   - **`tests/test_blas_consistency.py`**: 固定 seed の sample 入力 (n ∈ {4,6,8},
     m2 / trotter / trotter_suzuki4 / cfm4 の 4 method) で psi_final /
     probabilities / observables 時系列を ``.npz`` に dump.
-    ``KINEMA_EXPECT_BLAS`` env var で build mode を pin できる.
-    artifact 出力先は ``KINEMA_ARTIFACT_DIR`` 上書き可
+    ``MAQINA_EXPECT_BLAS`` env var で build mode を pin できる.
+    artifact 出力先は ``MAQINA_ARTIFACT_DIR`` 上書き可
     (default ``tests/artifacts/``, gitignore 済み). adaptive Richardson は
     accept/reject 境界で dt 履歴が BLAS on/off 間で分岐しうるため除外.
   - **`tools/diff_blas_artifacts.py`**: BLAS on / off ビルドで生成した 2 つの
@@ -231,10 +231,10 @@ Phase 1 の baseline と比較できることが本 phase の前提。
     cfm4 / cfm4_adaptive_richardson_krylov) を QuTiP ``sesolve`` (atol=1e-12 = 収束
     参照) と fidelity 比較. n=15-16 は cfm4_adaptive_richardson_krylov のみ
     (dense 2^n × 2^n がメモリに乗らないため sparse 経路 = ``sigmax`` tensor 和
-    で構築). n>=14 は ``@pytest.mark.slow``. bit 規約変換 (kinema LSB-first
+    で構築). n>=14 は ``@pytest.mark.slow``. bit 規約変換 (maqina LSB-first
     vs QuTiP MSB-first) は X を tensor list 位置 ``n-1-i`` に挿入する形で吸収.
   - **`benchmarks/bench_qutip_large.py`**: dt sweep で QuTiP sesolve vs
-    kinema 固定 dt method の **fidelity と wall time を 1 pass 同時測定**.
+    maqina 固定 dt method の **fidelity と wall time を 1 pass 同時測定**.
     reference は最小 dt の QuTiP cell (dt → 0 収束の代用). QuTiP 側の dt 制御
     は ``options.max_step = dt`` を使う. CSV + markdown を
     ``benchmarks/results/<timestamp>/`` 配下に出力.
@@ -367,12 +367,12 @@ Phase 7 bench (Linux AMD EPYC 7713P, 2026-05-18) で TFIM Lanczos の中間 β_j
       `ψ_new = ‖ψ‖ · V · c` と coeff に畳み込む形にリファクタ (判定式
       `β · |c| · |dt| / m < krylov_tol` が `‖ψ‖ = 1` の正規化空間で
       意味的に整合するため).
-- [x] **Step 3**: `python/kinema/krylov.py::_python_lanczos_propagate` も
+- [x] **Step 3**: `python/maqina/krylov.py::_python_lanczos_propagate` も
       完全に同一ロジックで書き直し. `_tridiag_c_last_abs` ヘルパも対応.
       `tests/test_krylov.py::test_rust_lanczos_matches_python_reference` で
       Rust ↔ Python ref が `rel < 1e-13` で一致するのを契約.
 - [x] **Step 4**: `krylov_tol` の **意味再定義** を docstring / 設計書に明記
-      (β 単体閾値 → "Krylov 近似の許容誤差"). `python/kinema/annealer.py`
+      (β 単体閾値 → "Krylov 近似の許容誤差"). `python/maqina/annealer.py`
       の `QuantumAnnealer.krylov_tol` docstring も更新. API シグネチャ自体は
       不変だがセマンティクス変更なので **minor bump (`0.7 → 0.8`)**.
 - [x] **新規 acceptance テスト**: `test_krylov.py` 配下に
@@ -460,7 +460,7 @@ spill 回避) + Gram-Schmidt 消滅** から来ている.
   Lanczos 版と同じ step-doubling Richardson 構造 (full + half×2 = 6
   chebyshev_propagate call / step). `err_chebyshev_total` を triangle
   inequality で 3 軌道集約.
-- `python/kinema/krylov.py::evolve_schedule_adaptive_richardson_chebyshev`:
+- `python/maqina/krylov.py::evolve_schedule_adaptive_richardson_chebyshev`:
   Lanczos 版 (`evolve_schedule_adaptive_richardson`) と同じ 10-tuple shape /
   PI controller 構造を保ち, 短時間プロパゲータだけが入れ替わる. **Rust 拡張
   必須** (Python ref fallback 非提供; Chebyshev は数値挙動 + 性能評価が

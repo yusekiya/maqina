@@ -23,7 +23,7 @@ def test_apply_h_kinema_py_matches_dense_reference() -> None:
     1e-13 未満** で dense reference と一致することを確認する.
     Rust 拡張未ビルドの環境では skip (fallback 経路は別テストで網羅).
     """
-    _rust = pytest.importorskip("kinema._rust")
+    _rust = pytest.importorskip("maqina._rust")
 
     n = 3
     dim = 1 << n
@@ -72,7 +72,7 @@ def test_apply_h_kinema_py_simd_path_smoke_for_i0_i1_i2() -> None:
     n=5 (dim=32) は SIMD i=2 (block=8) を 4 block 踏み, i=0,1 はその上をなぞる
     最小サイズ. n を小さく保ち rel が ulp 累積で破綻しないことも同時確認.
     """
-    _rust = pytest.importorskip("kinema._rust")
+    _rust = pytest.importorskip("maqina._rust")
 
     n = 5
     dim = 1 << n
@@ -111,7 +111,7 @@ def test_apply_h_kinema_into_py_matches_alloc_variant_bitwise() -> None:
     SIMD path を踏みやすいよう n=5 (i ∈ {0,1,2} の SIMD block ≤ dim) で
     実施する.
     """
-    _rust = pytest.importorskip("kinema._rust")
+    _rust = pytest.importorskip("maqina._rust")
 
     n = 5
     dim = 1 << n
@@ -147,7 +147,7 @@ def test_apply_h_kinema_into_py_rejects_wrong_shape() -> None:
 
     ``y_out`` の長さが ``dim = 2^len(h_x)`` と不一致なら ``ValueError``.
     """
-    _rust = pytest.importorskip("kinema._rust")
+    _rust = pytest.importorskip("maqina._rust")
 
     n = 3
     dim = 1 << n
@@ -180,7 +180,7 @@ def test_apply_single_mode_axis_i_py_simd_path_smoke(i: int) -> None:
     なぞる最小サイズ. n を小さく保ち rel が ulp 累積で破綻しないことも
     同時確認.
     """
-    _rust = pytest.importorskip("kinema._rust")
+    _rust = pytest.importorskip("maqina._rust")
 
     n = 5
     dim = 1 << n
@@ -209,7 +209,7 @@ def test_apply_single_mode_axis_i_py_simd_path_smoke(i: int) -> None:
     # 被テスト: SIMD 経路 (default build) を踏む.
     psi_actual = _rust.apply_single_mode_axis_i_py(psi, u, i, n)
 
-    # 参照: dense `I ⊗ ... ⊗ U_i ⊗ ... ⊗ I` を直接構築する (kinema の
+    # 参照: dense `I ⊗ ... ⊗ U_i ⊗ ... ⊗ I` を直接構築する (maqina の
     # bit 規約: bit 0 = LSB, `psi[k]` の bit_i(k)=0 / =1 が pair (lo, hi) を
     # 形成). U_full[k, k]      = u[0] if bit_i(k)=0 else u[3]
     #         U_full[k, k^mask] = u[1] if bit_i(k)=0 else u[2]
@@ -249,7 +249,7 @@ def test_apply_single_mode_axis_i_inplace_py_matches_alloc_variant_bitwise() -> 
     SIMD path を踏みやすいよう n=5 (i ∈ {0,1,2} の SIMD block ≤ dim) で
     実施し, axis i は 0, 1, 2 を sweep する.
     """
-    _rust = pytest.importorskip("kinema._rust")
+    _rust = pytest.importorskip("maqina._rust")
 
     n = 5
     dim = 1 << n
@@ -284,7 +284,7 @@ def test_apply_single_mode_axis_i_inplace_py_rejects_wrong_shape() -> None:
     ``psi`` の長さが ``2^n`` と不一致 / ``u`` 長さが 4 でない / ``i >= n`` で
     ``ValueError`` (alloc 変種と同じ shape 検査ヘルパを共有する).
     """
-    _rust = pytest.importorskip("kinema._rust")
+    _rust = pytest.importorskip("maqina._rust")
 
     n = 3
     dim = 1 << n

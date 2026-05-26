@@ -28,8 +28,8 @@ from typing import Literal
 
 import numpy as np
 
-from kinema.problem import IsingProblem
-from kinema.schedule import Schedule
+from maqina.problem import IsingProblem
+from maqina.schedule import Schedule
 
 __all__ = ["instantaneous_eigenstates"]
 
@@ -100,8 +100,8 @@ def instantaneous_eigenstates(
     Examples
     --------
     >>> import numpy as np
-    >>> from kinema import IsingProblem, Schedule
-    >>> from kinema.eigenstates import instantaneous_eigenstates
+    >>> from maqina import IsingProblem, Schedule
+    >>> from maqina.eigenstates import instantaneous_eigenstates
     >>> n = 4
     >>> prob = IsingProblem(
     ...     n=n,
@@ -294,9 +294,9 @@ def _import_rust():
     明示的に ``ImportError`` を投げる.
     """
     try:
-        return importlib.import_module("kinema._rust")
+        return importlib.import_module("maqina._rust")
     except ImportError as err:
         raise ImportError(
-            "kinema._rust is not available; `uv run maturin develop --uv` "
+            "maqina._rust is not available; `uv run maturin develop --uv` "
             "to build the Rust extension before calling instantaneous_eigenstates."
         ) from err

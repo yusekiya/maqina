@@ -1,4 +1,4 @@
-# kinema: 開発規約
+# maqina: 開発規約
 
 設計書 (`docs/design/INDEX.md`) とは別に, **開発プロセス / ビルド基盤 /
 バージョニング** の規約を集約する. `docs/design/` は「何を作るか (設計・
@@ -10,7 +10,7 @@
 ## 1. 開発・ビルド基盤
 
 - パッケージマネージャ: `uv`、Python `>=3.13`
-- ビルド: `maturin` (Rust 拡張 `kinema._rust` を PyO3 経由でビルド)
+- ビルド: `maturin` (Rust 拡張 `maqina._rust` を PyO3 経由でビルド)
 - Lint: `ruff` / 型: `ty`
 - 主要依存: `numpy>=2.4.2`, `threadpoolctl>=3.0`
 - dev 依存: `pytest>=8.3`, `qutip>=5.2.3`, `pre-commit>=4.0`, `ruff`, `ty`

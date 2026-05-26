@@ -12,7 +12,7 @@ import dataclasses
 import numpy as np
 import pytest
 
-from kinema import QuantumResult, Trajectory
+from maqina import QuantumResult, Trajectory
 
 
 def test_quantum_result_construct() -> None:
