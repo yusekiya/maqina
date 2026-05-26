@@ -54,7 +54,6 @@ result = ann.run(
     psi0,
     t0=0.0,
     t1=sched.T,
-    method="cfm4_adaptive_richardson_krylov",
     atol=1e-8,
 )
 
