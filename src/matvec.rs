@@ -1361,6 +1361,66 @@ fn apply_h_p_diag_rayon(v: &[Complex64], y: &mut [Complex64], h_p_diag: &[f64]) 
         });
 }
 
+/// per-stage Z 場の対角寄与 `gz_eff_diag[k] = Σ_i g_z[i] · σ_z_i(k)` を
+/// doubling / butterfly で O(2^N) で構築する (Phase C / issue #142).
+///
+/// `σ_z_i(k) = +1` (bit_i(k) = 0) または `-1` (bit_i(k) = 1) は degree-1 Walsh
+/// 多項式構造を持ち, 各 bit を 1 個追加するごとに長さを倍化しつつ
+///
+/// ```text
+/// out_new[k] = out_old[k] + g_z[i]              (low half, bit_i = 0)
+/// out_new[k + 2^i] = out_old[k] - g_z[i]        (high half, bit_i = 1)
+/// ```
+///
+/// で更新できる. 各 bit 追加で 2^i 要素を touch するので合計 1+2+4+...+2^(n-1)
+/// = 2^n - 1 ≈ O(2^N). naive O(N · 2^N) (k ごとに n bit を walk) に対し
+/// N=20 で **N 倍** 高速.
+///
+/// # 用途
+///
+/// Phase C / issue #142 の CFM4 per-stage precompute で使う. apply_h_general の
+/// `gz_eff_diag: Option<&[f64]>` 引数に渡す.
+///
+/// g_z が全 0 のとき本関数は **呼ばない** (caller 側で skip して
+/// `gz_eff_diag = None` を伝播するのが convention; issue #142 Risk #1).
+/// 本関数は all-zero ケースでも正しく動くが (0 を加算 / 減算する dim 走査が走る),
+/// 意味的に skip 推奨.
+///
+/// # 引数
+///
+/// * `g_z` (length `n`): per-site Z 場係数. `n = g_z.len()`. `2^n` 要素の Vec を
+///   返す.
+///
+/// # 戻り値
+///
+/// 長さ `1 << g_z.len()` の Vec. `out[k] = Σ_i g_z[i] · σ_z_i(k)`.
+///
+/// # In-place 構築
+///
+/// 1 度の `vec![0.0; dim]` allocation のみ. 各 bit iteration で
+/// `(out[k + cur_len] = out[k] - gz_i; out[k] += gz_i)` を `cur_len` 個の k に
+/// ついて in-place 更新する. 高い方を先に書く順序が重要 (out[k] を変更前に
+/// out[k + cur_len] に使うため).
+pub fn compute_gz_eff_diag(g_z: &[f64]) -> Vec<f64> {
+    let n = g_z.len();
+    let dim = 1usize << n;
+    let mut out = vec![0.0_f64; dim];
+    let mut cur_len: usize = 1;
+    for &gz_i in g_z.iter() {
+        // out[0..cur_len] が現状の Σ_{j<i} g_z[j] · σ_z_j を保持.
+        // doubling で out[0..2*cur_len] に bit i の寄与を追加:
+        //   out_new[k] = out[k] + gz_i        (k ∈ [0, cur_len), bit_i = 0)
+        //   out_new[k + cur_len] = out[k] - gz_i (bit_i = 1)
+        // 高い方 (k + cur_len) を先に書いてから低い方 (k) を上書きする.
+        for k in 0..cur_len {
+            out[k + cur_len] = out[k] - gz_i;
+            out[k] += gz_i;
+        }
+        cur_len *= 2;
+    }
+    out
+}
+
 /// `psi` を axis `i` で 2 元化したペア `(psi[k], psi[k | mask])` に 2×2
 /// ユニタリ `u` を **in-place** 適用する Phase 2 primitive.
 ///
@@ -3636,5 +3696,128 @@ mod tests {
         }
         let rel = diff_sq.sqrt() / ref_sq.sqrt().max(1.0);
         assert!(rel < 1e-13, "mixed g_y rel = {} >= 1e-13", rel);
+    }
+
+    // ===== compute_gz_eff_diag (Phase C / issue #142) のテスト =====
+
+    /// doubling builder と naive O(N · 2^N) reference の **bit-identical** 一致.
+    ///
+    /// `out_new[k + 2^i] = out[k] - gz_i; out_new[k] += gz_i` の演算順序は
+    /// naive `Σ_i g_z[i] · σ_z_i(k)` を bit i = 0 から累積したものと同じなので,
+    /// IEEE 754 で bit-identical を期待できる. random fuzz + 各 n で確認.
+    #[test]
+    fn compute_gz_eff_diag_doubling_matches_naive_bit_identical() {
+        for n in 1..=8 {
+            for seed in [1u64, 17, 0xface_beef, 0xc0ff_eeba_baad] {
+                let mut rng = Xor64::new(seed.wrapping_add(n as u64));
+                let g_z: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+
+                let actual = compute_gz_eff_diag(&g_z);
+                let expected = build_gz_eff_diag_naive(&g_z, n);
+
+                assert_eq!(actual.len(), expected.len(), "length mismatch");
+                for k in 0..actual.len() {
+                    assert_eq!(
+                        actual[k].to_bits(),
+                        expected[k].to_bits(),
+                        "n={}, seed={}, k={}: doubling={} vs naive={}",
+                        n,
+                        seed,
+                        k,
+                        actual[k],
+                        expected[k],
+                    );
+                }
+            }
+        }
+    }
+
+    /// 全 g_z = 0 のとき出力も全 0. (caller 側は skip するが本関数自体は
+    /// 正しく動作する).
+    #[test]
+    fn compute_gz_eff_diag_all_zero_input_yields_all_zero() {
+        for n in 1..=8 {
+            let g_z = vec![0.0_f64; n];
+            let out = compute_gz_eff_diag(&g_z);
+            assert_eq!(out.len(), 1 << n);
+            for (k, &v) in out.iter().enumerate() {
+                assert_eq!(v.to_bits(), 0.0_f64.to_bits(), "k={}: got {}", k, v);
+            }
+        }
+    }
+
+    /// n=2 (dim=4) の手検算: g_z = [a, b] に対し out = [a+b, -a+b, a-b, -a-b].
+    #[test]
+    fn compute_gz_eff_diag_n2_handwritten() {
+        let a = 0.37_f64;
+        let b = -0.59_f64;
+        let g_z = [a, b];
+        let out = compute_gz_eff_diag(&g_z);
+        let expected = [a + b, -a + b, a - b, -a - b];
+        assert_eq!(out.len(), 4);
+        for (k, (&got, &exp)) in out.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                exp.to_bits(),
+                "k={}: got {} vs expected {}",
+                k,
+                got,
+                exp,
+            );
+        }
+    }
+
+    /// `apply_h_general` の `gz_eff_diag = Some(compute_gz_eff_diag(g_z))`
+    /// 経路と, `apply_h_general(gz_eff_diag = None)` + 別途 Z 場を c_b に
+    /// 畳んだ参照経路の数値同等性 (rel < 1e-13).
+    ///
+    /// 具体的には, Z 場のみ (g_x = g_y = 0) のときに:
+    /// - 経路 A: `apply_h_general(g_x=0, g_y=None, c_b = c_b_0, gz_eff_diag=Some(compute_gz_eff_diag(g_z)))`
+    /// - 経路 B: dense `Σ_i g_z[i] · Z_i + c_b_0 · diag(h_p_diag)` の matmul
+    ///
+    /// 両者は構造上同じ対角作用を表すので rel < 1e-13 で一致する.
+    #[test]
+    fn apply_h_general_with_doubling_gz_eff_matches_dense_z_field() {
+        for n in 2..=6 {
+            let dim = 1usize << n;
+            let mut rng = Xor64::new(0xface_5a5a_5a5a_5a5a ^ (n as u64));
+            let g_z: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+            let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+            let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+            let c_b = rng.signed();
+            let g_x = vec![0.0_f64; n];
+            let g_y = vec![0.0_f64; n];
+
+            let gz_eff = compute_gz_eff_diag(&g_z);
+
+            // 被テスト経路.
+            let mut y = vec![Complex64::new(0.0, 0.0); dim];
+            apply_h_general(
+                &v,
+                &mut y,
+                &g_x,
+                Some(&g_y),
+                &h_p_diag,
+                c_b,
+                Some(&gz_eff),
+                n,
+            );
+
+            // 参照: dense diag([c_b · h_p_diag[k] + gz_eff[k]]) · v.
+            let mut expected = vec![Complex64::new(0.0, 0.0); dim];
+            for k in 0..dim {
+                let d = c_b * h_p_diag[k] + gz_eff[k];
+                expected[k] = Complex64::new(d, 0.0) * v[k];
+            }
+
+            let mut diff_sq = 0.0_f64;
+            let mut ref_sq = 0.0_f64;
+            for k in 0..dim {
+                diff_sq += (y[k] - expected[k]).norm_sqr();
+                ref_sq += expected[k].norm_sqr();
+            }
+            let rel = diff_sq.sqrt() / ref_sq.sqrt().max(1.0);
+            assert!(rel < 1e-13, "n={}: rel = {} >= 1e-13", n, rel);
+        }
     }
 }
