@@ -1215,7 +1215,17 @@ pub fn cfm4_step_chebyshev_with_richardson_estimate(
     let k_used_total = k_used_full + k_used_h1 + k_used_h2;
     let err_chebyshev_total = err_cheb_full + err_cheb_h1 + err_cheb_h2;
 
-    // 4) err = ‖ψ_full - ψ_h2‖_2.
+    // 4) err = ‖ψ_full - ψ_h2‖_2. 差ベクトルを一度組んで `blas::nrm2` を通すと
+    //    BLAS feature on/off いずれの経路でも同一実装で算出できる. iterator
+    //    chain + `.sum::<f64>().sqrt()` で 1 dim walk + 0 alloc に fuse する
+    //    試行を行ったが Linux 本番 (AMD EPYC 7713P, NT=64, N=18) の perf
+    //    binary で per-Richardson-step wall が +3% regression する結果に
+    //    なったため revert (`perf_cfm4_richardson_chebyshev` full mode 計測,
+    //    instructions / branch-misses は減るが cycles + L2 fill latency が
+    //    増える: OpenBLAS dnrm2 の multi-thread 並列実行を失い 4 MB ベクトル
+    //    の reduction が single-thread DRAM 律速に転落するため).
+    //    `cfm4_step_with_m2_estimate` / `cfm4_step_with_richardson_estimate`
+    //    (Lanczos 版) と同じパターンを維持する.
     let diff: Vec<Complex64> = psi_full
         .iter()
         .zip(psi_h2.iter())
