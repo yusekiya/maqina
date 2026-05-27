@@ -641,6 +641,47 @@ parallel efficiency が 64 thread で 44%** (Lanczos 27% より良いが理想 1
 - 詳細: `docs/design/05-3-propagator.md` "Chebyshev non-matvec inner loop の
   rayon 並列化".
 
+### Phase B follow-up: `chebyshev_propagate` global phase を c_k 係数に fuse (commit `f6eeb89`)
+
+`chebyshev_propagate` の末尾で `psi_acc *= exp(-i·E_c·dt)` を独立 dim walk
+として適用していたのを, `global_phase = exp(-i·E_c·dt)` を c_0 / c_1 / c_k 各
+scalar に畳み込んで accumulator に元から phase 込みで足し込む形に変更. per-
+Chebyshev-call で dim walk 1 本削減. error estimate (`psi_norm = ‖入力 ψ‖`) は
+global phase が unitary なので不変. zero-Hamiltonian fast-path (R < 1e-15)
+は別経路で影響なし. K_used ≥ 1 が `determine_truncation` で保証されているので
+新経路の corner case なし.
+
+**bench acceptance (Linux AMD EPYC 7713P, NT=64, perf binary 計測, 2026-05-27)**:
+
+| 計測 | before | after | Δ |
+|---|---:|---:|---:|
+| `perf_chebyshev 18 100` per-iter | 15.622 ms | **14.334 ms** | **-8.2%** |
+| `perf_cfm4_richardson_chebyshev 18 100 full` per-iter | 66.326 ms | 65.466 ms | **-1.3%** |
+| `... 18 100 single_chebyshev` per-iter | 15.214 ms | 15.130 ms | -0.5% (誤差域) |
+
+`perf_chebyshev` 単体で -8.2% improvement, hardware counter も整合 (cycles
+-7.3% / L2 miss count -5.3%). Richardson 統合経路では cycles / L2 latency は
+微増だが **parallel efficiency が 40.78× → 42.18× (+3.4%)** に改善し net
+で -1.3% 短縮. global phase fusion で per-call dim walk 1 本減 → rayon
+scheduling overhead 削減として整合.
+
+**試行・revert された変更**: 同 commit (495e105) で `cfm4_step_chebyshev_with_richardson_estimate` の Richardson diff vector
+allocation を 1-walk + 0-alloc reduce に fuse する試行も行ったが
+(`let err = psi_full.iter().zip(psi_h2.iter()).map(|(a,b)| (a-b).norm_sqr()).sum::<f64>().sqrt()`),
+Linux 本番 perf 計測で per-Richardson-step wall が **+3.1% regression**
+する結果になったため revert (commit `f6eeb89`). 内訳: instructions /
+branch-misses は alloc 削減で減少するが, cycles / L2 fill latency が増加 →
+**OpenBLAS `dnrm2` の multi-thread 並列実行を失い**, 4 MB ベクトルの reduction
+が single-thread DRAM 律速 (~6 GB/s) に転落したのが主因. `nrm2(&diff)` の
+BLAS feature ON 経路での thread 展開挙動を初期 audit で失念していたのが
+原因. 教訓: **BLAS feature ON でビルドされる経路では `blas::*` primitive の
+thread 展開を考慮する**. 同パターンが残っている `cfm4_step_with_m2_estimate`
+(`cfm4.rs:563`) / `cfm4_step_with_richardson_estimate` (Lanczos 版,
+`cfm4.rs:811`) も touch しない判断 (同じ理由で regression する可能性が高い).
+
+詳細: `src/chebyshev.rs::chebyshev_propagate`, `src/cfm4.rs:1218-1233` (revert
+後コメント), commit `495e105` (initial) → `f6eeb89` (revert) の git history.
+
 ### Phase B follow-up: Default method を Chebyshev variant に切替 + atol 仕様明文化 (#124)
 
 Phase B 完了後の **判断系 follow-up** (semantic 変更で minor bump 必要)。
