@@ -82,7 +82,7 @@ use num_complex::Complex64;
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
-use crate::matvec::apply_h;
+use crate::matvec::apply_h_general;
 
 /// rayon dispatch を起動する **最小 dim 閾値** (issue #127 PoC).
 ///
@@ -424,77 +424,135 @@ fn chebyshev_recurrence_fused(
     chebyshev_recurrence_fused_scalar(scratch, phi_curr, phi_prev, psi_acc, e_c, inv_r, c_k);
 }
 
-/// Gershgorin の行和上界 / 下界による `H = a_t · H_drv + b_t · diag(h_p_diag)`
-/// のスペクトル境界推定 `(E_min, E_max)` を返す (E_min ≤ λ_min(H), λ_max(H) ≤ E_max).
+/// Gershgorin の行和上界 / 下界による Hamiltonian
+/// `H = Σ_i [g_x_i X_i + g_y_i Y_i + g_z_i Z_i] + c_b · diag(h_p_diag)` の
+/// スペクトル境界推定 `(E_min, E_max)` を返す (E_min ≤ λ_min(H), λ_max(H) ≤ E_max).
 ///
-/// 横磁場イジング Hamiltonian の構造:
-///   * 対角: `H_kk = b_t · h_p_diag[k]`
-///   * 非対角行和: `Σ_{j≠k} |H_jk| = |a_t| · Σ_i |h_x_i|` (TFIM bit-flip 構造により k に独立)
+/// Phase C / issue #142 以降は per-site / per-axis 時間依存場をサポートする一般形.
 ///
-/// したがって Gershgorin disk の中心 = 対角値, 半径 = 非対角行和 (一定). 各
-/// 行の disk は `[H_kk - off, H_kk + off]`. その union で全固有値が含まれる:
+/// ## Hamiltonian の構造
+///
+/// * **対角**: `H_kk = c_b · h_p_diag[k] + gz_eff_diag[k]`. ここで
+///   `gz_eff_diag[k] = Σ_i g_z_i · σ_z_i(k)` (Z 場の per-stage 寄与, [`crate::matvec::compute_gz_eff_diag`]).
+/// * **非対角**: per-axis i に対し pair `(k, k ⊕ mask_i)` に係数 `c_i = g_x_i + i·g_y_i`
+///   (上半行) と `conj(c_i)` (下半行) を持つ. 行和: `Σ_{j ≠ k} |H_jk|
+///   = Σ_i |c_i| = Σ_i √(g_x_i² + g_y_i²)` (k に独立; TFIM 構造の自然な拡張).
+///
+/// したがって Gershgorin 半径 (off-diagonal 行和) は
 ///
 /// ```text
-/// E_max = max_k (b_t · h_p_diag[k]) + |a_t| · Σ |h_x_i|
-/// E_min = min_k (b_t · h_p_diag[k]) - |a_t| · Σ |h_x_i|
+/// r_off_stage = Σ_i √(g_x_i² + g_y_i²)
 /// ```
 ///
-/// `b_t` が負のときに `b_t · max` / `b_t · min` の sign flip を扱うため,
-/// `b_t · h_p_diag[k]` を per-element に計算してから min/max を取る (`b_t` 自体
-/// は schedule で `[0, 1]` に収まることが多いが, ロバスト性のため).
+/// で全行共通. 各 disk は `[H_kk - r_off, H_kk + r_off]`, union で
+///
+/// ```text
+/// E_max = max_k (c_b · h_p_diag[k] + gz_eff_diag[k]) + r_off_stage
+/// E_min = min_k (c_b · h_p_diag[k] + gz_eff_diag[k]) - r_off_stage
+/// ```
+///
+/// 本関数は `g_y` / `g_z` / `h_p_diag` の full walk を毎回行うため per-step では
+/// 非効率 (`O(N + 2^N)`). 上位 driver から呼ぶ場合は呼出側で per-stage の
+/// `(r_off_stage, diag_min_stage, diag_max_stage)` を一度だけ precompute して
+/// [`gershgorin_bounds_cached`] (`O(1)`) を使う.
 ///
 /// `h_p_diag` が空 (dim = 0; n = 0 は呼ばれない前提だが防御的に) のときは
 /// `(0.0, 0.0)` を返す.
-///
-/// 本関数は `h_x` / `h_p_diag` の full walk を毎回行うため per-step では
-/// 非効率. 上位 driver から呼ぶ場合は呼出側で
-/// `h_x_abs_sum = Σ |h_x_i|`, `h_p_min = min(h_p_diag)`, `h_p_max = max(h_p_diag)`
-/// を 1 度だけ precompute して [`gershgorin_bounds_cached`] を使う.
-pub fn gershgorin_bounds(h_x: &[f64], h_p_diag: &[f64], a_t: f64, b_t: f64) -> (f64, f64) {
-    let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
+pub fn gershgorin_bounds(
+    g_x: &[f64],
+    g_y: Option<&[f64]>,
+    g_z: Option<&[f64]>,
+    h_p_diag: &[f64],
+    c_b: f64,
+) -> (f64, f64) {
+    // r_off_stage = Σ_i √(g_x[i]² + g_y[i]²).
+    let r_off_stage: f64 = match g_y {
+        Some(gy) => g_x
+            .iter()
+            .zip(gy.iter())
+            .map(|(&gx, &gy)| (gx * gx + gy * gy).sqrt())
+            .sum(),
+        None => g_x.iter().map(|gx| gx.abs()).sum(),
+    };
 
     if h_p_diag.is_empty() {
-        let off = a_t.abs() * h_x_abs_sum;
-        return (-off, off);
+        return (-r_off_stage, r_off_stage);
     }
 
-    let mut h_p_min = f64::INFINITY;
-    let mut h_p_max = f64::NEG_INFINITY;
-    for &d in h_p_diag.iter() {
-        if d < h_p_min {
-            h_p_min = d;
+    // diag_min_stage / diag_max_stage walk. gz_eff_diag は呼出元で precompute
+    // しないので, g_z を渡された場合は per-element 評価する.
+    let mut diag_min = f64::INFINITY;
+    let mut diag_max = f64::NEG_INFINITY;
+    for (k, &h_p) in h_p_diag.iter().enumerate() {
+        let mut diag = c_b * h_p;
+        if let Some(gz) = g_z {
+            for (i, &gz_i) in gz.iter().enumerate() {
+                let sigma_z = if (k >> i) & 1 == 0 { 1.0 } else { -1.0 };
+                diag += gz_i * sigma_z;
+            }
         }
-        if d > h_p_max {
-            h_p_max = d;
+        if diag < diag_min {
+            diag_min = diag;
+        }
+        if diag > diag_max {
+            diag_max = diag;
         }
     }
-    gershgorin_bounds_cached(h_x_abs_sum, h_p_min, h_p_max, a_t, b_t)
+    gershgorin_bounds_cached(r_off_stage, diag_min, diag_max)
 }
 
-/// [`gershgorin_bounds`] の precompute 版.
+/// [`gershgorin_bounds`] の per-stage precompute 版 (Phase C / issue #142).
 ///
-/// `h_x` / `h_p_diag` は `IsingProblem` 構築後 immutable なので
-/// `h_x_abs_sum = Σ_i |h_x_i|` と `h_p_min / h_p_max = min/max(h_p_diag)` を
-/// 1 度だけ計算して上位 driver から渡せば, per-step の Gershgorin 計算は
-/// O(2^N + N) → O(1) に縮む.
+/// 旧 (Phase B まで) は `(h_x_abs_sum, h_p_min, h_p_max, a_t, b_t)` を取り
+/// IsingProblem-time precompute + per-step O(1) で完結していたが, Phase C で
+/// per-axis 時間依存場 (`g_x_i(t)`, `g_y_i(t)`, `g_z_i(t)`) に拡張されたため,
+/// **per-stage で** `(r_off_stage, diag_min_stage, diag_max_stage)` を計算して
+/// 本関数に渡す形に変えた:
 ///
-/// `b_t` の符号で min / max が swap することに注意 (現状の `maqina` schedule は
-/// `b_t ∈ [0, 1]` だが, ロバスト性のため分岐を持つ).
+/// - `r_off_stage = Σ_i √(g_x_stage[i]² + g_y_stage[i]²)`: O(N) で per-stage 計算.
+///   `g_y` が None / 全 0 のときは `r_off_stage = Σ_i |g_x_stage[i]|` に縮退し
+///   従来の `|a_t| · h_x_abs_sum` 形と等価になる.
+/// - `diag_min_stage / diag_max_stage = min/max(c_b · h_p_diag[k] + gz_eff_diag[k])`:
+///   O(2^N) walk. [`crate::matvec::compute_gz_eff_diag`] の構築 walk と fuse 可能で,
+///   `g_z` 全 0 のときは `c_b · {h_p_min, h_p_max}` の従来 O(1) 経路に degenerate する
+///   (符号は呼出側で `c_b ≥ 0 ? min : max` を選ぶ).
+///
+/// # Panics
+/// なし. 引数が任意の有限実数で良い (`r_off_stage ≥ 0` は契約だが assert はしない).
 #[inline]
 pub fn gershgorin_bounds_cached(
+    r_off_stage: f64,
+    diag_min_stage: f64,
+    diag_max_stage: f64,
+) -> (f64, f64) {
+    (diag_min_stage - r_off_stage, diag_max_stage + r_off_stage)
+}
+
+/// X-only path (旧 Phase B まで) の互換性 helper.
+///
+/// `H = a_t · (-Σ_i h_x_i X_i) + b_t · diag(h_p_diag)` を per-axis array 形に
+/// 展開する場合の `(r_off_stage, diag_min_stage, diag_max_stage)` を返す:
+///
+/// - g_x_i = -a_t · h_x_i, g_y_i = 0 → r_off_stage = |a_t| · Σ_i |h_x_i|
+/// - gz_eff_diag = 0 → diag_min/max_stage = b_t · {h_p_min, h_p_max} (符号は b_t で swap)
+///
+/// `h_x_abs_sum`, `h_p_min`, `h_p_max` を IsingProblem 構築時に precompute して
+/// per-step O(1) に維持する旧 fast path を, 新 signature 上で再現する.
+#[inline]
+pub fn gershgorin_per_stage_x_only(
     h_x_abs_sum: f64,
     h_p_min: f64,
     h_p_max: f64,
     a_t: f64,
     b_t: f64,
-) -> (f64, f64) {
-    let off = a_t.abs() * h_x_abs_sum;
+) -> (f64, f64, f64) {
+    let r_off = a_t.abs() * h_x_abs_sum;
     let (diag_min, diag_max) = if b_t >= 0.0 {
         (b_t * h_p_min, b_t * h_p_max)
     } else {
         (b_t * h_p_max, b_t * h_p_min)
     };
-    (diag_min - off, diag_max + off)
+    (r_off, diag_min, diag_max)
 }
 
 /// Bessel 関数 `J_0(z), J_1(z), ..., J_{k_max}(z)` を一括計算して長さ `k_max + 1`
@@ -610,23 +668,32 @@ pub fn determine_truncation(z: f64, tol: f64, k_max_cap: usize) -> usize {
     k_search
 }
 
-/// 時間独立 `H = a_t · H_drv + b_t · diag(h_p_diag)` に対し `ψ_new = exp(-i H dt) · ψ`
-/// を Chebyshev 多項式の 3 項漸化で計算する.
+/// 時間独立 (per-stage frozen) Hamiltonian
+/// `H = Σ_i [g_x_i X_i + g_y_i Y_i + g_z_i Z_i] + c_b · diag(h_p_diag)` に対し
+/// `ψ_new = exp(-i H dt) · ψ` を Chebyshev 多項式の 3 項漸化で計算する.
+///
+/// Phase C / issue #142 で per-site, per-axis 時間依存場サポートに拡張. 旧
+/// X-only signature (`h_x, a_t, b_t, h_x_abs_sum, h_p_min, h_p_max`) は
+/// caller (Python wrap) 側で per-axis array form に展開して渡す形に変更
+/// (詳細は [`gershgorin_per_stage_x_only`]).
 ///
 /// # 引数
 ///
-/// * `h_x` (length `n`): サイト依存横磁場振幅 (`H_drv = -Σ_i h_x_i X_i` の係数).
-/// * `h_p_diag` (length `2^n`): Z 基底での `H_problem` 対角ベクトル.
-/// * `a_t`, `b_t`: 時刻 `t` での schedule 係数 (本 POC は時間独立なので 1 step
-///   の間 frozen).
+/// * `g_x` (length `n`): X 軸 per-site 係数 (`c_i = g_x_i + i·g_y_i` の実部).
+/// * `g_y` (`None` or length `n`): Y 軸 per-site 係数. `None` または全 0 で
+///   real-only fast-path に縮退する ([`crate::matvec::apply_h_general`]).
+/// * `h_p_diag` (length `2^n`): Z 基底での H_problem 対角ベクトル.
+/// * `c_b`: H_p_diag に掛ける per-stage スカラ係数 (= `cB_stage`).
+/// * `gz_eff_diag` (`None` or length `2^n`): Z 場の per-stage 対角寄与
+///   ([`crate::matvec::compute_gz_eff_diag`] で precompute).
 /// * `psi` (length `2^n`): 入力状態.
 /// * `dt`: 時刻刻み幅 (real).
 /// * `tol`: Chebyshev 切り捨て次数 K の決定閾値 (`|J_K(z)| < tol/2`).
 /// * `n`: サイト数. `dim = 2^n` を呼出側と一意に決める.
-/// * `h_x_abs_sum`: `Σ_i |h_x_i|` の precompute 値. `IsingProblem` 構築時に
-///   1 度だけ計算して上位 driver から渡す (Gershgorin per-step O(N) を O(1) に).
-/// * `h_p_min`, `h_p_max`: `min(h_p_diag)`, `max(h_p_diag)` の precompute 値.
-///   同様に Gershgorin per-step O(2^N) を O(1) に縮める.
+/// * `r_off_stage`: per-stage 非対角行和上界 `Σ_i √(g_x_i² + g_y_i²)`
+///   ([`gershgorin_bounds_cached`] 参照).
+/// * `diag_min_stage`, `diag_max_stage`: per-stage 対角値の min/max
+///   `min/max(c_b · h_p_diag[k] + gz_eff_diag[k])`.
 ///
 /// # 戻り値
 ///
@@ -639,7 +706,8 @@ pub fn determine_truncation(z: f64, tol: f64, k_max_cap: usize) -> usize {
 ///
 /// # アルゴリズム概要
 ///
-/// 1. Gershgorin で `(E_min, E_max)` を取り, `E_c = (E_max+E_min)/2`, `R = (E_max-E_min)/2`.
+/// 1. Gershgorin per-stage 引数から `(E_min, E_max)` を取り,
+///    `E_c = (E_max+E_min)/2`, `R = (E_max-E_min)/2`.
 /// 2. `R < 1e-15` (zero Hamiltonian) は special-case: `exp(-i E_c dt) · ψ` 即返し.
 /// 3. `z = R · dt` で `K_used = determine_truncation(z, tol, K_cap)` を決定.
 /// 4. `bessel_j_array(z, K_used + 1)` で `J_0..J_{K_used+1}(z)` を一括計算
@@ -649,7 +717,7 @@ pub fn determine_truncation(z: f64, tol: f64, k_max_cap: usize) -> usize {
 ///    * `φ_1 = (H ψ - E_c ψ) / R`, `c_1 = -2i J_1(z)`, `ψ_acc += c_1 φ_1`
 ///    * `k ≥ 2`: `φ_{k} = 2 (H φ_{k-1} - E_c φ_{k-1}) / R - φ_{k-2}`,
 ///      `c_k = 2 (-i)^k J_k(z)`, `ψ_acc += c_k φ_k`
-/// 6. global phase: `ψ_acc *= exp(-i E_c dt)`.
+/// 6. global phase: 各 c_k に `exp(-i E_c dt)` を畳んで末尾 dim walk を排除.
 ///
 /// # メモリ
 ///
@@ -660,30 +728,38 @@ pub fn determine_truncation(z: f64, tol: f64, k_max_cap: usize) -> usize {
 /// # Panics
 ///
 /// * `psi.len() != 1 << n`
-/// * `h_x.len() != n`
+/// * `g_x.len() != n`, `g_y.map(|g| g.len()) != Some(n)`
 /// * `h_p_diag.len() != 1 << n`
+/// * `gz_eff_diag.map(|gz| gz.len()) != Some(1 << n)`
 #[allow(clippy::too_many_arguments)]
 pub fn chebyshev_propagate(
-    h_x: &[f64],
+    g_x: &[f64],
+    g_y: Option<&[f64]>,
     h_p_diag: &[f64],
-    a_t: f64,
-    b_t: f64,
+    c_b: f64,
+    gz_eff_diag: Option<&[f64]>,
     psi: &[Complex64],
     dt: f64,
     tol: f64,
     n: usize,
-    h_x_abs_sum: f64,
-    h_p_min: f64,
-    h_p_max: f64,
+    r_off_stage: f64,
+    diag_min_stage: f64,
+    diag_max_stage: f64,
 ) -> (Vec<Complex64>, usize, f64) {
     let dim = 1usize << n;
     assert_eq!(psi.len(), dim, "psi must have length 2^n");
-    assert_eq!(h_x.len(), n, "h_x must have length n");
+    assert_eq!(g_x.len(), n, "g_x must have length n");
+    if let Some(gy) = g_y {
+        assert_eq!(gy.len(), n, "g_y must have length n");
+    }
     assert_eq!(h_p_diag.len(), dim, "h_p_diag must have length 2^n");
+    if let Some(gz) = gz_eff_diag {
+        assert_eq!(gz.len(), dim, "gz_eff_diag must have length 2^n");
+    }
 
-    // 1. Gershgorin bounds (precompute された h_x_abs_sum / h_p_min / h_p_max を
-    //    使って per-step O(1) で計算).
-    let (e_min, e_max) = gershgorin_bounds_cached(h_x_abs_sum, h_p_min, h_p_max, a_t, b_t);
+    // 1. Per-stage Gershgorin bounds (上位 driver で precompute 済を組み合わせる
+    //    だけで per-step O(1)).
+    let (e_min, e_max) = gershgorin_bounds_cached(r_off_stage, diag_min_stage, diag_max_stage);
     let e_c = 0.5 * (e_max + e_min);
     let r = 0.5 * (e_max - e_min);
 
@@ -726,7 +802,16 @@ pub fn chebyshev_propagate(
 
     if k_used >= 1 {
         // φ_1 = \tilde H ψ = (H ψ - E_c ψ) / R.
-        apply_h(&phi_prev, &mut scratch, h_x, h_p_diag, a_t, b_t, n);
+        apply_h_general(
+            &phi_prev,
+            &mut scratch,
+            g_x,
+            g_y,
+            h_p_diag,
+            c_b,
+            gz_eff_diag,
+            n,
+        );
         for j in 0..dim {
             phi_curr[j] =
                 (scratch[j] - Complex64::new(e_c, 0.0) * phi_prev[j]) * Complex64::new(inv_r, 0.0);
@@ -740,14 +825,23 @@ pub fn chebyshev_propagate(
 
     // 6. k ≥ 2 の漸化. issue #126 PoC で walk 2 (recurrence scaling) と walk 3
     // (accumulate) を `chebyshev_recurrence_fused` で 1 walk + SIMD に fuse.
-    // walk 1 (matvec) は `apply_h` のまま. 計 3 walk → 2 walk + SIMD.
+    // walk 1 (matvec) は `apply_h_general` のまま. 計 3 walk → 2 walk + SIMD.
     // k_ord は jvals[k_ord] と `k_ord % 4` の両方で必要 (前者は coefficient,
     // 後者は `(-i)^k` の 4 周期 dispatch) なので iterator chain への書き換えは
     // 可読性を下げる. needless_range_loop を allow.
     #[allow(clippy::needless_range_loop)]
     for k_ord in 2..=k_used {
         // walk 1: scratch := H · phi_curr.
-        apply_h(&phi_curr, &mut scratch, h_x, h_p_diag, a_t, b_t, n);
+        apply_h_general(
+            &phi_curr,
+            &mut scratch,
+            g_x,
+            g_y,
+            h_p_diag,
+            c_b,
+            gz_eff_diag,
+            n,
+        );
         // c_{k_ord} = 2 · (-i)^{k_ord} · J_{k_ord}(z). (-i)^k は 4 周期で循環.
         let pow_minus_i = match k_ord % 4 {
             0 => Complex64::new(1.0, 0.0),
@@ -833,6 +927,32 @@ mod tests {
         let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
         let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         (h_x_abs_sum, h_p_min, h_p_max)
+    }
+
+    /// テスト用ヘルパ: X-only 旧 API `(h_x, h_p_diag, a_t, b_t)` から新
+    /// `chebyshev_propagate` (Phase C / issue #142) を呼ぶ thin shim. 各 X-only
+    /// テストの呼出箇所を 1 行に保つために用意する.
+    #[allow(clippy::too_many_arguments)]
+    fn chebyshev_propagate_x_only(
+        h_x: &[f64],
+        h_p_diag: &[f64],
+        a_t: f64,
+        b_t: f64,
+        psi: &[Complex64],
+        dt: f64,
+        tol: f64,
+        n: usize,
+        h_x_abs_sum: f64,
+        h_p_min: f64,
+        h_p_max: f64,
+    ) -> (Vec<Complex64>, usize, f64) {
+        // X-only shim: g_x = -a_t · h_x, g_y = None, c_b = b_t, gz_eff_diag = None.
+        let g_x: Vec<f64> = h_x.iter().map(|h| -a_t * h).collect();
+        let (r_off, diag_min, diag_max) =
+            gershgorin_per_stage_x_only(h_x_abs_sum, h_p_min, h_p_max, a_t, b_t);
+        chebyshev_propagate(
+            &g_x, None, h_p_diag, b_t, None, psi, dt, tol, n, r_off, diag_min, diag_max,
+        )
     }
 
     fn relative_error(actual: &[Complex64], expected: &[Complex64]) -> f64 {
@@ -981,7 +1101,7 @@ mod tests {
         let expected = reference_propagate_real_h(&h_dense, &psi, dt);
 
         let (h_x_abs_sum, h_p_min, h_p_max) = precompute_gershgorin_inputs(&h_x, &h_p_diag);
-        let (actual, k_used, err_estimate) = chebyshev_propagate(
+        let (actual, k_used, err_estimate) = chebyshev_propagate_x_only(
             &h_x,
             &h_p_diag,
             a_t,
@@ -1020,7 +1140,7 @@ mod tests {
         let expected = reference_propagate_real_h(&h_dense, &psi, dt);
 
         let (h_x_abs_sum, h_p_min, h_p_max) = precompute_gershgorin_inputs(&h_x, &h_p_diag);
-        let (actual, k_used, _) = chebyshev_propagate(
+        let (actual, k_used, _) = chebyshev_propagate_x_only(
             &h_x,
             &h_p_diag,
             a_t,
@@ -1055,7 +1175,7 @@ mod tests {
         let b_t = 0.5_f64;
 
         let (h_x_abs_sum, h_p_min, h_p_max) = precompute_gershgorin_inputs(&h_x, &h_p_diag);
-        let (result, _, _) = chebyshev_propagate(
+        let (result, _, _) = chebyshev_propagate_x_only(
             &h_x,
             &h_p_diag,
             a_t,
@@ -1088,7 +1208,7 @@ mod tests {
         let dt = 0.5_f64;
 
         let (h_x_abs_sum, h_p_min, h_p_max) = precompute_gershgorin_inputs(&h_x, &h_p_diag);
-        let (result, k_used, err) = chebyshev_propagate(
+        let (result, k_used, err) = chebyshev_propagate_x_only(
             &h_x,
             &h_p_diag,
             1.0,
@@ -1121,7 +1241,7 @@ mod tests {
         let b_t = 1.0_f64;
 
         let (h_x_abs_sum, h_p_min, h_p_max) = precompute_gershgorin_inputs(&h_x, &h_p_diag);
-        let (result, _, _) = chebyshev_propagate(
+        let (result, _, _) = chebyshev_propagate_x_only(
             &h_x,
             &h_p_diag,
             0.0,
@@ -1351,7 +1471,7 @@ mod tests {
         let tol = 1e-10;
 
         let (h_x_abs_sum, h_p_min, h_p_max) = precompute_gershgorin_inputs(&h_x, &h_p_diag);
-        let (result, k_used, _) = chebyshev_propagate(
+        let (result, k_used, _) = chebyshev_propagate_x_only(
             &h_x,
             &h_p_diag,
             a_t,
@@ -1386,7 +1506,9 @@ mod tests {
         let a_t = 0.7_f64;
         let b_t = 0.3_f64;
 
-        let (e_min, e_max) = gershgorin_bounds(&h_x, &h_p_diag, a_t, b_t);
+        // X-only path: g_x = -a_t · h_x, g_y = None, g_z = None, c_b = b_t.
+        let g_x: Vec<f64> = h_x.iter().map(|h| -a_t * h).collect();
+        let (e_min, e_max) = gershgorin_bounds(&g_x, None, None, &h_p_diag, b_t);
 
         let h_dense = build_dense_h_real(n, &h_x, &h_p_diag, a_t, b_t);
         let eig = SymmetricEigen::new(h_dense);

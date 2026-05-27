@@ -105,28 +105,22 @@ fn main() {
         }
     }
 
-    // Gershgorin 上下界の precompute (h_x / h_p_diag は immutable なので
-    // loop 外で 1 度だけ計算する; per-step では gershgorin_bounds_cached が
-    // O(1) で値を返す).
+    // X-only path: g_x = -a_t · h_x, g_y = None, g_z = None, c_b = b_t.
+    // Phase C / issue #142 で chebyshev_propagate の signature が per-axis に変更
+    // されたため, perf binary 側で per-stage の per-axis array form と
+    // (r_off_stage, diag_min_stage, diag_max_stage) を一度だけ precompute する.
+    let g_x: Vec<f64> = h_x.iter().map(|h| -a_t * h).collect();
     let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
     let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
     let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let (r_off, diag_min, diag_max) =
+        _rust::bench_api::gershgorin_per_stage_x_only(h_x_abs_sum, h_p_min, h_p_max, a_t, b_t);
 
     // warmup (rayon pool 起動, page fault 解消, cache warm).
     // matvec_only と異なり 1 iter のコストが大きいので 3 回程度.
     for _ in 0..3 {
         let _ = chebyshev_propagate(
-            &h_x,
-            &h_p_diag,
-            a_t,
-            b_t,
-            &psi,
-            dt,
-            tol,
-            n,
-            h_x_abs_sum,
-            h_p_min,
-            h_p_max,
+            &g_x, None, &h_p_diag, b_t, None, &psi, dt, tol, n, r_off, diag_min, diag_max,
         );
     }
 
@@ -135,17 +129,7 @@ fn main() {
     let mut sink_acc = 0.0_f64;
     for _ in 0..n_iters {
         let (psi_new, k_used, _err_estimate) = chebyshev_propagate(
-            &h_x,
-            &h_p_diag,
-            a_t,
-            b_t,
-            &psi,
-            dt,
-            tol,
-            n,
-            h_x_abs_sum,
-            h_p_min,
-            h_p_max,
+            &g_x, None, &h_p_diag, b_t, None, &psi, dt, tol, n, r_off, diag_min, diag_max,
         );
         k_total += k_used;
         // 出口 ψ_new の先頭数要素を sink に畳む (DCE 防止).

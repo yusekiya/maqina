@@ -85,7 +85,7 @@ pub mod bench_api {
     pub use crate::cfm4::{
         cfm4_step_chebyshev_with_richardson_estimate, cfm4_step_with_richardson_estimate,
     };
-    pub use crate::chebyshev::chebyshev_propagate;
+    pub use crate::chebyshev::{chebyshev_propagate, gershgorin_per_stage_x_only};
     pub use crate::krylov::lanczos_propagate;
     pub use crate::matvec::apply_h;
     pub use crate::matvec::apply_single_mode_axis_i;

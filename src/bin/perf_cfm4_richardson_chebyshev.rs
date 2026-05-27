@@ -157,10 +157,23 @@ fn main() {
     let a_t = 0.5_f64;
     let b_t = 0.5_f64;
 
-    // Gershgorin 上下界の precompute. h_x / h_p_diag は loop 不変なので 1 度だけ.
+    // X-only perf baseline: g_x_s* = -a_s* · h_x, g_y = g_z = None (Phase C / issue #142).
+    // Richardson の各 sub-step (full / h1 / h2) で `(a_s1, a_s2)` が異なるため,
+    // それぞれの g_x_s* を loop 不変として 1 度だけ構築する.
     let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
     let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
     let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let mk_gx = |a_s: f64| -> Vec<f64> { h_x.iter().map(|h| -a_s * h).collect() };
+    let g_x_s1_full = mk_gx(a_s1_full);
+    let g_x_s2_full = mk_gx(a_s2_full);
+    let g_x_s1_h1 = mk_gx(a_s1_h1);
+    let g_x_s2_h1 = mk_gx(a_s2_h1);
+    let g_x_s1_h2 = mk_gx(a_s1_h2);
+    let g_x_s2_h2 = mk_gx(a_s2_h2);
+    // single_chebyshev / matvec_only 用 (time-frozen).
+    let g_x_t: Vec<f64> = h_x.iter().map(|h| -a_t * h).collect();
+    let (r_off_t, diag_min_t, diag_max_t) =
+        _rust::bench_api::gershgorin_per_stage_x_only(h_x_abs_sum, h_p_min, h_p_max, a_t, b_t);
 
     let sink: f64;
     let elapsed_secs: f64;
@@ -172,27 +185,35 @@ fn main() {
             for _ in 0..3 {
                 let _ = cfm4_step_chebyshev_with_richardson_estimate(
                     &mut psi,
-                    &h_x,
                     &h_p_diag,
-                    a_s1_full,
+                    &g_x_s1_full,
+                    None,
+                    None,
                     b_s1_full,
-                    a_s2_full,
+                    &g_x_s2_full,
+                    None,
+                    None,
                     b_s2_full,
-                    a_s1_h1,
+                    &g_x_s1_h1,
+                    None,
+                    None,
                     b_s1_h1,
-                    a_s2_h1,
+                    &g_x_s2_h1,
+                    None,
+                    None,
                     b_s2_h1,
-                    a_s1_h2,
+                    &g_x_s1_h2,
+                    None,
+                    None,
                     b_s1_h2,
-                    a_s2_h2,
+                    &g_x_s2_h2,
+                    None,
+                    None,
                     b_s2_h2,
                     dt,
                     chebyshev_tol,
                     n,
                     true,
-                    h_x_abs_sum,
-                    h_p_min,
-                    h_p_max,
                 )
                 .expect("Chebyshev Richardson step (warmup) failed");
             }
@@ -202,27 +223,35 @@ fn main() {
             for _ in 0..n_steps {
                 let (_err, k_used, _err_cheb) = cfm4_step_chebyshev_with_richardson_estimate(
                     &mut psi,
-                    &h_x,
                     &h_p_diag,
-                    a_s1_full,
+                    &g_x_s1_full,
+                    None,
+                    None,
                     b_s1_full,
-                    a_s2_full,
+                    &g_x_s2_full,
+                    None,
+                    None,
                     b_s2_full,
-                    a_s1_h1,
+                    &g_x_s1_h1,
+                    None,
+                    None,
                     b_s1_h1,
-                    a_s2_h1,
+                    &g_x_s2_h1,
+                    None,
+                    None,
                     b_s2_h1,
-                    a_s1_h2,
+                    &g_x_s1_h2,
+                    None,
+                    None,
                     b_s1_h2,
-                    a_s2_h2,
+                    &g_x_s2_h2,
+                    None,
+                    None,
                     b_s2_h2,
                     dt,
                     chebyshev_tol,
                     n,
                     true,
-                    h_x_abs_sum,
-                    h_p_min,
-                    h_p_max,
                 )
                 .expect("Chebyshev Richardson step failed");
                 k_used_total += k_used;
@@ -242,17 +271,18 @@ fn main() {
             // warmup.
             for _ in 0..3 {
                 let _ = chebyshev_propagate(
-                    &h_x,
+                    &g_x_t,
+                    None,
                     &h_p_diag,
-                    a_t,
                     b_t,
+                    None,
                     &psi,
                     dt,
                     chebyshev_tol,
                     n,
-                    h_x_abs_sum,
-                    h_p_min,
-                    h_p_max,
+                    r_off_t,
+                    diag_min_t,
+                    diag_max_t,
                 );
             }
 
@@ -261,17 +291,18 @@ fn main() {
             let mut sink_acc = 0.0_f64;
             for _ in 0..n_steps {
                 let (psi_new, k_used, _err_estimate) = chebyshev_propagate(
-                    &h_x,
+                    &g_x_t,
+                    None,
                     &h_p_diag,
-                    a_t,
                     b_t,
+                    None,
                     &psi,
                     dt,
                     chebyshev_tol,
                     n,
-                    h_x_abs_sum,
-                    h_p_min,
-                    h_p_max,
+                    r_off_t,
+                    diag_min_t,
+                    diag_max_t,
                 );
                 k_used_total += k_used;
                 sink_acc += psi_new.iter().take(8).map(|c| c.re + c.im).sum::<f64>();
