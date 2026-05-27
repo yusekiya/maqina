@@ -123,6 +123,24 @@ _ADAPTIVE_METHODS: frozenset[str] = frozenset(
     }
 )
 
+# Phase C (issue #142) で Trotter 経路の XYZ 一般化は scope 外と整理された.
+# ``--schedule-api`` で ``xyz_*`` を指定した場合に skip する対象 method 集合.
+_TROTTER_METHODS: frozenset[str] = frozenset({"trotter", "trotter_suzuki4"})
+
+# Phase C (issue #142) で新 API (``Schedule.from_xyz``) を導入. bench 上では
+# ``--schedule-api`` で 3 mode を切替可能:
+#
+# * ``legacy`` (default): 既存 ``Schedule.linear(T, h_x)`` (X-only).
+# * ``xyz_real``: ``Schedule.from_xyz(g_x=..., b=..., g_y=None, g_z=None)``. 数値
+#   結果は ``legacy`` と一致する (real-only SIMD path に dispatch される). 新 API
+#   経由の Schedule._eval_stage() 評価 / Rust XYZ wrap PyO3 marshaling の overhead
+#   を測定する用途.
+# * ``xyz_complex``: ``g_y`` 非ゼロで complex-coeff SIMD path (``bitflip_iN_complex``)
+#   を発火させる. 数値結果は ``legacy`` と異なる (Y 場が加わる別 Hamiltonian) ため
+#   ``final_err_vs_ref`` は同 API 内で取った reference との比較になる.
+_VALID_SCHEDULE_APIS: tuple[str, ...] = ("legacy", "xyz_real", "xyz_complex")
+_XYZ_SCHEDULE_APIS: frozenset[str] = frozenset({"xyz_real", "xyz_complex"})
+
 # adaptive 経路で final state を比較する参照解の生成パラメータ.
 # 同じ ``T`` / ``schedule`` で fixed CFM4:2 を多 step 走らせた終端 ψ を
 # 「真値の代用」とする (Phase 4 C3 の DoD では QuTiP との end-to-end
@@ -245,7 +263,57 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=20260512,
         help="numpy RNG seed for random H_p_diag / h_x (default: 20260512)",
     )
+    parser.add_argument(
+        "--schedule-api",
+        type=str,
+        choices=_VALID_SCHEDULE_APIS,
+        default="legacy",
+        help=(
+            "Schedule construction path (Phase C / issue #142). "
+            "'legacy' (default): Schedule.linear (X-only, h_x in Schedule). "
+            "'xyz_real': Schedule.from_xyz with g_y=g_z=None (numerically "
+            "equivalent to legacy; measures new-API plumbing overhead). "
+            "'xyz_complex': Schedule.from_xyz with non-zero g_y (different "
+            "Hamiltonian; measures complex-coeff SIMD path relative cost). "
+            "Trotter methods are skipped automatically for xyz_* (out of scope)."
+        ),
+    )
     return parser.parse_args(argv)
+
+
+def _build_schedule(T: float, h_x: np.ndarray, schedule_api: str) -> Schedule:
+    """``schedule_api`` literal に応じて ``Schedule`` インスタンスを構築する.
+
+    Phase C / issue #142 で導入した新 API (``Schedule.from_xyz``) の per-step
+    overhead と complex-coeff SIMD kernel の相対コスト測定用. legacy / xyz_real
+    は数値結果が一致, xyz_complex は別 Hamiltonian.
+    """
+    if schedule_api == "legacy":
+        return Schedule.linear(T=T, h_x=h_x)
+    if schedule_api == "xyz_real":
+        # legacy linear schedule 相当を from_xyz で表現:
+        # H_drv(t) = -A(s(t)) · Σ_i h_x_i X_i, A(s) = 1 - s, s(t) = t / T.
+        # → g_x_i(t) = -(1 - t/T) · h_x_i, g_y = g_z = None, b(t) = t / T.
+        g_x_cbs = [(lambda t, hi=float(hi), T_=T: -(1.0 - t / T_) * hi) for hi in h_x]
+
+        def b_cb(t: float, T_: float = T) -> float:
+            return t / T_
+
+        return Schedule.from_xyz(T=T, g_x=g_x_cbs, b=b_cb)
+    if schedule_api == "xyz_complex":
+        # g_y を非ゼロにして complex-coeff SIMD path (``bitflip_iN_complex``) を
+        # 発火させる. 振幅は 10% (legacy g_x の 10% 大きさ) に抑え, K_used が
+        # 異常に膨張しないようにする (per-step wall 測定の精度のため).
+        g_x_cbs = [(lambda t, hi=float(hi), T_=T: -(1.0 - t / T_) * hi) for hi in h_x]
+        g_y_cbs = [
+            (lambda t, hi=float(hi), T_=T: 0.1 * (1.0 - t / T_) * hi) for hi in h_x
+        ]
+
+        def b_cb(t: float, T_: float = T) -> float:
+            return t / T_
+
+        return Schedule.from_xyz(T=T, g_x=g_x_cbs, b=b_cb, g_y=g_y_cbs)
+    raise ValueError(f"unknown schedule_api: {schedule_api!r}")
 
 
 def make_random_problem(n: int, seed: int) -> tuple[IsingProblem, np.ndarray]:
@@ -589,13 +657,35 @@ def main(argv: list[str] | None = None) -> int:
     adaptive_summary: list[dict[str, float | int | str]] = []
     reference_wall_by_n: dict[int, float] = {}
 
+    # Phase C / issue #142 で導入した ``--schedule-api`` mode を Trotter 互換
+    # フィルタに渡す. ``xyz_*`` 経路では Trotter は ValueError なので skip.
+    requested_methods: list[str] = list(args.methods)
+    if args.schedule_api in _XYZ_SCHEDULE_APIS:
+        filtered_methods = [m for m in requested_methods if m not in _TROTTER_METHODS]
+        if len(filtered_methods) < len(requested_methods):
+            skipped = sorted(set(requested_methods) - set(filtered_methods))
+            print(
+                f"[schedule_api={args.schedule_api}] skipping Trotter-family "
+                f"methods: {skipped} (out of scope for Schedule.from_xyz, "
+                "issue #142)"
+            )
+        methods_to_run = filtered_methods
+    else:
+        methods_to_run = requested_methods
+    if not methods_to_run:
+        raise ValueError(
+            f"no methods left to run after filtering for schedule_api="
+            f"{args.schedule_api!r} (Trotter methods are skipped on xyz_*)"
+        )
+
     for n in args.n_values:
         problem, h_x = make_random_problem(n, seed=args.seed)
-        schedule = Schedule.linear(T=args.T, h_x=h_x)
+        schedule = _build_schedule(args.T, h_x, args.schedule_api)
         psi0 = uniform_superposition(n)
         dim = 1 << n
         print(
-            f"[n={n} dim={dim}] methods={args.methods}, m_values={args.m_values}, "
+            f"[n={n} dim={dim}] schedule_api={args.schedule_api}, "
+            f"methods={methods_to_run}, m_values={args.m_values}, "
             f"warmup={args.warmup}, repeat={args.repeat}"
         )
 
@@ -604,7 +694,7 @@ def main(argv: list[str] | None = None) -> int:
         # 設定でも `_REFERENCE_METHOD="cfm4"` で多 step なため m=24 fixed
         # で十分な精度が出る前提). issue #52 B では m sweep を入れたが
         # reference は per-n 1 回固定で OK.
-        needs_reference = any(m in _ADAPTIVE_METHODS for m in args.methods)
+        needs_reference = any(m in _ADAPTIVE_METHODS for m in methods_to_run)
         psi_ref: np.ndarray | None = None
         if needs_reference:
             print(
@@ -620,7 +710,7 @@ def main(argv: list[str] | None = None) -> int:
         # issue #52 B: m を sweep する外側ループ. 同じ method × m の cell
         # ごとに summary / adaptive_summary を 1 行ずつ追加する.
         for m_val in args.m_values:
-            for method in args.methods:
+            for method in methods_to_run:
                 is_adaptive = method in _ADAPTIVE_METHODS
                 print(f"  method={method}, m={m_val}")
                 for _ in range(args.warmup):
