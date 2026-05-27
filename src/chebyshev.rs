@@ -705,6 +705,12 @@ pub fn chebyshev_propagate(
     // 4. Bessel 係数を K+1 までまとめて計算 (J_{K+1} は err estimate 用).
     let jvals = bessel_j_array(z, k_used + 1);
 
+    // Global phase exp(-i E_c dt) を各 c_k に畳み込む (旧: 末尾で別 dim walk
+    // 1 本かけて psi_acc 全要素に掛けていたのを排除する hot-path 最適化).
+    // 数値結果は scalar の積を fold するだけなので bit-identical または FMA
+    // 折り畳み差で rel < 1e-13 を維持.
+    let global_phase = Complex64::new(0.0, -dt * e_c).exp();
+
     // 5. 3 項漸化. 3 vector rotation:
     //    phi_prev (= φ_{k-1}), phi_curr (= φ_k), scratch (= H · φ_k → φ_{k+1}).
     //    psi_acc accumulates Σ c_k φ_k.
@@ -712,8 +718,8 @@ pub fn chebyshev_propagate(
     let mut phi_curr: Vec<Complex64> = vec![Complex64::new(0.0, 0.0); dim];
     let mut scratch: Vec<Complex64> = vec![Complex64::new(0.0, 0.0); dim];
 
-    // c_0 = J_0(z) (factor (2-δ_{k0}) = 1 for k=0, (-i)^0 = 1).
-    let c0 = Complex64::new(jvals[0], 0.0);
+    // c_0 = J_0(z) (factor (2-δ_{k0}) = 1 for k=0, (-i)^0 = 1). phase 込み.
+    let c0 = global_phase * Complex64::new(jvals[0], 0.0);
     let mut psi_acc: Vec<Complex64> = phi_prev.iter().map(|&p| c0 * p).collect();
 
     let inv_r = 1.0 / r;
@@ -725,8 +731,8 @@ pub fn chebyshev_propagate(
             phi_curr[j] =
                 (scratch[j] - Complex64::new(e_c, 0.0) * phi_prev[j]) * Complex64::new(inv_r, 0.0);
         }
-        // c_1 = 2 · (-i)^1 · J_1(z) = -2i J_1(z).
-        let c1 = Complex64::new(0.0, -2.0 * jvals[1]);
+        // c_1 = 2 · (-i)^1 · J_1(z) = -2i J_1(z). phase 込み.
+        let c1 = global_phase * Complex64::new(0.0, -2.0 * jvals[1]);
         for j in 0..dim {
             psi_acc[j] += c1 * phi_curr[j];
         }
@@ -750,7 +756,8 @@ pub fn chebyshev_propagate(
             3 => Complex64::new(0.0, 1.0),
             _ => unreachable!(),
         };
-        let ck = Complex64::new(2.0 * jvals[k_ord], 0.0) * pow_minus_i;
+        // phase 込み c_k (末尾 dim walk を排除する fusion).
+        let ck = global_phase * Complex64::new(2.0 * jvals[k_ord], 0.0) * pow_minus_i;
         // walk 2 (fused, SIMD): scratch <- 2·(scratch - e_c·phi_curr)·inv_r - phi_prev;
         //                       psi_acc += ck · scratch.
         chebyshev_recurrence_fused(
@@ -768,14 +775,9 @@ pub fn chebyshev_propagate(
         std::mem::swap(&mut phi_curr, &mut scratch);
     }
 
-    // 7. Global phase exp(-i E_c dt).
-    let global_phase = Complex64::new(0.0, -dt * e_c).exp();
-    for v in psi_acc.iter_mut() {
-        *v *= global_phase;
-    }
-
-    // 8. Error estimate (1-term truncation residual).
+    // 7. Error estimate (1-term truncation residual).
     //    err ≈ |c_{K+1}| · ‖ψ‖ = 2 |J_{K+1}(z)| · ‖ψ‖.
+    //    global phase は unitary なので psi_norm (= 入力 ψ のノルム) に影響なし.
     let psi_norm: f64 = psi.iter().map(|p| p.norm_sqr()).sum::<f64>().sqrt();
     let err_estimate = 2.0 * jvals[k_used + 1].abs() * psi_norm;
 

@@ -1215,13 +1215,15 @@ pub fn cfm4_step_chebyshev_with_richardson_estimate(
     let k_used_total = k_used_full + k_used_h1 + k_used_h2;
     let err_chebyshev_total = err_cheb_full + err_cheb_h1 + err_cheb_h2;
 
-    // 4) err = ‖ψ_full - ψ_h2‖_2.
-    let diff: Vec<Complex64> = psi_full
+    // 4) err = ‖ψ_full - ψ_h2‖_2. 中間 Vec を持たず |Δ|² の sum で 1 dim walk
+    //    + 0 alloc に fuse する (Chebyshev variant 固有の最適化: hot path).
+    //    BLAS feature on/off いずれでも scalar reduction なので結果は不変.
+    let err = psi_full
         .iter()
         .zip(psi_h2.iter())
-        .map(|(a, b)| a - b)
-        .collect();
-    let err = nrm2(&diff);
+        .map(|(a, b)| (a - b).norm_sqr())
+        .sum::<f64>()
+        .sqrt();
 
     // 5) extrapolate or h2 を書き戻す (Lanczos 版と同じ規約).
     if extrapolate {
