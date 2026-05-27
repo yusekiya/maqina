@@ -469,7 +469,6 @@ class AnnealingSimulator:
         propagator_tol = self._resolved_propagator_tol_fixed()
         if self._method == "m2":
             psi_new, n_matvec, _ = evolve_schedule_m2(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=self._psi,
@@ -481,7 +480,6 @@ class AnnealingSimulator:
             )
         elif self._method == "trotter":
             psi_new, n_matvec, _ = evolve_schedule_trotter(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=self._psi,
@@ -491,7 +489,6 @@ class AnnealingSimulator:
             )
         elif self._method == "trotter_suzuki4":
             psi_new, n_matvec, _ = evolve_schedule_trotter_suzuki4(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=self._psi,
@@ -501,7 +498,6 @@ class AnnealingSimulator:
             )
         else:  # cfm4
             psi_new, n_matvec, _ = evolve_schedule_cfm4(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=self._psi,
@@ -553,7 +549,9 @@ class AnnealingSimulator:
         elif self._dt_max is not None:
             dt_max_resolved = self._dt_max
         else:
-            dt_max_resolved = _resolve_dt_max_auto(self.problem, m_eff_param, dt0)
+            dt_max_resolved = _resolve_dt_max_auto(
+                self.schedule, self.problem, m_eff_param, dt0
+            )
         # driver 入力検証 ``dt_max >= dt0`` を満たすため floor.
         # step(dt) では dt0=dt_max=dt なので一致, advance_to では auto
         # 解決 (_resolve_dt_max_auto) が内部で floor 済み.
@@ -579,12 +577,13 @@ class AnnealingSimulator:
                 _n_krylov_insufficient,
                 _snapshot,
             ) = evolve_schedule_adaptive_richardson_chebyshev(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=self._psi,
                 t0=self._t,
                 t1=t_next,
+                h_p_min=self.problem.h_p_diag_min,
+                h_p_max=self.problem.h_p_diag_max,
                 chebyshev_tol=propagator_tol,
                 tol_step=tol_step,
                 dt0=dt0,
@@ -603,7 +602,6 @@ class AnnealingSimulator:
                 _n_krylov_insufficient,
                 _snapshot,
             ) = evolve_schedule_adaptive_richardson(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=self._psi,

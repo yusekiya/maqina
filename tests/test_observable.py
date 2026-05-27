@@ -68,7 +68,7 @@ def test_expectation_shape_mismatch() -> None:
 
 
 def test_magnetization_shape_and_extremes() -> None:
-    """``M_z`` diag は shape ``(2**n,)`` で, x=0 で +n, x=2^n-1 で -n."""
+    """``M_z`` diag は shape ``(2**n)`` で, x=0 で +n, x=2^n-1 で -n."""
     n = 4
     obs = Observable.magnetization(n)
     assert obs.diag.shape == (1 << n,)
@@ -104,8 +104,7 @@ def test_ising_energy_matches_problem_diag() -> None:
     n = 3
     dim = 1 << n
     h_p_diag = np.linspace(-2.0, 2.0, dim, dtype=np.float64)
-    h_x = np.ones(n, dtype=np.float64)
-    prob = IsingProblem(n=n, H_p_diag=h_p_diag, h_x=h_x)
+    prob = IsingProblem(n=n, H_p_diag=h_p_diag)
 
     obs = Observable.ising_energy(prob)
     assert obs.diag.shape == prob.H_p_diag.shape
@@ -117,8 +116,7 @@ def test_ising_energy_is_deep_copy() -> None:
     n = 3
     dim = 1 << n
     h_p_diag = np.linspace(-2.0, 2.0, dim, dtype=np.float64)
-    h_x = np.ones(n, dtype=np.float64)
-    prob = IsingProblem(n=n, H_p_diag=h_p_diag, h_x=h_x)
+    prob = IsingProblem(n=n, H_p_diag=h_p_diag)
 
     obs = Observable.ising_energy(prob)
     # 別実体である.
@@ -153,7 +151,7 @@ def test_constructor_rejects_wrong_dtype() -> None:
 
 def test_constructor_rejects_non_contiguous() -> None:
     big = np.zeros(8, dtype=np.float64)
-    view = big[::2]  # shape (4,), non-contiguous
+    view = big[::2]  # shape (4), non-contiguous
     assert not view.flags.c_contiguous
     with pytest.raises(ValueError, match="C-contiguous"):
         Observable(view)

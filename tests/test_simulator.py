@@ -48,12 +48,13 @@ def _ferromagnetic_chain_h_p_diag(n: int) -> np.ndarray:
     return h_p
 
 
-def _build_problem(n: int = 4) -> IsingProblem:
-    return IsingProblem(
+def _build_problem(n: int = 4) -> tuple[IsingProblem, np.ndarray]:
+    h_x = np.ones(n, dtype=np.float64)
+    prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
+    return prob, h_x
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +65,8 @@ def _build_problem(n: int = 4) -> IsingProblem:
 def test_init_stores_t0_psi0_and_zero_n_matvec() -> None:
     """``__init__`` 直後の状態 (``t == t0``, ψ ≈ psi0, n_matvec == 0)."""
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
 
     sim = AnnealingSimulator(prob, sched, psi0, 0.5, method="m2")
@@ -80,8 +81,8 @@ def test_init_stores_t0_psi0_and_zero_n_matvec() -> None:
 def test_psi_property_returns_defensive_copy() -> None:
     """``sim.psi`` 戻り値への mutation が内部状態に影響しない."""
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     sim = AnnealingSimulator(prob, sched, psi0, 0.0, method="m2")
@@ -96,8 +97,8 @@ def test_psi_property_returns_defensive_copy() -> None:
 def test_init_copies_psi0_so_external_mutation_does_not_leak() -> None:
     """構築後に外部 psi0 を書き換えても Simulator 内部状態は変わらない."""
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     psi0_snapshot = psi0.copy()
 
@@ -120,8 +121,8 @@ def test_step_advances_one_fixed_dt_step(method: str) -> None:
     bit-identical な ψ を生む (固定 dt 経路).
     """
     n = 4
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=5.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=5.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     dt = 0.25
 
@@ -137,8 +138,8 @@ def test_step_advances_one_fixed_dt_step(method: str) -> None:
 def test_step_dt_must_be_positive() -> None:
     """``step(dt <= 0)`` は ``ValueError``."""
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     sim = AnnealingSimulator(prob, sched, psi0, 0.0, method="m2")
     with pytest.raises(ValueError, match="dt must be > 0"):
@@ -166,8 +167,8 @@ def test_advance_to_matches_run_fixed_dt(method: str, n_steps: int) -> None:
     の ``psi_final`` と完全一致 (``rel < 1e-13``).
     """
     n = 4
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=3.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=3.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     t1 = sched.T
 
@@ -186,8 +187,8 @@ def test_advance_to_matches_run_fixed_dt(method: str, n_steps: int) -> None:
 
 def test_advance_to_t_target_must_be_greater_than_current() -> None:
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     sim = AnnealingSimulator(prob, sched, psi0, 0.5, method="m2")
     with pytest.raises(ValueError, match="t_target must be"):
@@ -198,8 +199,8 @@ def test_advance_to_t_target_must_be_greater_than_current() -> None:
 
 def test_advance_to_fixed_dt_requires_n_steps() -> None:
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     sim = AnnealingSimulator(prob, sched, psi0, 0.0, method="cfm4")
     with pytest.raises(ValueError, match="n_steps is required"):
@@ -210,8 +211,8 @@ def test_advance_to_fixed_dt_requires_n_steps() -> None:
 
 def test_advance_to_adaptive_rejects_n_steps() -> None:
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     sim = AnnealingSimulator(
         prob, sched, psi0, 0.0, method="cfm4_adaptive_richardson_krylov"
@@ -225,8 +226,8 @@ def test_step_loop_matches_advance_to_fixed_dt() -> None:
     と一致 (両者とも同じ driver call を経由するため machine precision で一致).
     """
     n = 4
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=2.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=2.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     n_steps = 20
     dt = 2.0 / n_steps
@@ -253,8 +254,8 @@ def test_step_loop_matches_advance_to_fixed_dt() -> None:
 
 def test_measure_matches_observable_expectation() -> None:
     n = 4
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     sim = AnnealingSimulator(prob, sched, psi0, 0.0, method="cfm4")
     sim.advance_to(1.0, n_steps=10)
@@ -267,8 +268,8 @@ def test_measure_matches_observable_expectation() -> None:
 
 def test_measure_rejects_non_observable() -> None:
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     sim = AnnealingSimulator(prob, sched, psi0, 0.0, method="m2")
     with pytest.raises(TypeError, match="observable must be an Observable"):
@@ -285,8 +286,8 @@ def test_measure_rejects_non_observable() -> None:
 def test_adaptive_step_advances_by_exactly_dt() -> None:
     """adaptive ``step(dt)`` 後の ``_t`` は exactly ``+dt``."""
     n = 4
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=5.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=5.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     sim = AnnealingSimulator(
         prob, sched, psi0, 0.0, method="cfm4_adaptive_richardson_krylov"
@@ -305,8 +306,8 @@ def test_adaptive_step_large_dt_triggers_sub_stepping() -> None:
     driver が複数 sub-step に分割し, n_matvec が単純な ``6m`` を上回る.
     """
     n = 4
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     sim = AnnealingSimulator(
         prob,
@@ -332,8 +333,8 @@ def test_adaptive_advance_to_matches_run_psi() -> None:
     経路と一致する (driver call が同じなので bit-identical).
     """
     n = 4
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=2.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=2.0, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann = QuantumAnnealer(prob, sched)
@@ -357,8 +358,8 @@ def test_adaptive_advance_to_matches_run_psi() -> None:
 
 def test_init_rejects_unsupported_method() -> None:
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     with pytest.raises(NotImplementedError, match="not supported"):
         AnnealingSimulator(prob, sched, psi0, 0.0, method="bogus")  # type: ignore[arg-type]
@@ -367,8 +368,8 @@ def test_init_rejects_unsupported_method() -> None:
 def test_init_validates_psi0() -> None:
     """``_validate_psi0`` 経路の伝播確認 (shape / dtype / 非正規化)."""
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
 
     bad_shape = np.zeros(1 << (n - 1), dtype=np.complex128)
     with pytest.raises(ValueError, match="psi0 shape mismatch"):
@@ -386,8 +387,8 @@ def test_init_validates_psi0() -> None:
 
 def test_init_validates_m_and_propagator_tol() -> None:
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     with pytest.raises(ValueError, match="m must be a positive integer"):
         AnnealingSimulator(prob, sched, psi0, 0.0, method="m2", m=0)
@@ -399,8 +400,8 @@ def test_init_validates_m_and_propagator_tol() -> None:
 def test_init_rejects_adaptive_params_on_fixed_dt_method(param_name: str) -> None:
     """固定 dt method で adaptive 専用パラメータを指定すると ``ValueError``."""
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     kwargs: dict[str, float | int] = {param_name: 1e-5 if "m" not in param_name else 16}
     with pytest.raises(ValueError, match=f"{param_name} is only valid"):
@@ -409,8 +410,8 @@ def test_init_rejects_adaptive_params_on_fixed_dt_method(param_name: str) -> Non
 
 def test_init_validates_adaptive_param_positivity() -> None:
     n = 3
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     base_kwargs: dict[str, object] = {"method": "cfm4_adaptive_richardson_krylov"}
     with pytest.raises(ValueError, match="atol must be > 0"):
@@ -433,8 +434,8 @@ def test_measure_during_anneal_tracks_ising_energy_decreasing() -> None:
     期待値が時間とともに下降する (基底状態に近付くため).
     """
     n = 4
-    prob = _build_problem(n)
-    sched = Schedule.linear(T=10.0)
+    prob, h_x = _build_problem(n)
+    sched = Schedule.linear(T=10.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     obs = Observable.ising_energy(prob)
 

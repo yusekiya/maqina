@@ -34,7 +34,7 @@ from maqina.krylov import (
 qutip = pytest.importorskip("qutip")
 
 
-def _make_random_problem(n: int, seed: int) -> IsingProblem:
+def _make_random_problem(n: int, seed: int) -> tuple[IsingProblem, np.ndarray]:
     """ランダム ``H_p_diag`` (実数 ``[-1, 1]``) と一様 ``h_x = 1`` で
     ``IsingProblem`` を作る.
     """
@@ -42,7 +42,7 @@ def _make_random_problem(n: int, seed: int) -> IsingProblem:
     dim = 1 << n
     h_p = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
     h_x = np.ones(n, dtype=np.float64)
-    return IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
+    return IsingProblem(n=n, H_p_diag=h_p), h_x
 
 
 def _build_qutip_hamiltonian(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) -> list:
@@ -93,12 +93,11 @@ def test_adaptive_m2_matches_qutip() -> None:
     """
     n = 4
     T = 5.0
-    prob = _make_random_problem(n, seed=20260513)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260513)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     psi_final, t_history, dt_history, n_rejects = evolve_schedule_adaptive_m2(
-        h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
         psi0=psi0,
@@ -107,7 +106,7 @@ def test_adaptive_m2_matches_qutip() -> None:
         tol_step=1e-8,
         dt0=0.1,
     )
-    psi_ref = _qutip_reference(prob.h_x, prob.H_p_diag, T)
+    psi_ref = _qutip_reference(h_x, prob.H_p_diag, T)
     fid = _fidelity(psi_final, psi_ref)
     assert fid > 1 - 1e-6, f"adaptive_m2 fidelity too low: {fid} (1-fid={1 - fid})"
     # t_history は t0=0 で始まり, 最後の値が T 近傍.
@@ -127,8 +126,8 @@ def test_adaptive_richardson_matches_qutip() -> None:
     """
     n = 4
     T = 5.0
-    prob = _make_random_problem(n, seed=20260513)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260513)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     # issue #93 (Phase 7) + Phase 5 (issue #47): driver は 10-tuple
@@ -147,7 +146,6 @@ def test_adaptive_richardson_matches_qutip() -> None:
         n_krylov_insufficient,
         snapshot,
     ) = evolve_schedule_adaptive_richardson(
-        h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
         psi0=psi0,
@@ -157,7 +155,7 @@ def test_adaptive_richardson_matches_qutip() -> None:
         dt0=0.1,
     )
     assert snapshot is None
-    psi_ref = _qutip_reference(prob.h_x, prob.H_p_diag, T)
+    psi_ref = _qutip_reference(h_x, prob.H_p_diag, T)
     fid = _fidelity(psi_final, psi_ref)
     assert fid > 1 - 1e-6, (
         f"adaptive_richardson fidelity too low: {fid} (1-fid={1 - fid})"
@@ -198,8 +196,8 @@ def test_adaptive_richardson_error_decomposition_consistency() -> None:
     """
     n = 3
     T = 1.0
-    prob = _make_random_problem(n, seed=20260514)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260514)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     (
@@ -214,7 +212,6 @@ def test_adaptive_richardson_error_decomposition_consistency() -> None:
         n_krylov_insufficient,
         _snapshot,
     ) = evolve_schedule_adaptive_richardson(
-        h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
         psi0=psi0,
@@ -259,13 +256,12 @@ def test_adaptive_pi_dt_grows_with_loose_tolerance() -> None:
     """
     n = 3
     T = 5.0
-    prob = _make_random_problem(n, seed=42)
+    prob, h_x = _make_random_problem(n, seed=42)
     # constant schedule: A = 0.5, B = 0.5 で固定 (s(t) は default).
-    sched = Schedule(T=T, A=lambda s: 0.5, B=lambda s: 0.5)
+    sched = Schedule(T=T, A=lambda s: 0.5, B=lambda s: 0.5, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     _, _, dt_history, _, _, _, _, _, _, _ = evolve_schedule_adaptive_richardson(
-        h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
         psi0=psi0,
@@ -290,12 +286,11 @@ def test_adaptive_rejects_oversized_dt0() -> None:
     """
     n = 3
     T = 5.0
-    prob = _make_random_problem(n, seed=137)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=137)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     _, _, _, n_rejects, _, _, _, _, _, _ = evolve_schedule_adaptive_richardson(
-        h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
         psi0=psi0,
@@ -318,13 +313,12 @@ def test_adaptive_max_rejects_raises_runtime_error() -> None:
     で 3 連続 reject 後に RuntimeError が出る.
     """
     n = 3
-    prob = _make_random_problem(n, seed=11)
-    sched = Schedule.linear(T=5.0)
+    prob, h_x = _make_random_problem(n, seed=11)
+    sched = Schedule.linear(T=5.0, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     with pytest.raises(RuntimeError, match="max_rejects"):
         evolve_schedule_adaptive_richardson(
-            h_x=prob.h_x,
             h_p_diag=prob.H_p_diag,
             schedule=sched,
             psi0=psi0,
@@ -387,20 +381,15 @@ def test_dt_init_none_facade_smoke() -> None:
 
     n = 4
     T = 5.0
-    prob = _make_random_problem(n, seed=20260513)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260513)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann = QuantumAnnealer(prob, sched)
     res_auto = ann.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=1e-8,
-        dt_init=None,
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=1e-8, dt_init=None
     )
-    psi_ref = _qutip_reference(prob.h_x, prob.H_p_diag, T)
+    psi_ref = _qutip_reference(h_x, prob.H_p_diag, T)
     fid = _fidelity(res_auto.psi_final, psi_ref)
     assert fid > 1 - 1e-6, (
         f"dt_init=None auto resolution fidelity too low: {fid} (1-fid={1 - fid})"
@@ -434,18 +423,13 @@ def test_dt_init_none_small_T_completes() -> None:
 
     n = 3
     T = 0.05  # 床値支配でも上限支配でも無い中庸. 0.1·sqrt(0.05)≈2.24e-2 < T.
-    prob = _make_random_problem(n, seed=99)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=99)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann = QuantumAnnealer(prob, sched)
     res = ann.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=1e-8,
-        dt_init=None,
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=1e-8, dt_init=None
     )
     assert res.success
     assert res.n_steps_actual is not None and res.n_steps_actual >= 1
@@ -469,23 +453,24 @@ def test_auto_dt_max_resolves_to_formula() -> None:
     rng = np.random.default_rng(0)
     h_p = rng.uniform(-1.0, 1.0, size=1 << n).astype(np.float64)
     h_x = np.ones(n, dtype=np.float64)
-    prob = IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
-    norm_h = _gershgorin_norm_upper_bound(prob)
+    prob = IsingProblem(n=n, H_p_diag=h_p)
+    sched_helper = Schedule.linear(T=1.0, h_x=h_x)
+    norm_h = _gershgorin_norm_upper_bound(sched_helper, prob)
     # h_x の合計 20 + max|H_p_diag| ≈ 1 → ‖H‖_est ≈ 21.
     assert 20.5 < norm_h < 21.5
 
     # cap = 4·24/21 ≈ 4.57, default_dt_max = 10·0.5 = 5.0 → cap が支配.
-    val = _resolve_dt_max_auto(prob, m=24, dt0=0.5)
+    val = _resolve_dt_max_auto(sched_helper, prob, m=24, dt0=0.5)
     expected_cap = 4.0 * 24.0 / norm_h
     assert val == pytest.approx(expected_cap, rel=1e-15)
     assert val < 5.0  # default を下回る
 
     # default 支配域: dt0=0.1 → default=1.0, cap=4.57 → default が支配.
-    val_default = _resolve_dt_max_auto(prob, m=24, dt0=0.1)
+    val_default = _resolve_dt_max_auto(sched_helper, prob, m=24, dt0=0.1)
     assert val_default == pytest.approx(1.0, rel=1e-15)
 
     # floor 支配域: dt0=10 → default=100, cap=4.57 → cap < dt0 → floor (dt0=10).
-    val_floor = _resolve_dt_max_auto(prob, m=24, dt0=10.0)
+    val_floor = _resolve_dt_max_auto(sched_helper, prob, m=24, dt0=10.0)
     assert val_floor == pytest.approx(10.0, rel=1e-15)
 
 
@@ -507,14 +492,15 @@ def test_dt_max_none_facade_caps_dt_history() -> None:
     rng = np.random.default_rng(20260513)
     h_p = rng.uniform(-1.0, 1.0, size=1 << n).astype(np.float64)
     h_x = 5.0 * np.ones(n, dtype=np.float64)
-    prob = IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
-    norm_h = _gershgorin_norm_upper_bound(prob)
-    expected_cap = _resolve_dt_max_auto(prob, m=24, dt0=0.5)
+    prob = IsingProblem(n=n, H_p_diag=h_p)
+    sched_for_cap = Schedule.linear(T=T, h_x=h_x)
+    norm_h = _gershgorin_norm_upper_bound(sched_for_cap, prob)
+    expected_cap = _resolve_dt_max_auto(sched_for_cap, prob, m=24, dt0=0.5)
     # cap = 4·24/51 ≈ 1.88, default 10·0.5 = 5.0 → cap が支配.
     assert expected_cap == pytest.approx(4.0 * 24.0 / norm_h, rel=1e-15)
     assert expected_cap < 5.0
 
-    sched = Schedule(T=T, A=lambda s: 0.5, B=lambda s: 0.5)
+    sched = Schedule(T=T, A=lambda s: 0.5, B=lambda s: 0.5, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann = QuantumAnnealer(prob, sched)
@@ -545,7 +531,6 @@ def test_dt_max_none_facade_caps_dt_history() -> None:
     # 直接呼出で dt_history を見て確認 (QuantumResult は dt_history を
     # 公開しないので driver layer に降りる).
     _, _, dt_history, _, _, _, _, _, _, _ = evolve_schedule_adaptive_richardson(
-        h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
         psi0=psi0,
@@ -572,8 +557,9 @@ def test_auto_dt_max_zero_hamiltonian_falls_back_to_default() -> None:
     n = 3
     h_p = np.zeros(1 << n, dtype=np.float64)
     h_x = np.zeros(n, dtype=np.float64)
-    prob = IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
-    val = _resolve_dt_max_auto(prob, m=24, dt0=0.5)
+    prob = IsingProblem(n=n, H_p_diag=h_p)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
+    val = _resolve_dt_max_auto(sched, prob, m=24, dt0=0.5)
     assert val == pytest.approx(5.0, rel=1e-15)  # 10·dt0
 
 
@@ -589,20 +575,15 @@ def test_m_max_facade_smoke() -> None:
 
     n = 4
     T = 5.0
-    prob = _make_random_problem(n, seed=20260513)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260513)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann = QuantumAnnealer(prob, sched)
     res = ann.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=1e-8,
-        m_max=16,
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=1e-8, m_max=16
     )
-    psi_ref = _qutip_reference(prob.h_x, prob.H_p_diag, T)
+    psi_ref = _qutip_reference(h_x, prob.H_p_diag, T)
     fid = _fidelity(res.psi_final, psi_ref)
     assert fid > 1 - 1e-6, f"m_max=16 fidelity too low: {fid} (1-fid={1 - fid})"
     assert res.success
@@ -623,27 +604,18 @@ def test_m_max_overrides_self_m() -> None:
 
     n = 4
     T = 2.0
-    prob = _make_random_problem(n, seed=42)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=42)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann_24 = QuantumAnnealer(prob, sched, m=24)
     res_override = ann_24.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=1e-8,
-        m_max=16,
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=1e-8, m_max=16
     )
 
     ann_16 = QuantumAnnealer(prob, sched, m=16)
     res_native = ann_16.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=1e-8,
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=1e-8
     )
 
     np.testing.assert_array_equal(res_override.psi_final, res_native.psi_final)
@@ -659,18 +631,12 @@ def test_m_eff_stats_in_adaptive_result() -> None:
 
     n = 4
     T = 5.0
-    prob = _make_random_problem(n, seed=20260513)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260513)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann = QuantumAnnealer(prob, sched)
-    res = ann.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=1e-8,
-    )
+    res = ann.run(psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=1e-8)
     assert res.m_eff_stats is not None
     stats = res.m_eff_stats
     # 必須キー.
@@ -695,8 +661,8 @@ def test_m_eff_stats_none_for_fixed_dt_methods() -> None:
 
     n = 3
     T = 1.0
-    prob = _make_random_problem(n, seed=42)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=42)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     for method in ("m2", "trotter", "trotter_suzuki4", "cfm4"):
@@ -725,26 +691,17 @@ def test_m_max_32_matches_m_24_when_early_termination() -> None:
 
     n = 4
     T = 5.0
-    prob = _make_random_problem(n, seed=20260513)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260513)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann_24 = QuantumAnnealer(prob, sched, m=24)
     res_24 = ann_24.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=1e-8,
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=1e-8
     )
     ann_24_with_max32 = QuantumAnnealer(prob, sched, m=24)
     res_32 = ann_24_with_max32.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=1e-8,
-        m_max=32,
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=1e-8, m_max=32
     )
     # 早期打切が同じ m_eff (=k+1) で起きていれば終端 ψ は完全一致するか
     # それ以下になる. 緩めに rel<1e-12 で assert.
@@ -763,27 +720,15 @@ def test_m_max_invalid_raises() -> None:
     from maqina import QuantumAnnealer
 
     n = 3
-    prob = _make_random_problem(n, seed=11)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_random_problem(n, seed=11)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann = QuantumAnnealer(prob, sched)
     with pytest.raises(ValueError, match="m_max"):
-        ann.run(
-            psi0,
-            0.0,
-            1.0,
-            method="cfm4_adaptive_richardson_krylov",
-            m_max=0,
-        )
+        ann.run(psi0, 0.0, 1.0, method="cfm4_adaptive_richardson_krylov", m_max=0)
     with pytest.raises(ValueError, match="m_max"):
-        ann.run(
-            psi0,
-            0.0,
-            1.0,
-            method="cfm4_adaptive_richardson_krylov",
-            m_max=-5,
-        )
+        ann.run(psi0, 0.0, 1.0, method="cfm4_adaptive_richardson_krylov", m_max=-5)
     with pytest.raises(ValueError, match="m_max"):
         ann.run(
             psi0,
@@ -804,13 +749,12 @@ def test_adaptive_m2_save_tlist_still_not_implemented() -> None:
     テストで明示する.
     """
     n = 3
-    prob = _make_random_problem(n, seed=11)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_random_problem(n, seed=11)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     with pytest.raises(NotImplementedError, match="save_tlist"):
         evolve_schedule_adaptive_m2(
-            h_x=prob.h_x,
             h_p_diag=prob.H_p_diag,
             schedule=sched,
             psi0=psi0,
@@ -828,8 +772,8 @@ def test_adaptive_richardson_save_tlist_records_states() -> None:
     時刻を厳密に踏むことを, observables 評価 + 状態保存の round-trip で確認.
     """
     n = 3
-    prob = _make_random_problem(n, seed=11)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_random_problem(n, seed=11)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     save_tlist = np.array([0.0, 0.3, 0.7, 1.0], dtype=np.float64)
     obs = {"M_z": Observable.magnetization(n)}
@@ -846,7 +790,6 @@ def test_adaptive_richardson_save_tlist_records_states() -> None:
         _n_krylov_ins,
         snapshot,
     ) = evolve_schedule_adaptive_richardson(
-        h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
         psi0=psi0,
@@ -886,28 +829,20 @@ def test_propagator_tol_none_resolves_to_atol_ratio_bit_exact() -> None:
     n = 4
     T = 5.0
     atol = 1e-8
-    prob = _make_random_problem(n, seed=20260514)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260514)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     expected_resolved = atol * _KRYLOV_TOL_ATOL_RATIO  # = 1e-11
 
     ann_none = QuantumAnnealer(prob, sched)  # propagator_tol=None default
     res_none = ann_none.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=atol,
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=atol
     )
 
     ann_explicit = QuantumAnnealer(prob, sched, propagator_tol=expected_resolved)
     res_explicit = ann_explicit.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=atol,
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=atol
     )
 
     np.testing.assert_array_equal(res_none.psi_final, res_explicit.psi_final)
@@ -930,26 +865,18 @@ def test_propagator_tol_none_vs_explicit_1e12_same_accuracy() -> None:
     n = 4
     T = 5.0
     atol = 1e-8
-    prob = _make_random_problem(n, seed=20260514)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260514)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann_default = QuantumAnnealer(prob, sched)  # propagator_tol=None → 1e-11
     res_default = ann_default.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=atol,
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=atol
     )
 
     ann_tight = QuantumAnnealer(prob, sched, propagator_tol=1e-12)
     res_tight = ann_tight.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=atol,
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=atol
     )
 
     rel = float(
@@ -979,8 +906,8 @@ def test_dt_init_invalid_string_still_raises_at_runtime() -> None:
     from maqina import QuantumAnnealer
 
     n = 3
-    prob = _make_random_problem(n, seed=11)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_random_problem(n, seed=11)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann = QuantumAnnealer(prob, sched)
@@ -1001,8 +928,8 @@ def test_dt_max_invalid_string_still_raises_at_runtime() -> None:
     from maqina import QuantumAnnealer
 
     n = 3
-    prob = _make_random_problem(n, seed=11)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_random_problem(n, seed=11)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann = QuantumAnnealer(prob, sched)

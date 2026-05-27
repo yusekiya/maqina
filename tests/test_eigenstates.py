@@ -18,7 +18,7 @@ from maqina import IsingProblem, Schedule, instantaneous_eigenstates
 from maqina import _rust as _rust_mod
 
 
-def _make_problem(n: int, seed: int = 0) -> IsingProblem:
+def _make_problem(n: int, seed: int = 0) -> tuple[IsingProblem, np.ndarray]:
     """``IsingProblem`` を作るヘルパ. ``H_p_diag`` は乱数で縮退を避ける.
 
     ``h_x`` は incommensurate (``± h_x_i`` の和に 0 が現れない) になるよう
@@ -29,7 +29,7 @@ def _make_problem(n: int, seed: int = 0) -> IsingProblem:
     # incommensurate な h_x: 1, √2, √3, √5 (n <= 4 まで).
     base = np.array([1.0, np.sqrt(2.0), np.sqrt(3.0), np.sqrt(5.0)], dtype=np.float64)
     h_x = base[:n].copy()
-    return IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
+    return IsingProblem(n=n, H_p_diag=h_p), h_x
 
 
 def _apply_ht(
@@ -38,7 +38,7 @@ def _apply_ht(
     """``H(t) @ v`` を Rust matvec 経由で計算する (テスト残差用)."""
     a_t, b_t = sched.coeffs_at(t)
     v_c = np.ascontiguousarray(v)
-    return _rust_mod.apply_h_py(v_c, prob.h_x, prob.H_p_diag, a_t, b_t)
+    return _rust_mod.apply_h_py(v_c, sched.h_x, prob.H_p_diag, a_t, b_t)
 
 
 def _eigvec_residuals(
@@ -73,8 +73,8 @@ def test_lanczos_matches_exact(n: int, t_frac: float) -> None:
     引いている限り下位 ``k`` Ritz 値が下位 ``k`` 厳密固有値に一致する
     (m=32 は dim=16 (n=4) 以上なので flat にならない).
     """
-    prob = _make_problem(n, seed=11)
-    sched = Schedule.linear(T=2.0)
+    prob, h_x = _make_problem(n, seed=11)
+    sched = Schedule.linear(T=2.0, h_x=h_x)
     t = t_frac * sched.T
     k = 4
     m = 32
@@ -105,8 +105,8 @@ def test_lanczos_matches_exact(n: int, t_frac: float) -> None:
 
 def test_lanczos_eigvecs_are_orthonormal() -> None:
     """Ritz vectors の直交性 (Gram 行列が恒等行列に近い)."""
-    prob = _make_problem(n=4, seed=3)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n=4, seed=3)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     k = 5
     _, vec = instantaneous_eigenstates(
         prob, sched, t=0.5, k=k, method="lanczos", m=32, seed=7
@@ -118,20 +118,16 @@ def test_lanczos_eigvecs_are_orthonormal() -> None:
 def test_exact_rejects_large_n() -> None:
     """``method='exact'`` は ``n > 12`` で ``ValueError``."""
     n = 13
-    prob = IsingProblem(
-        n=n,
-        H_p_diag=np.zeros(1 << n, dtype=np.float64),
-        h_x=np.ones(n),
-    )
-    sched = Schedule.linear(T=1.0)
+    prob = IsingProblem(n=n, H_p_diag=np.zeros(1 << n, dtype=np.float64))
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n))
     with pytest.raises(ValueError, match=r"n <= 12"):
         instantaneous_eigenstates(prob, sched, t=0.5, k=1, method="exact")
 
 
 def test_k_equals_one() -> None:
-    """``k=1`` で shape ``(1,)`` / ``(2**n, 1)`` を返す."""
-    prob = _make_problem(n=3, seed=5)
-    sched = Schedule.linear(T=1.0)
+    """``k=1`` で shape ``(1)`` / ``(2**n, 1)`` を返す."""
+    prob, h_x = _make_problem(n=3, seed=5)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     ev_l, vec_l = instantaneous_eigenstates(
         prob, sched, t=0.5, k=1, method="lanczos", m=16, seed=0
     )
@@ -155,9 +151,8 @@ def test_t_zero_gives_driver_groundstate_energy() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=np.arange(1 << n, dtype=np.float64),  # 任意, t=0 では効かない
-        h_x=h_x,
     )
-    sched = Schedule.linear(T=10.0)
+    sched = Schedule.linear(T=10.0, h_x=h_x)
     ev, _ = instantaneous_eigenstates(prob, sched, t=0.0, k=1, method="exact")
     expected = -float(np.sum(h_x))
     np.testing.assert_allclose(ev[0], expected, atol=1e-12)
@@ -172,8 +167,8 @@ def test_t_equals_T_gives_min_h_p_diag() -> None:
     n = 4
     rng = np.random.default_rng(99)
     h_p = rng.normal(size=1 << n).astype(np.float64)
-    prob = IsingProblem(n=n, H_p_diag=h_p, h_x=np.ones(n))
-    sched = Schedule.linear(T=1.0)
+    prob = IsingProblem(n=n, H_p_diag=h_p)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n))
     ev, vec = instantaneous_eigenstates(prob, sched, t=sched.T, k=1, method="exact")
     np.testing.assert_allclose(ev[0], float(np.min(h_p)), atol=1e-12)
     # ground state は計算基底の min ビット位置 (純粋な |x⟩) のはず.
@@ -183,8 +178,8 @@ def test_t_equals_T_gives_min_h_p_diag() -> None:
 
 def test_k_greater_than_m_raises() -> None:
     """``method='lanczos'`` で ``k > m`` は ``ValueError``."""
-    prob = _make_problem(n=3, seed=0)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n=3, seed=0)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     with pytest.raises(ValueError, match=r"k=\d+ must be <= m=\d+"):
         instantaneous_eigenstates(
             prob, sched, t=0.5, k=10, method="lanczos", m=4, seed=0
@@ -193,32 +188,32 @@ def test_k_greater_than_m_raises() -> None:
 
 def test_k_invalid_raises() -> None:
     """``k < 1`` は ``ValueError``."""
-    prob = _make_problem(n=3, seed=0)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n=3, seed=0)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     with pytest.raises(ValueError, match=r"k must be a positive integer"):
         instantaneous_eigenstates(prob, sched, t=0.5, k=0)
 
 
 def test_unknown_method_raises() -> None:
     """未知の ``method`` は ``ValueError``."""
-    prob = _make_problem(n=3, seed=0)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n=3, seed=0)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     with pytest.raises(ValueError, match=r"method must be"):
         instantaneous_eigenstates(prob, sched, t=0.5, k=1, method="bogus")  # type: ignore[arg-type]
 
 
 def test_exact_k_too_large_raises() -> None:
     """``method='exact'`` で ``k > 2**n`` は ``ValueError``."""
-    prob = _make_problem(n=2, seed=0)  # dim = 4
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n=2, seed=0)  # dim = 4
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     with pytest.raises(ValueError, match=r"k=\d+ must be <= 2\*\*n"):
         instantaneous_eigenstates(prob, sched, t=0.5, k=5, method="exact")
 
 
 def test_seed_reproducibility() -> None:
     """同じ ``seed`` で 2 回呼ぶと bit-exact に同じ結果を返す."""
-    prob = _make_problem(n=3, seed=0)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n=3, seed=0)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     ev1, vec1 = instantaneous_eigenstates(
         prob, sched, t=0.5, k=3, method="lanczos", m=16, seed=42
     )
@@ -231,8 +226,8 @@ def test_seed_reproducibility() -> None:
 
 def test_seed_different_gives_same_eigvals() -> None:
     """異なる seed でも eigvals は同じ (始ベクトルが部分空間を spans する限り)."""
-    prob = _make_problem(n=3, seed=0)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n=3, seed=0)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     ev1, _ = instantaneous_eigenstates(
         prob, sched, t=0.5, k=3, method="lanczos", m=16, seed=1
     )

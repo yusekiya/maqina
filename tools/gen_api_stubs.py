@@ -134,9 +134,19 @@ _KEEP_DUNDER_METHODS = frozenset({"__init__"})
 
 
 def _is_kept_method(name: str) -> bool:
+    """class method を stub に含めるかどうか.
+
+    - dunder (``__x__``) は ``__init__`` のみ残す.
+    - private mangled (``__x``) は class-private name mangling 経由で
+      consumer 側からアクセスされうるため残す (`_mangle` で書き換え).
+    - 単一 underscore (``_x``) は **cross-module 型チェック** のため残す
+      (内部 helper でも他モジュールから呼ばれることがあり, 型チェッカが
+      member を解決できないと unresolved-attribute エラーになる).
+      公開境界の制御は ``__all__`` / docstring に委ねる.
+    """
     if name.startswith("__") and name.endswith("__"):
         return name in _KEEP_DUNDER_METHODS
-    return not name.startswith("_")
+    return True
 
 
 def _mangle(class_name: str, attr: str) -> str:

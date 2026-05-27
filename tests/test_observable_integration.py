@@ -24,12 +24,12 @@ from maqina import IsingProblem, Observable, QuantumAnnealer, Schedule
 from maqina.initial_states import uniform_superposition
 
 
-def _make_problem(n: int = 3, seed: int = 7) -> IsingProblem:
+def _make_problem(n: int = 3, seed: int = 7) -> tuple[IsingProblem, np.ndarray]:
     rng = np.random.default_rng(seed)
     dim = 1 << n
     h_p_diag = rng.normal(size=dim).astype(np.float64)
     h_x = np.ones(n, dtype=np.float64)
-    return IsingProblem(n=n, H_p_diag=h_p_diag, h_x=h_x)
+    return IsingProblem(n=n, H_p_diag=h_p_diag), h_x
 
 
 def test_observables_m2_returns_history_with_save_tlist_length() -> None:
@@ -38,8 +38,8 @@ def test_observables_m2_returns_history_with_save_tlist_length() -> None:
     """
     n = 3
     T = 1.0
-    prob = _make_problem(n)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_problem(n)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
@@ -70,8 +70,8 @@ def test_observables_adaptive_richardson_returns_history() -> None:
     """
     n = 3
     T = 2.0
-    prob = _make_problem(n)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_problem(n)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
@@ -106,8 +106,8 @@ def test_energy_conservation_constant_schedule_m2() -> None:
     """
     n = 3
     T = 1.0
-    prob = _make_problem(n)
-    sched = Schedule(T=T, A=lambda s: 0.0, B=lambda s: 1.0)
+    prob, h_x = _make_problem(n)
+    sched = Schedule(T=T, A=lambda s: 0.0, B=lambda s: 1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
@@ -139,8 +139,8 @@ def test_energy_conservation_constant_schedule_richardson() -> None:
     """
     n = 3
     T = 1.0
-    prob = _make_problem(n)
-    sched = Schedule(T=T, A=lambda s: 0.0, B=lambda s: 1.0)
+    prob, h_x = _make_problem(n)
+    sched = Schedule(T=T, A=lambda s: 0.0, B=lambda s: 1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
@@ -166,8 +166,8 @@ def test_energy_conservation_constant_schedule_richardson() -> None:
 def test_save_tlist_out_of_range_raises() -> None:
     """``save_tlist[k] < t0`` または ``> t1`` で ``ValueError``."""
     n = 3
-    prob = _make_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
@@ -194,8 +194,8 @@ def test_save_tlist_out_of_range_raises() -> None:
 def test_save_tlist_not_monotonic_raises() -> None:
     """``save_tlist`` が monotonic increasing でないと ``ValueError``."""
     n = 3
-    prob = _make_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
@@ -213,8 +213,8 @@ def test_save_tlist_not_monotonic_raises() -> None:
 def test_save_tlist_wrong_dtype_raises() -> None:
     """``save_tlist`` の dtype が float64 でないと ``ValueError``."""
     n = 3
-    prob = _make_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
@@ -232,8 +232,8 @@ def test_save_tlist_wrong_dtype_raises() -> None:
 def test_save_tlist_empty_raises() -> None:
     """``save_tlist`` が空配列だと ``ValueError`` (``None`` を渡すよう要求)."""
     n = 3
-    prob = _make_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
@@ -254,20 +254,14 @@ def test_store_states_shape_fixed_dt() -> None:
     """
     n = 3
     T = 1.0
-    prob = _make_problem(n)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_problem(n)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
     save_tlist = np.linspace(0.0, T, 4, dtype=np.float64)
     res = ann.run(
-        psi0,
-        0.0,
-        T,
-        method="m2",
-        n_steps=20,
-        save_tlist=save_tlist,
-        store_states=True,
+        psi0, 0.0, T, method="m2", n_steps=20, save_tlist=save_tlist, store_states=True
     )
     assert res.states is not None
     assert res.states.shape == (4, 1 << n)
@@ -280,8 +274,8 @@ def test_store_states_false_keeps_states_none() -> None:
     """``store_states=False`` のとき ``states is None`` (observables のみ記録)."""
     n = 3
     T = 1.0
-    prob = _make_problem(n)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_problem(n)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
@@ -304,8 +298,8 @@ def test_store_states_false_keeps_states_none() -> None:
 def test_observables_diag_length_mismatch_raises() -> None:
     """``Observable.diag`` の長さが ``2**n`` と整合しないと ``ValueError``."""
     n = 3
-    prob = _make_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
@@ -330,8 +324,8 @@ def test_probabilities_returned_even_without_save_tlist() -> None:
     save_tlist の有無に依らない.
     """
     n = 3
-    prob = _make_problem(n)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_problem(n)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     res = ann.run(psi0, 0.0, 1.0, method="m2", n_steps=20)

@@ -50,7 +50,7 @@ from typing import Any
 SnapshotData = dict[str, 'np.ndarray | dict[str, np.ndarray] | None']
 __all__ = ['SnapshotData', 'evolve_schedule_adaptive_m2', 'evolve_schedule_adaptive_richardson', 'evolve_schedule_adaptive_richardson_chebyshev', 'evolve_schedule_cfm4', 'evolve_schedule_m2', 'evolve_schedule_trotter', 'evolve_schedule_trotter_suzuki4']
 
-def evolve_schedule_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, m: int=24, krylov_tol: float=1e-12, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, int, SnapshotData | None]:
+def evolve_schedule_m2(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, m: int=24, krylov_tol: float=1e-12, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, int, SnapshotData | None]:
     """固定 dt = (t1 - t0) / n_steps の M2 中点則ドライバ.
 
     各 step で ``schedule.coeffs_at(t + dt/2)`` を評価して
@@ -116,7 +116,7 @@ def evolve_schedule_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule
     """
     ...
 
-def evolve_schedule_trotter(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, int, SnapshotData | None]:
+def evolve_schedule_trotter(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, int, SnapshotData | None]:
     """固定 dt = (t1 - t0) / n_steps の Strang Trotter ドライバ.
 
     各 step で ``schedule.coeffs_at(t + dt/2)`` を評価して
@@ -163,7 +163,7 @@ def evolve_schedule_trotter(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Sch
     """
     ...
 
-def evolve_schedule_trotter_suzuki4(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, int, SnapshotData | None]:
+def evolve_schedule_trotter_suzuki4(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, int, SnapshotData | None]:
     """固定 dt = (t1 - t0) / n_steps の Suzuki S_4 Trotter ドライバ.
 
     各 step で 5 sub-step の中点 ``t + offset_k · dt`` (``offset_k ∈ [p/2,
@@ -209,7 +209,7 @@ def evolve_schedule_trotter_suzuki4(h_x: np.ndarray, h_p_diag: np.ndarray, sched
     """
     ...
 
-def evolve_schedule_cfm4(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, m: int=24, krylov_tol: float=1e-12, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, int, SnapshotData | None]:
+def evolve_schedule_cfm4(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, n_steps: int, *, m: int=24, krylov_tol: float=1e-12, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, int, SnapshotData | None]:
     """固定 dt = (t1 - t0) / n_steps の CFM4:2 ドライバ.
 
     各 step でガウス-ルジャンドル 2 点ノード ``t + c_1·dt`` / ``t + c_2·dt``
@@ -258,7 +258,7 @@ def evolve_schedule_cfm4(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedu
     """
     ...
 
-def evolve_schedule_adaptive_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, save_tlist: np.ndarray | None=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+def evolve_schedule_adaptive_m2(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, save_tlist: np.ndarray | None=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """CFM4:2 + M2 embedded 推定子による adaptive dt ドライバ (Phase 4 C3).
 
     PI controller (``docs/design/05-3-propagator.md`` §5.3) で local error を ``tol_step``
@@ -333,7 +333,7 @@ def evolve_schedule_adaptive_m2(h_x: np.ndarray, h_p_diag: np.ndarray, schedule:
     """
     ...
 
-def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
+def evolve_schedule_adaptive_richardson(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
     """CFM4:2 + step-doubling Richardson 推定子による adaptive dt ドライバ.
 
     PI controller (``docs/design/05-3-propagator.md`` §5.3) で local error を ``tol_step``
@@ -425,7 +425,7 @@ def evolve_schedule_adaptive_richardson(h_x: np.ndarray, h_p_diag: np.ndarray, s
     """
     ...
 
-def evolve_schedule_adaptive_richardson_chebyshev(h_x: np.ndarray, h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, chebyshev_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
+def evolve_schedule_adaptive_richardson_chebyshev(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, h_p_min: float, h_p_max: float, chebyshev_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
     """CFM4:2 + step-doubling Richardson + Chebyshev propagator (issue #122).
 
     既存 :func:`evolve_schedule_adaptive_richardson` (Lanczos 経路) と

@@ -441,7 +441,9 @@ class QuantumAnnealer:
             # issue #54: ``dt_max = None`` で旧 ``"auto"`` 相当の Gershgorin
             # cap auto resolution. float 明示時はそのまま渡す.
             if dt_max is None:
-                dt_max_resolved: float = _resolve_dt_max_auto(self.problem, self.m, dt0)
+                dt_max_resolved: float = _resolve_dt_max_auto(
+                    self.schedule, self.problem, self.m, dt0
+                )
             else:
                 dt_max_resolved = float(dt_max)
             # m_max は adaptive Richardson 経路の Lanczos 部分空間上限を
@@ -471,7 +473,6 @@ class QuantumAnnealer:
                 n_krylov_insufficient,
                 snapshot,
             ) = evolve_schedule_adaptive_richardson(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=psi0_arr,
@@ -557,7 +558,7 @@ class QuantumAnnealer:
                 # ``m`` は ``_resolve_dt_max_auto`` の Lanczos capacity 引数
                 # としてのみ使う. Chebyshev driver 自体は ``m`` を取らない.
                 dt_max_resolved_cheb: float = _resolve_dt_max_auto(
-                    self.problem, self.m, dt0
+                    self.schedule, self.problem, self.m, dt0
                 )
             else:
                 dt_max_resolved_cheb = float(dt_max)
@@ -582,12 +583,13 @@ class QuantumAnnealer:
                 n_cheb_insufficient,
                 snapshot,
             ) = evolve_schedule_adaptive_richardson_chebyshev(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=psi0_arr,
                 t0=t0,
                 t1=t1,
+                h_p_min=self.problem.h_p_diag_min,
+                h_p_max=self.problem.h_p_diag_max,
                 chebyshev_tol=effective_propagator_tol,
                 tol_step=tol_step,
                 dt0=dt0,
@@ -648,7 +650,6 @@ class QuantumAnnealer:
         # None.
         if method == "m2":
             psi_final, n_matvec, snapshot = evolve_schedule_m2(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=psi0_arr,
@@ -663,7 +664,6 @@ class QuantumAnnealer:
             )
         elif method == "trotter":
             psi_final, n_matvec, snapshot = evolve_schedule_trotter(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=psi0_arr,
@@ -676,7 +676,6 @@ class QuantumAnnealer:
             )
         elif method == "trotter_suzuki4":
             psi_final, n_matvec, snapshot = evolve_schedule_trotter_suzuki4(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=psi0_arr,
@@ -689,7 +688,6 @@ class QuantumAnnealer:
             )
         else:  # method == "cfm4"
             psi_final, n_matvec, snapshot = evolve_schedule_cfm4(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=psi0_arr,

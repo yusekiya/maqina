@@ -1,14 +1,15 @@
 # §5.1 matvec / per-axis primitives
 
-Rust 側に持つ低レベル配列演算プリミティブは 2 種類:
+Rust 側に持つ低レベル配列演算プリミティブ:
 
 | プリミティブ | 用途 | 導入 phase | 動作モード |
 |---|---|---|---|
-| `apply_h` | Lanczos / CFM4:2 (Magnus 系) の合成 matvec | Phase 1 | overwrite: `y = a·H_drv·v + b·H_p_diag·v` (cache-blocked) |
+| `apply_h_general` | per-site/per-axis 時間依存場 (XYZ driver) の合成 matvec, Lanczos / CFM4:2 系の hot path | Phase C / issue #142 C1 | overwrite: `y[k] += Σ_i (g_x_i X_i + g_y_i Y_i + g_z_i Z_i)·v[k] + (c_b · H_p_diag[k] + gz_eff_diag[k]) · v[k]` (cache-blocked, Option-based skip 経路) |
+| `apply_h` | 旧 API X-only 合成 matvec (`apply_h_general` の特化 wrap; Rust 単体テスト互換 + perf 回帰測定 baseline 用) | Phase 1, Phase C で wrap 化 | overwrite: `y = a·H_drv·v + b·H_p_diag·v` (cache-blocked) |
 | `apply_h_drv` / `apply_h_p_diag` | Richardson estimator の iter-0 cache 計算専用 primitive | Phase 8 follow-up (#100) | overwrite: 単独 H_drv / H_p_diag の作用 |
-| `apply_single_mode_axis_i` | Trotter 系の 2×2 ユニタリ適用 | Phase 2 | in-place rotation |
+| `apply_single_mode_axis_i` | Trotter 系の 2×2 ユニタリ適用 (旧 X-only API のみ; XYZ 一般化は scope 外) | Phase 2 | in-place rotation |
 
-両者とも bit-flip 構造 (`(psi[k], psi[k ^ (1<<i)])` のペア処理) を共有するが、
+bit-flip 構造 (`(psi[k], psi[k ^ (1<<i)])` のペア処理) は全体で共有するが、
 matvec は **複数 i の寄与を 1 つの y に足し込む** のに対し、Trotter は
 **1 つの i ごとに in-place で psi を回転する** という違いがあり、メモリ
 アクセスパターンと最適化の余地が異なるため別関数として書く。
@@ -92,6 +93,69 @@ fn apply_h(
   `apply_*_rayon_determinism_8thread_100iter`) は `*_rayon` を直接呼んで
   rayon path の正当性を検証し続ける。`MIN_RAYON_DIM` の値は const なので
   再評価には release rebuild が必要。
+
+##### 5.1.1.y `apply_h_general` — per-site/per-axis 時間依存場の合成 matvec (Phase C / issue #142)
+
+旧 `apply_h` の X-only 制約を解消し, per-axis (X / Y / Z) に独立な時間依存
+係数を持つ Hamiltonian に対応する一般化された合成 matvec。Phase C C1
+(PR #143) で導入。Lanczos / CFM4:2 系の hot path は今後この関数を呼ぶ
+(旧 `apply_h` は `apply_h_general` の X-only 特化 wrap として残置)。
+
+```text
+H(t) · v[k] = Σ_i [g_x_i · X_i + g_y_i · Y_i + g_z_i · Z_i] · v[k]
+              + (c_b · H_p_diag[k] + gz_eff_diag[k]) · v[k]
+```
+
+Rust signature:
+
+```rust
+fn apply_h_general(
+    v: &[Complex64], y: &mut [Complex64],
+    g_x: &[f64],
+    g_y: Option<&[f64]>,            // None or all-zero → real-only kernel
+    h_p_diag: &[f64], c_b: f64,
+    gz_eff_diag: Option<&[f64]>,    // None → 既存 diag pass と byte-identical
+    n: usize,
+)
+```
+
+実装の核となる 3 つの設計判断:
+
+1. **bit-flip pass で X と Y を複素係数 1 個に畳む**: per-axis に `c_i =
+   g_x_i + i·g_y_i` を作り, Hermitian 構造から下半 row は `conj(c_i)`。
+   `(k_lo, k_hi)` ペアに対し `y[k_lo] += conj(c_i)·ψ[k_hi]`,
+   `y[k_hi] += c_i·ψ[k_lo]` の 2 加算で済む。これにより X+Y は **bit-flip pass を
+   1 往復で完了** し X-only の倍 (axis ごと 2 pass) には ならない。
+2. **Option-based skip 経路 (旧 API perf 温存)**: `g_y = None` または
+   `g_y[i] == 0.0` (IEEE-754 等価) の場合, axis loop の **外** で分岐して
+   **既存の real-only SIMD/scalar kernel** (`apply_h` と同じコード経路, Phase 6
+   C2 / C2.5 SIMD 最適化を温存) に dispatch する。ランタイム分岐を inner
+   loop に持つと branch predictor が stall するため per-axis 1 回判定に留める。
+   同様に `gz_eff_diag = None` のときは加算項を除いた既存 diag pass を
+   **byte-identical** に実行 (旧 API 経路の追加 work は厳密に 0)。
+3. **Z 軸 (per-stage の事前畳み込み)**: per-axis `g_z_i` の効きは
+   `Σ_i g_z_i · σ_z_i(k)` で各 |k⟩ に対応する `gz_eff_diag[k]` (length 2^N)
+   に **driver の上位 (cfm4_step) で事前畳み込み** する (詳細は次節 +
+   `docs/design/05-3-propagator.md` の per-stage Gershgorin + gz_eff_diag
+   doubling 構築)。`apply_h_general` 自体は precomputed array を受け取って
+   diag pass に加算するだけで, hot path 内で Z 軸の Pauli-σ 評価は行わない。
+
+SIMD per-axis 分岐: `src/matvec.rs::simd_kernels::bitflip_iN_complex` (i ∈
+{0,1,2}) を C1 part 1 (PR #143) で追加。complex coeff (`c_i`) を broadcast +
+swizzle で `wide::f64x4` に乗せる (Phase 6 C2.5 の single_mode_iN と同方針)。
+real-only fast path は既存 `bitflip_iN` (実数 broadcast + FMA) をそのまま
+呼ぶため Phase 6 C2 / C2.5 で達成した SIMD speedup は完全に温存される。
+
+数値同等性: `apply_h_general(g_y=None, gz_eff_diag=None)` は既存 `apply_h`
+と byte-identical (Rust 単体テスト `apply_h_general_real_only_matches_apply_h`)。
+X+Y / Z 込みの一般 case では dense H 構築版と `rel < 1e-13` 一致
+(`apply_h_general_matches_dense_xy`, `apply_h_general_matches_dense_xyz`)。
+
+旧 API regression: gz=gy=0 の場合, `Option`-based skip 経路により設計上
+~10⁻⁵ ~ 2·10⁻⁴ オーダー (per-step wall 比, N=20 で ~5-100 μs / step) の
+overhead に抑えられる。受入基準 `bench_per_step.py` の旧 API シナリオで
+**main 比 ±1% 以内**。1% 超は実装 bug 扱いとして C1 に戻る (詳細は
+issue #142 Risk 節)。
 
 ##### 5.1.1.x iter-0 cache 用 primitive — `apply_h_drv` / `apply_h_p_diag` (Phase 8 follow-up / issue #100)
 

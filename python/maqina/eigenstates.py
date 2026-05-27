@@ -161,7 +161,13 @@ def _eigenstates_lanczos(
     rust = _import_rust()
     n = int(problem.n)
     dim = 1 << n
-    h_x = problem.h_x
+    if schedule.is_xyz_api:
+        raise NotImplementedError(
+            "instantaneous_eigenstates does not yet support Schedule.from_xyz "
+            "(issue #142 Phase C; eigenstates needs per-axis matvec generalization). "
+            "Use a legacy Schedule (X-only TFIM) for now."
+        )
+    h_x = schedule.h_x
     h_p_diag = problem.H_p_diag
     a_t, b_t = schedule.coeffs_at(t)
 
@@ -262,7 +268,13 @@ def _eigenstates_exact(
         raise ValueError(f"k={k} must be <= 2**n = {dim}")
 
     rust = _import_rust()
-    h_x = problem.h_x
+    if schedule.is_xyz_api:
+        raise NotImplementedError(
+            "instantaneous_eigenstates does not yet support Schedule.from_xyz "
+            "(issue #142 Phase C; eigenstates needs per-axis matvec generalization). "
+            "Use a legacy Schedule (X-only TFIM) for now."
+        )
+    h_x = schedule.h_x
     h_p_diag = problem.H_p_diag
     a_t, b_t = schedule.coeffs_at(t)
 

@@ -285,13 +285,7 @@ def _run_maqina_fixed_dt(
     """maqina 固定 dt 経路 (m2 / trotter / cfm4) を ``n_steps`` 回走らせる."""
     ann = QuantumAnnealer(prob, sched)
     t_start = time.perf_counter()
-    res = ann.run(
-        psi0,
-        0.0,
-        T,
-        method=method,
-        n_steps=n_steps,
-    )
+    res = ann.run(psi0, 0.0, T, method=method, n_steps=n_steps)
     elapsed = time.perf_counter() - t_start
     return elapsed, np.ascontiguousarray(res.psi_final)
 
@@ -313,13 +307,7 @@ def _run_maqina_adaptive(
     """
     ann = QuantumAnnealer(prob, sched, propagator_tol=propagator_tol)
     t_start = time.perf_counter()
-    res = ann.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=atol,
-    )
+    res = ann.run(psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=atol)
     elapsed = time.perf_counter() - t_start
     assert (
         res.n_steps_actual is not None
@@ -344,13 +332,7 @@ def _run_maqina_adaptive_chebyshev(
     """
     ann = QuantumAnnealer(prob, sched, propagator_tol=propagator_tol)
     t_start = time.perf_counter()
-    res = ann.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_chebyshev",
-        atol=atol,
-    )
+    res = ann.run(psi0, 0.0, T, method="cfm4_adaptive_richardson_chebyshev", atol=atol)
     elapsed = time.perf_counter() - t_start
     assert res.n_steps_actual is not None
     return elapsed, np.ascontiguousarray(res.psi_final), int(res.n_steps_actual)
@@ -376,8 +358,8 @@ def _make_random_problem(
     h_p_diag = (rng.uniform(-1.0, 1.0, size=1 << n) * scenario.h_p_scale).astype(
         np.float64
     )
-    prob = IsingProblem(n=n, H_p_diag=h_p_diag, h_x=h_x)
-    sched = Schedule.linear(T=scenario.T)
+    prob = IsingProblem(n=n, H_p_diag=h_p_diag)
+    sched = Schedule.linear(T=scenario.T, h_x=h_x)
     psi0 = uniform_superposition(n)
     return prob, sched, psi0, h_x, h_p_diag
 
@@ -554,10 +536,7 @@ def _sweep_one_scenario_n(
             for i in range(len(v_psis) - 1)
         ]
         validation = _ValidationData(
-            tols=validate_tols,
-            walls=v_walls,
-            psis=v_psis,
-            consecutive_diffs=diffs,
+            tols=validate_tols, walls=v_walls, psis=v_psis, consecutive_diffs=diffs
         )
         # 最 tight cell (= validate_tols[-1] = ref_tol) を main reference に流用.
         ref_wall = v_walls[-1]
@@ -618,8 +597,7 @@ def _sweep_one_scenario_n(
         # T / dt → n_steps に変換 (dt は T-invariant な精度つまみ).
         n_steps_list = [max(1, int(round(T / dt))) for dt in dt_sweep]
         print(
-            f"  {method} sweep dts={dt_sweep} → n_steps={n_steps_list} ...",
-            flush=True,
+            f"  {method} sweep dts={dt_sweep} → n_steps={n_steps_list} ...", flush=True
         )
         for dt, n_steps in zip(dt_sweep, n_steps_list, strict=True):
             wall, psi = _run_maqina_fixed_dt(prob, sched, psi0, T, method, n_steps)
@@ -975,8 +953,7 @@ def _write_md(
         lines.append("|---|---|---|---|---|---|")
 
         order = sorted(
-            range(len(records)),
-            key=lambda i: (infids[i], records[i].wall_sec),
+            range(len(records)), key=lambda i: (infids[i], records[i].wall_sec)
         )
         for i in order:
             r = records[i]
@@ -1112,7 +1089,7 @@ def _parse_scenario_def(text: str) -> _Scenario:
 
     ``n`` の値リストは ``,`` を `key=value` 区切りに使う都合上 ``;`` 区切り
     で受ける. ``n`` 未指定の custom scenario は CLI ``--n-values`` か
-    fallback ``(10,)`` を使う (``_resolve_scenarios`` で解決).
+    fallback ``(10)`` を使う (``_resolve_scenarios`` で解決).
     """
     if ":" not in text:
         raise argparse.ArgumentTypeError(
@@ -1135,14 +1112,10 @@ def _parse_scenario_def(text: str) -> _Scenario:
         n_values = tuple(int(s.strip()) for s in kv["n"].split(";") if s.strip())
     else:
         # caller (`_resolve_scenarios`) が global ``--n-values`` を当てる. それも
-        # 無ければ fallback として (10,) を使う.
+        # 無ければ fallback として (10) を使う.
         n_values = ()
     return _Scenario(
-        name.strip(),
-        T=T_val,
-        h_p_scale=h_p_val,
-        h_x_scale=h_x_val,
-        n_values=n_values,
+        name.strip(), T=T_val, h_p_scale=h_p_val, h_x_scale=h_x_val, n_values=n_values
     )
 
 
@@ -1332,7 +1305,7 @@ def _resolve_scenarios(args: argparse.Namespace) -> list[_Scenario]:
     ``--n-values`` が CLI で指定されていれば全 scenario の ``n_values`` を
     それで上書きする. 未指定なら built-in scenario は規定 ``n_values`` を
     使い, custom scenario (``--add-scenario`` で ``n=...`` 未指定のもの) は
-    fallback ``(10,)`` を使う.
+    fallback ``(10)`` を使う.
     """
     pool: dict[str, _Scenario] = dict(_BUILTIN_SCENARIOS)
     for sc in args.add_scenario:
@@ -1356,7 +1329,7 @@ def _resolve_scenarios(args: argparse.Namespace) -> list[_Scenario]:
             n_values = sc.n_values
         else:
             # custom scenario で n 未指定 / --n-values 未指定の場合の fallback.
-            n_values = (10,)
+            n_values = 10
         if n_values != sc.n_values:
             sc = _Scenario(
                 name=sc.name,
