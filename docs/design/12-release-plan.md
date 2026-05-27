@@ -677,6 +677,10 @@ v1.0 前の最後の機会としてプロジェクト名を `kryanneal` (Kry(lov
 expansion) に rename。pure rename / 数値挙動 / 公開シグネチャ (API レイアウト)
 変更なし。0.11.0 minor bump に同梱。
 
+> **Note**: 本節の `kinema` 表記 (パッケージ名 / env var / 提案中の例外クラス名)
+> は 0.11.0 時点の中間状態を archive として記述したもの。**0.12.0 で再度
+> `maqina` に rename 済** (下記 `kinema → maqina` follow-up 節参照)。
+
 - Python パッケージ: `python/kryanneal/` → `python/kinema/` (git mv で履歴保持)
 - Build config: `pyproject.toml` / `Cargo.toml` の `name`, `[tool.maturin]
   module-name = "kinema._rust"`, `.cargo/config.toml` コメント
@@ -687,6 +691,30 @@ expansion) に rename。pure rename / 数値挙動 / 公開シグネチャ (API 
   `KinemaError` / `KineSchemaError` / `KineConvergenceError`
 - 検証: pytest 347 passed / cargo test (default + `--no-default-features`)
   92 + 80 passed / pre-commit 全フック pass.
+
+### Phase B follow-up: パッケージリブランド `kinema → maqina` (commit `7ec0c2f`)
+
+v1.0 前にプロジェクト positioning を再整理する目的で再度 rename。
+`maqina` は "A (Ma)gnus-based (Q)uantum (I)sing (N)umerical (A)nnealer" の
+頭文字 + ラテン語 `machina` (機械/装置; Romance 系の `máquina` / `macchina` /
+`machine` の語源) からの造語。旧 `kinema` の "Kinetic … Magnus" は本パッケージの
+positioning を捉えていなかった。pure rename / 数値挙動 / 公開シグネチャ
+(API レイアウト) 変更なし。0.12.0 minor bump に同梱。
+
+- Python パッケージ: `python/kinema/` → `python/maqina/` (git mv で履歴保持)
+- Build config: `pyproject.toml` / `Cargo.toml` の `name`, `[tool.maturin]
+  module-name = "maqina._rust"`, `.cargo/config.toml` コメント
+- env var: `KINEMA_EXPECT_BLAS` / `KINEMA_ARTIFACT_DIR` →
+  `MAQINA_EXPECT_BLAS` / `MAQINA_ARTIFACT_DIR`
+- 提案中の例外クラス名 (`docs/design/04-python-api.md` のみ):
+  `KinemaError` / `KineSchemaError` / `KineConvergenceError` →
+  `MaqinaError` / `MaqiSchemaError` / `MaqiConvergenceError` (未実装)
+- README / quickstart の GitHub URL: `yusekiya/kinema` → `yusekiya/maqina`
+- **据置 (本 rename では touch せず, 後続 issue で別途検討)**:
+  - Rust 内部関数 `apply_h_kinema*` 全 path
+  - 歴史的記述 (CHANGELOG / 本ファイル上記 `kryanneal → kinema` 節)
+- 検証: pytest / cargo test (default + `--no-default-features`) / pre-commit
+  全フック pass.
 
 ---
 
