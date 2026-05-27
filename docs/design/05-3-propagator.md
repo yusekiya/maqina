@@ -58,6 +58,70 @@ stage 2 :  c_drv = a_low ·A(s_1) + a_high·A(s_2)
 (線形結合係数を 1 つに畳み込む経路、§5.2 末尾参照)。Lanczos 2 回 / step、
 LTE ~ O(dt^5)。
 
+##### per-stage 配列 / Gershgorin / `gz_eff_diag` doubling 構築 (Phase C / issue #142)
+
+Phase C C1 (PR #144 / #145) で `cfm4_step` 系のシグネチャを **per-site,
+per-axis 時間依存場 (XYZ driver)** に対応する形に拡張した。旧 scalar 4 個
+`(a_s1, b_s1, a_s2, b_s2)` (driver / problem の 2 stage 線形結合係数) を,
+per-axis array + scalar に置き換える:
+
+```text
+(g_x_s1, g_y_s1, g_z_s1, b_s1, g_x_s2, g_y_s2, g_z_s2, b_s2)
+   ^^^^^^^^^^^^^^^^^^^^         ^^^^^^^^^^^^^^^^^^^^
+   shape (N,) array each        scalar (problem envelope)
+```
+
+per-stage の組立ては `src/cfm4.rs::build_stage_arrays` ヘルパに集約され,
+`apply_h_general` に渡す `(g_x_stage, g_y_stage_opt, g_z_stage_opt, c_b_stage,
+gz_eff_diag_opt)` を返す。`g_y_stage` / `g_z_stage` が全 0 の場合は `Option::None`
+を伝播して `apply_h_general` の real-only fast path に dispatch する
+(旧 API shim / 新 API での XY only など)。
+
+per-stage で新規に必要となる計算は **`gz_eff_diag[k] = Σ_i g_z_stage[i] ·
+σ_z_i(k)` (length 2^N)** のみ。`σ_z_i(k) = 1 - 2·b_i(k)` の degree-1 Walsh
+多項式構造を使い **doubling / butterfly で O(2^N) 全体構築** (各 bit i の
+追加で長さを倍化しつつ low half に `+g_z[i]`, high half に `-g_z[i]` を加算;
+償却 O(1) per 基底, naive な `Σ_i` nested loop の N·2^N より N 倍高速)。
+実装: `src/matvec.rs::compute_gz_eff_diag` (PR #143, Phase C C1 part 1)。
+
+`g_z_stage` が全 0 の場合は `gz_eff_diag` 自体を計算 skip し `Option::None` を
+下位に伝播 (旧 API shim 経路 / 新 API XY only での hot path 追加 work 厳密に 0)。
+N=20 で ~1 ms / stage, 6 stage Richardson で ~6 ms / step。既存 Chebyshev
+per-step wall ~480 ms (N=20) の **<2%** で実用上無視可 (PR #144 の Linux
+AMD EPYC 7713P 計測で `cfm4_step_chebyshev_with_richardson_estimate` full
+mode が main 比 +0.05% の実質不変を確認, `h_p_diag` が L2 cache resident
+なので per-stage Gershgorin walk overhead が観測されない)。
+
+per-stage Gershgorin (Chebyshev variant 専用 path):
+
+```text
+R_off_stage     = Σ_i √(g_x_stage[i]² + g_y_stage[i]²)    -- O(N), 無視可
+diag_min_stage  = min_k (c_b_stage · h_p_diag[k] + gz_eff_diag[k])
+diag_max_stage  = max_k (c_b_stage · h_p_diag[k] + gz_eff_diag[k])
+```
+
+- Lanczos variant では Gershgorin は不要 (Lanczos 内部の Hessenberg matrix
+  から spectral radius は自動的に決まる) ため `cfm4_step` の Lanczos 経路は
+  per-stage Gershgorin walk を回避する。実装上は `build_stage_arrays` (Lanczos
+  + Chebyshev 共通) と `compute_stage_gershgorin` (Chebyshev 専用) を分離
+  (PR #145 で `build_stage_desc` から split)。
+- Chebyshev variant では `compute_stage_gershgorin` を per-stage に呼んで
+  `(R_off_stage, diag_min_stage, diag_max_stage)` を取り直す。`g_z = 0` の
+  ときは `cB_stage · {h_p_min, h_p_max}` 閉形式に縮退して従来の O(1) cached
+  `gershgorin_bounds_cached` と一致 (`gz_eff_diag` doubling 構築と同 walk で
+  fuse して O(2^N) → 単一 pass にできる)。
+- 旧 X-only 経路向け O(1) 変換 helper `gershgorin_per_stage_x_only(
+  h_x_abs_sum, h_p_min, h_p_max, a_t, b_t)` を `src/chebyshev.rs` に追加
+  (PR #144)。旧 API shim 経路はこれを呼んで O(N + 2^N) walk を回避する。
+
+driver plumbing (`evolve_schedule_*`) は **`Schedule._eval_stage(t)`** 共通
+evaluator (`(g_x_arr, g_y_arr_opt, g_z_arr_opt, b_scalar)` を返す) 経由で
+旧 / 新両 API を per-axis 形に正規化してから per-stage 線形結合
+(`g_x_s1 = a_high · g_x@t1 + a_low · g_x@t2` 等) を Python 側で組み立て,
+Rust XYZ wrap (`cfm4_step_xyz_py` / `cfm4_step_chebyshev_xyz_py` 等) に dispatch
+する。旧 API は新 API の特化 (g_y=g_z=None かつ g_x = -a_t · h_x) として
+実装され, Python ref (`_python_*_xyz`) も同じく per-axis 形に refactor 済 (C2)。
+
 #### CFM4:2 + step-doubling Richardson — `cfm4_step_with_richardson_estimate`
 
 CFM4:2 を full-step (dt) と half-step×2 (dt/2 + dt/2) で **同一入口 ψ**

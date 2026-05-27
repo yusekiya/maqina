@@ -796,3 +796,151 @@ positioning を捉えていなかった。pure rename / 数値挙動 / 公開シ
 
 ---
 
+## Phase C (v0.13) — per-site/per-axis 時間依存場 (XYZ driver) に拡張 (#142)
+
+主題: 旧 API の **driver = X 単体 + global scalar envelope** という制約
+(`h_x_i` 静的 / time dep は global `A(s(t))` のみ; Y / Z 軸の時間依存場や
+per-site で異なる時間関数は表現不可) を解消し, per-site / per-axis に独立な
+時間依存場に対応する Hamiltonian 形 `H(t) = Σ_i [g_x_i(t)·X_i + g_y_i(t)·Y_i
++ g_z_i(t)·Z_i] + b(t)·H_p_diag` に拡張する。
+
+責任分担も同時に再整理: **`Schedule` に `h_x` を統合**し時間発展係数を一手に
+保持, **`IsingProblem` は問題側静的構造 (`H_p_diag`) のみ** の pure data container
+に slim 化 (issue #142 Phase C, 案 X 確定)。
+
+### 動機と Out of scope
+
+- 動機: `H_driver = -Σ h_x_i X_i` の global envelope (`A(s(t))`) 1 個では
+  per-site で異なる時間関数や Y / Z 軸の時間依存場を表現できず, 拡張
+  schedule (custom flux ramp, dynamical decoupling, optimal control 等) の
+  ユースケースを取り込めない。`b(t) · H_p_diag` 側は global envelope ·
+  k-local Z 多項式のまま据え置く (Phase C スコープ内では拡張しない)。
+- Out of scope:
+  - **Trotter 経路の XYZ 対応**: `apply_single_mode_axis_i` は実数係数前提
+    SIMD 化済 (Phase 6 C2.5 #71)。XYZ 一般化は 2×2 unitary が complex 係数を
+    持つため SIMD kernel 再設計を要する。優先度低 (#124 で Chebyshev が
+    default なので Trotter は補助経路)。新 API (`Schedule.from_xyz`) で
+    `method="trotter"` / `"trotter_suzuki4"` を指定すると `ValueError`。
+  - **vector-valued / fused / grid constructor**: 今回は `list[Callable[[float],
+    float]]` のみ実装。`_eval_stage` 抽象を分離して将来の非破壊追加余地は残す。
+  - f32 mixed precision (Phase 9C 候補)。
+
+### Definition of Done (#142)
+
+#### C1: Rust matvec / cfm4 / Gershgorin 拡張 (完了)
+
+- [x] **C1 part 1** (PR #143 merged): `apply_h_general` + `compute_gz_eff_diag`
+  + SIMD complex-coeff bit-flip kernels (matvec 系プリミティブ単独)。
+  - `src/matvec.rs::apply_h_general`: per-site/per-axis 時間依存場の合成 matvec
+    (X+Y を複素係数 1 個に畳む + Option-based skip 経路)。詳細 §5.1.1.y。
+  - `src/matvec.rs::simd_kernels::bitflip_iN_complex` (i ∈ {0,1,2}):
+    complex coeff (`c_i = g_x_i + i·g_y_i`) broadcast + swizzle で
+    `wide::f64x4` 化。real-only fast path は既存 `bitflip_iN` を温存。
+  - `src/matvec.rs::compute_gz_eff_diag`: `Σ_i g_z[i]·σ_z_i(k)` を degree-1
+    Walsh の doubling / butterfly で O(2^N) 構築 (償却 O(1) per 基底)。
+  - 旧 `apply_h_kinema` は `apply_h` にリネーム済 (`845e4e3`), 内部実装は
+    `apply_h_general(g_y=None, gz_eff_diag=None)` の特化 wrap として残置
+    (Rust 単体テスト互換 + perf 回帰測定 baseline 用)。
+- [x] **C1 part 2-A** (PR #144 merged): Chebyshev 系 signature shuffle。
+  `gershgorin_bounds_cached` を per-stage form (`r_off_stage, diag_min_stage,
+  diag_max_stage`) に変更, `gershgorin_bounds` を per-axis 入力に拡張,
+  X-only 旧 API 向け O(1) 変換 helper `gershgorin_per_stage_x_only` 追加。
+  `chebyshev_propagate` / `cfm4_step_chebyshev` / `cfm4_step_chebyshev_with_
+  richardson_estimate` を `apply_h_general` 直呼出に切替, `perf_chebyshev` /
+  `perf_cfm4_richardson_chebyshev` も追従。
+- [x] **C1 part 2-B** (PR #145 merged): Lanczos 系 signature shuffle。
+  `cfm4_step` / `cfm4_step_with_richardson_estimate` / `cfm4_step_with_m2_
+  estimate` の per-axis 化, `build_stage_desc` を `build_stage_arrays` (共通)
+  + `compute_stage_gershgorin` (Chebyshev 専用) に split し Lanczos 経路で
+  O(2^N) Gershgorin walk を回避, `iter0_cache` を 4-tuple `(cache_drv,
+  cache_diag, a_s1_scalar, a_s2_scalar)` に拡張。`perf_cfm4_richardson` は
+  full mode で main 比 **-5.81% cycles 改善** (per-matvec の g_x_buf alloc
+  消失の副次効果, IPC 不変)。`m2_midpoint_step` は X-only API のまま保持。
+
+#### C2: Python 公開 API 拡張 (完了)
+
+- [x] **`Schedule(T, A, B, h_x, s=None)`**: `h_x` を必須引数化
+  (issue #142 で `IsingProblem` から移管)。preset (`linear` / `reverse` /
+  `pause` / `from_callable`) も `h_x` 必須化。
+- [x] **`Schedule.from_xyz(T, g_x, b, *, g_y=None, g_z=None)`**: per-site,
+  per-axis 時間依存場の新 constructor。`g_y` / `g_z` は `None` で当該軸 skip
+  (Rust 側 real-only SIMD kernel に dispatch する fast path)。
+- [x] **`Schedule._eval_stage(t) -> (gx_arr, gy_opt, gz_opt, b_scalar)`**:
+  単一 evaluator を旧 / 新両 API に提供 (driver 共通入口)。将来の vector-valued
+  / fused / grid constructor 追加余地のため抽象化。
+- [x] **`Schedule._norm_upper_bound_factor_at(t)`**: Gershgorin off-diagonal
+  上界 `Σ_i √(g_x_i² + g_y_i²)` を per-stage で返す (旧 API では
+  `|a_t(t)| · h_x_abs_sum` に degenerate)。
+- [x] **`IsingProblem(n, H_p_diag)`**: `h_x` フィールド + `_h_x_abs_sum`
+  cache を完全削除し slim な data validator に。
+- [x] **Rust XYZ Python wraps**: `src/cfm4.rs` に 5 個新規追加
+  (`cfm4_step_xyz_py` / `cfm4_step_with_richardson_estimate_xyz_py` /
+  `cfm4_step_chebyshev_xyz_py` / `cfm4_step_chebyshev_with_richardson_
+  estimate_xyz_py` / `m2_midpoint_step_xyz_inplace_py`)。X-only 既存 wrap
+  (PR #145 で導入) は Rust 単体テスト互換のため残置。
+- [x] **driver plumbing**: `evolve_schedule_*` 全 6 個から `h_x` 引数を撤廃,
+  `schedule._eval_stage(t)` 経由で per-axis arrays を取得して XYZ Rust wraps
+  に dispatch。Trotter / Trotter_suzuki4 は新 API で `ValueError`。Python ref
+  (`_python_*_xyz`) も per-axis 形に refactor。`_helpers.py::_gershgorin_
+  norm_upper_bound(schedule, problem)` / `_resolve_dt_max_auto(schedule,
+  problem, m, dt0)` に signature 変更。
+- [x] **`reference_qutip.py` 拡張**: `build_qutip_hamiltonian_xyz(...)` で
+  per-axis 時間依存場の QuTiP H(t) を sparse 構築。
+- [x] **stub 再生成**: `tools/gen_api_stubs.py` で `.pyi` を最新化。
+- [x] **テスト**: `tests/test_xyz_schedule.py` 新規 9 ケース (旧 API smoke /
+  新 API == 旧 API equivalence (m2 / cfm4 / adaptive Richardson) / XY rotating
+  QuTiP fidelity / Z-only QuTiP fidelity / Trotter ValueError / IsingProblem
+  h_x なし smoke)。`tests/test_schedule.py` / `tests/test_problem.py` は
+  新 API に書き直し。既存 14 テストファイル + 5 bench ファイルを機械的修正
+  (`IsingProblem(... h_x=)` を `Schedule.linear(... h_x=)` に bind し直す)。
+
+#### C3: docs / bench (完了)
+
+- [x] `docs/design/02-physics.md` (§2 物理モデル): per-site/per-axis 時間依存
+  場の節追加 (§2.1.1 旧 API / §2.1.2 新 API), 責任分担 (Schedule に h_x 統合)
+  を §2.2 に反映。
+- [x] `docs/design/05-1-matvec.md` (§5.1 matvec): primitive table に
+  `apply_h_general` 追加, §5.1.1.y で per-axis bit-flip complex-coeff 拡張と
+  Option-based skip 経路を解説。
+- [x] `docs/design/05-3-propagator.md`: per-stage 配列 / Gershgorin /
+  `gz_eff_diag` doubling 構築の節を CFM4:2 直後に追加。
+- [x] `docs/design/12-release-plan.md`: 本 Phase C 節を追加 (本コミット)。
+- [x] `docs/design/INDEX.md`: Phase C エントリ追加 (本コミット)。
+- [x] `CLAUDE.md`: 物理的取り決め節を旧 / 新両 Hamiltonian 形 + 責任分担に更新。
+- [x] `docs/quickstart.md`: 全例のコード変更 (`IsingProblem(... h_x=)` →
+  `Schedule.linear(... h_x=)`), 新 API 使用例 (`Schedule.from_xyz`) と Trotter
+  ValueError 注を追加。
+
+#### 受入基準
+
+- [x] `cargo test` (BLAS on/off): 101 + 87 = 188 passed。Rust 内部テスト
+  22 箇所が X-only shim 経由で動くこと, BLAS on/off で `rel < 1e-13` 数値
+  一致を確認 (本セッション再開時のテストランで pass)。
+- [x] `uv run pytest` (slow 含む): 362 passed (test_xyz_schedule.py 9 cases /
+  test_schedule.py 18 / test_problem.py 8 / QuTiP 中規模 fidelity 含む)。
+- [ ] **旧 API 経路 `bench_per_step.py` regression ±1% 以内** (X-only path,
+  Linux サーバー本番 bench, pre-merge cycle で確認, `.claude/solve-overrides.md`
+  「Bench を伴う issue の運用」節)。
+- [x] **新 API で XY rotating field / Z-only field の QuTiP fidelity 一致**:
+  `tests/test_xyz_schedule.py` で fidelity > 1-1e-6 を契約 (pytest pass 済)。
+- [x] **Version bump**: `0.12.0 → 0.13.0` (公開 API に新 constructor 追加 +
+  Schedule h_x 必須化の破壊的変更で minor bump, PR 作成直前に独立 commit)。
+
+### Phasing 実績
+
+- C1 part 1 → PR #143 (merged)
+- C1 part 2-A (Chebyshev) → PR #144 (merged)
+- C1 part 2-B (Lanczos) → PR #145 (merged)
+- C2 + C3 (本 PR): Python 公開 API + driver plumbing + docs / bench 整合 +
+  version bump 0.13.0 を 1 PR にまとめて closeout。
+
+### Out of scope follow-up (Phase C+)
+
+- Trotter 経路の XYZ 対応 (新規 issue)。
+- `Schedule.from_xyz_vector` (per-axis ベクトル化) / `from_xyz_fused` (全 axis
+  1 関数) / `from_xyz_grid` (事前サンプル + 補間) の追加 constructor。
+- f32 mixed precision (Phase 9C 候補)。
+- `IsingProblem.from_J_h` 等の builder classmethod 追加 (Phase 後段)。
+
+---
+
