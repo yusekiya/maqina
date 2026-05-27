@@ -115,10 +115,17 @@ stage の Hamiltonian (係数違い) で共通なので, **入口で 1 度だけ
   rayon 経路で書く。SIMD 特化は省略 (cache 計算は wall time 影響無視可)。
 - rayon 経路は `dim >= MIN_RAYON_DIM` で `par_chunks_mut`。閾値は本体と同じ。
 - `cfm4_step` のシグネチャに `iter0_cache: Option<(&[Complex64],
-  &[Complex64])>` (crate-internal) を追加し, stage 1 の matvec closure 内で
+  &[Complex64], f64, f64)>` (crate-internal) を追加し, stage 1 の matvec closure 内で
   `first_call` フラグを持たせて iter 0 のときだけ cache 線形結合
-  `y = (c_drv_1 · cache_drv + c_diag_1 · cache_diag) / ‖ψ‖` に差し替える。
-  Lanczos API (`lanczos_propagate`) 自体は不変。
+  `y = (c_drv_1 · cache_drv + c_b_stage · cache_diag) / ‖ψ‖` に差し替える
+  (`c_drv_1 = a_high · a_s1_scalar + a_low · a_s2_scalar`, scalar は cache tuple
+  の末尾 2 要素から取り出す)。Lanczos API (`lanczos_propagate`) 自体は不変。
+  - Phase C / issue #142 C1 part 2-B で `cfm4_step` を per-site, per-axis 時間
+    依存場対応の signature に拡張した際, cache tuple を **2 要素から 4 要素**
+    `(cache_drv, cache_diag, a_s1_scalar, a_s2_scalar)` に拡張。caller は X-only
+    path (`g_y_s* / g_z_s*` 全 None かつ `g_x_s* = -a_s*_scalar · basis_h_x`
+    線形性) を契約として cache を渡す。詳細は `docs/design/05-3-propagator.md`
+    "iter-0 primitive matvec memoization" 節。
 
 数値同等性: cache 経路と非 cache 経路は演算順序が異なるため bit-identical
 ではないが, IEEE 754 の積/和精度から Lanczos m_eff ステージ全体で
