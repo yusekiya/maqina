@@ -76,9 +76,11 @@ fn apply_h(
   `feature = "simd"` (default ON) で有効化, `--no-default-features` で
   scalar fallback。**cache block-fusion (Phase 6 C3, #64)** は trotter_step
   側に集中して実装済み (§5.1.3) で `apply_h` 本体は touch せず.
-  `apply_h` の DRAM bandwidth 改善は **issue #79 (Phase 6 D)** で
-  group-fused 3-phase 形を試行したが Linux 本番 bench + perf 計測で
-  **真の compute regression が確認され未採用** (詳細は §5.1.4).
+  `apply_h` の追加 traffic 削減は **issue #79 (Phase 6 D)** で group-fused
+  3-phase 形を試行したが, perf binary で C1 baseline は IPC=2.98 で既に
+  compute-near-peak と判明 (当時想定していた DRAM bandwidth bound 仮説は
+  反証). 3-phase access pattern が HW prefetcher を破壊して **N=20 で +50%
+  compute regression** が確認され未採用 (詳細は §5.1.4).
 - **dim 閾値による rayon dispatch (issue #68, follow-up)**: `apply_h`
   と `apply_single_mode_axis_i` の **public 関数側で `dim < MIN_RAYON_DIM`
   (= 1 << 17 = 128K 要素 = 2 MB Complex64) を判定し scalar 単スレッド経路
@@ -276,17 +278,29 @@ Trotter primitive は `src/trotter.rs` に置く想定だが、`apply_single_mod
 #### 5.1.3 Phase 6 C3 — DRAM 律速の解消 (multi-qubit gate fusion + phase_p 並列化)
 
 Phase 6 C1 (rayon) + C2 (SIMD) を入れた後の本番 bench (issue #68 follow-up)
-で観測された制約:
+で観測された制約 (**当時の解釈**, 後に §5.1.4 で apply_h 側の真因が訂正):
 
-| kernel @ N=20 | 1 thread | 64-thread peak | 飽和原因 |
+| kernel @ N=20 | 1 thread | 64-thread peak | 当時の飽和原因解釈 |
 |---|---|---|---|
-| `apply_h` | 23.8 ms | **6.13× (64 threads)** | DRAM bandwidth 上限 (理論 64× の ~9.6%) |
+| `apply_h` | 23.8 ms | **6.13× (64 threads)** | DRAM bandwidth 上限 (理論 64× の ~9.6%) ※ |
 | `trotter_step` | 54.8 ms | **1.55× (16 threads)** | per-step rayon barrier × 2n が compute 量を食い潰す |
 
-両ボトルネックの本質は **「v / psi に対する DRAM round trip 回数」が compute
-量に比して過大** であること: C1/C2 で per-pass 計算密度を上げても, memory
-bound に当たれば飽和する。Phase 6 C3 はこの memory traffic 自体を削減する
-最適化レイヤで, 以下の 2 つを **独立した** サブ最適化として扱う:
+> **※ 訂正 (issue #79 Phase D archive, §5.1.4 参照)**: `apply_h` の 6.13×
+> 飽和原因を「DRAM bandwidth 上限」と解釈していたが, 後に perf binary
+> (`src/bin/perf_apply_h`) で **C1 baseline は IPC=2.98 (Zen 3 max の
+> 60-75%)** で compute-near-peak, cache-miss rate も 2.6-3.3% で DRAM
+> access は少なかったことが判明. **真因は L2 fill latency (L3 / cross-CCX
+> レイテンシ) の per-thread 並列度限界** であり, DRAM 帯域ではない. なお
+> `trotter_step` 側の rayon barrier 飽和は perf binary でも確認されており
+> 解釈は不変, C3 の trotter_step 集中改善 (multi-qubit gate fusion +
+> phase_p 並列化) は perf 上でも正当 (issue #82 audit で真の compute
+> speedup 5.30× を確認).
+
+C3 着手当時は両ボトルネックの本質を **「v / psi に対する DRAM round trip
+回数が compute 量に比して過大」** と解釈し, memory traffic 削減を狙う
+最適化レイヤとして設計した (apply_h 側は §5.1.4 で前提が崩れ revert,
+trotter_step 側は barrier 削減として有効). 以下の 2 つを **独立した**
+サブ最適化として扱う:
 
 ##### A. trotter_step / cfm4_step の barrier 多重化解消 (multi-qubit gate fusion)
 

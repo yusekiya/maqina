@@ -116,24 +116,37 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   per-pass SIMD speedup ≈ **1.75×** (理論 3-4× には届かないが scalar 比で
   確実に高速化), `i012-focus` mode (3 SIMD pass + 1 diag pass) の total
   speedup ≈ **1.28×** (N=18, 中央値 of 3 runs)。issue #63 の当初 acceptance
-  「N=18 i012-focus ≥ 1.5×」は **未達**。 主因は (1) DRAM bandwidth 上限への
-  per-pass の頭打ち, (2) SIMD 化していない diag pass による希釈 (4 pass 中
-  1 つが scalar), (3) 大 dim multi-thread の per-call ms オーダ計測が背景負荷
-  に強く依存し inter-run 変動 が ~5× に達することがある, の 3 つ。 acceptance
-  ギャップ (apply_h の memory traffic 削減) は Phase 6 C3 (#64) では
-  trotter_step 専用の最適化を取り `apply_h` 自体は touch しなかった
-  ため未解消で残る (#64 で trotter_step は N=20 で 4.01× 改善達成)。
-  apply_h 側の DRAM bandwidth 改善は **follow-up issue #79
-  (Phase 6 D, open)** として切り出し (高 i sparse fused matvec / SIMD i≥3 拡張 /
-  prefetch / streaming store の候補を sweep する形)。
+  「N=18 i012-focus ≥ 1.5×」は **未達**。 当時想定した主因は (1) DRAM
+  bandwidth 上限への per-pass の頭打ち, (2) SIMD 化していない diag pass
+  による希釈 (4 pass 中 1 つが scalar), (3) 大 dim multi-thread の per-call
+  ms オーダ計測が背景負荷に強く依存し inter-run 変動 が ~5× に達する
+  ことがある, の 3 つ。
+
+  > **訂正 (issue #79 Phase D archive, 2026-05-17, §5.1.4 参照)**: 上記
+  > 主因 (1) の「DRAM bandwidth 上限」仮説は後に perf binary
+  > (`src/bin/perf_apply_h`) のハードウェア counter で否定された:
+  > C1 baseline は **IPC=2.98** (Zen 3 理論 max の 60-75%) で既に
+  > compute-near-peak, cache-miss rate も 2.6-3.3% で DRAM access はそもそも
+  > 少なく, 真の bottleneck は **L2 fill latency (L3 / cross-CCX レイテンシ)
+  > の per-thread 並列度限界**だった. 主因 (2) (3) は引き続き有効だが,
+  > per-pass SIMD が 1.75× で頭打ちになる構造は「DRAM 帯域を直接攻めれば
+  > 改善する」性質のものではない. 主因 (1) の真の正体は未特定で,
+  > L2 fill latency または FMA-bound compute 効率の限界が候補.
+
+  acceptance ギャップ (当時は apply_h の memory traffic 削減として枠取り)
+  は Phase 6 C3 (#64) では trotter_step 専用の最適化を取り `apply_h` 自体
+  は touch しなかったため未解消で残る (#64 で trotter_step は N=20 で 4.01×
+  改善達成)。apply_h 側の追加改善は **follow-up issue #79 (Phase 6 D)** と
+  して切り出されたが, 上記訂正のとおり「DRAM bound 仮説」自体が反証され
+  Phase D は revert + close (詳細 §5.1.4)。
   bench は PR 本体に含めず, 個別 issue (#63) コメントとして添付済み
   (issue #47 で確定した運用)。
-- **cache block-fusion (C3, issue #64, 実装済み, PR #78 merged)**: DRAM 律速
-  と barrier 多重化の解消を目的とする最適化レイヤ。issue #68 follow-up bench で
-  `apply_h` が 6.13× (理論 64× の ~9.6%), `trotter_step` が 1.55×
-  (rayon barrier × 2n の overhead) で頭打ちと判明していたうち, **本 issue では
-  trotter_step 側を集中改善** (`apply_h` の DRAM bandwidth 改善は
-  follow-up #79 として切り出し). C3 は以下 2 つの独立サブ最適化で構成
+- **cache block-fusion (C3, issue #64, 実装済み, PR #78 merged)**: 当時
+  「DRAM 律速」と解釈していた `apply_h` 6.13× 飽和 (理論 64× の ~9.6×) と,
+  barrier 多重化由来の `trotter_step` 1.55× 頭打ちの両方を解消する目的で
+  企画された最適化レイヤ。issue #68 follow-up bench での観測を受けて
+  **本 issue では trotter_step 側を集中改善** (`apply_h` 側は follow-up #79
+  に切り出し, 後に §5.1.4 で「DRAM bound 仮説」が反証され revert)。 C3 は以下 2 つの独立サブ最適化で構成
   (§5.1.3 を一次資料):
   - **A. multi-qubit gate fusion (per-axis 逐次経路)**: 連続 k qubit (default
     k=4) の R_i を **1 つの rayon chunk closure 内で per-axis 2-pair update を
@@ -169,8 +182,9 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   共通で dispatch する. これにより C3 で得た N=20 trotter_step 4.01× の上に
   SIMD compute を上乗せできる構造になった.
 
-  **観測 (Linux x86_64, cpu_count=64, OpenBLAS, AVX2 + FMA,
-  `RAYON_NUM_THREADS=64`, BLAS thread=1, repeat=50, PR #80 final bench)**:
+  **当時の観測 (PR #80 final bench, Python `bench_simd_scaling.py` 経由,
+  Linux x86_64, cpu_count=64, OpenBLAS, AVX2 + FMA, `RAYON_NUM_THREADS=64`,
+  BLAS thread=1, repeat=50)**:
 
   | N | path | i=0 | i=1 | i=2 |
   |---|---|---|---|---|
@@ -178,31 +192,42 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   | 18 (rayon)  | par_chunks_mut  | 0.97× / 0.95× | 0.96× / 1.00× | 0.94× / 1.01× |
   | 20 (rayon)  | par_chunks_mut  | **2.95×**     | **3.48×**     | **2.71×**     |
 
-  N=18 だけ ~1.0× で頭打ちなのは C2 (issue #63) と同じ **cache-hierarchy /
-  rayon-scheduling 境界** の現象: dim=2^18 (= 4 MB Complex64) は L3 fit する
-  size で memory bandwidth bound に当たらず, かつ 64 thread × chunk_size=64
-  (= 1 KB / chunk, L1 fit する選択) の rayon scheduling overhead が
-  per-pass compute と同オーダになる. SIMD で compute を縮めても scheduling
-  overhead が支配的になり speedup が出ない (絶対時間 simd-off 0.79 ms /
-  simd-on 0.82 ms で +3.7%, ノイズの域).
+  PR #80 当時は N=18 の ~1.0× を **cache-hierarchy / rayon-scheduling 境界**
+  (dim=2^18 = 4 MB Complex64 が L3 fit + 64 thread × chunk_size=64 の
+  scheduling overhead が per-pass compute と同オーダ) と解釈し,
+  動的 chunk_size 化を試したところ N=20 で 2.95× → 0.56× の regression が
+  Python bench で観測されたため `chunk_size = 64` 静的維持を選んだ.
 
-  **chunk_size を `apply_h_rayon` と同じ動的計算
-  `(dim/(nth·4)).clamp(...)` に変えると N=20 で chunk_size = 4096 (= 64 KB)
-  となり L1 (= 32 KB) を spill, SIMD が memory bandwidth bound に転落して
-  N=20 が 2.95× → 0.56× に大幅 regression する** ことが PR #80 の fixup
-  experiment で判明 (`apply_single_mode_axis_i` は 1 chunk あたり 1 pass の
-  read-write しかないので, chunk 内 data reuse がある `apply_h`
-  (chunk あたり diag + n bit-flip = n+1 pass) と最適 chunk_size が異なる).
-  C2.5 では **chunk_size = 64 を静的に維持** する判断とした.
+  > **訂正 (issue #90 perf binary audit, 2026-05-17)**: 上の N=18
+  > 0.94-1.01× の頭打ちと N=20 0.56× の動的 chunk_size regression は
+  > **いずれも Python bench (`*_py` allocate-and-return wrap 経由) の
+  > alloc/copy noise が `*_inplace_py` 入口導入前に支配的だった false
+  > negative**. `src/bin/perf_apply_single_mode_axis_i` (pure-Rust 直呼び)
+  > で再評価した真値は:
+  >
+  > | N | i | chunk_size=64 (静的) | 動的 chunk_size | 真の speedup |
+  > |---|---|---|---|---|
+  > | 18 | 0 | 0.228 ms | 0.149 ms | **1.53×** |
+  > | 18 | 2 | 0.253 ms | 0.139 ms | **1.82×** |
+  > | 20 | 0 | 0.435 ms | 0.273 ms | **1.59×** |
+  > | 20 | 2 | 0.455 ms | 0.264 ms | **1.73×** |
+  >
+  > すなわち真は (a) N=18 SIMD path も `1.53-1.82×` の改善, (b) N=20
+  > 動的 chunk_size でも `1.59-1.73×` improvement (L1 spill 仮説は不成立).
+  > **実装は動的 chunk_size を採用**
+  > (`src/matvec.rs::apply_single_mode_axis_i_rayon`, broadcast 定数 16 個の
+  > f64x4 splat を SIMD inner 数百回で amortize). 詳細は §5.1.4
+  > 「Phase 6 audit: issue #90 perf binary 検証結果」.
 
-  acceptance「N=18 i=0,1,2 で per-pass ≥ 1.5×」は **N=16 (serial) と N=20
-  (rayon 主要 size) で達成** (1.88-2.43× / 2.71-3.48×), N=18 は構造的
-  境界として limitation 扱い. C3 (#64) の trotter_step fusion 経路は
+  acceptance「N=18 i=0,1,2 で per-pass ≥ 1.5×」は **#90 訂正後で N=16
+  (serial), N=18 / N=20 (rayon) いずれも達成** (N=16 1.88-2.43×, N=18
+  1.53-1.82×, N=20 1.59-1.73×). C3 (#64) の trotter_step fusion 経路は
   default n_qubit ≥ 17 で fused 経路に乗るため, fused chunk_size が大きい
   方向 (C3 では k=4 pass 連続適用で data reuse あり) で C2.5 の SIMD
   inner kernel が効く.
 
-  bench 結果は PR #80 コメントに添付済み.
+  bench 結果は PR #80 コメント (当時の Python bench) + issue #90 コメント
+  (perf binary 再評価) に添付済み.
 - **D (issue #79, 試行・未採用)**: `apply_h` の DRAM bandwidth
   改善を狙って group-fused 3-phase 形を試行したが, 本番 Linux サーバー
   (AMD EPYC 7713P) の perf 計測で **C1 baseline は IPC=2.98 で既に
