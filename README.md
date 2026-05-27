@@ -4,7 +4,7 @@
 
 A **Ma**gnus-based **Q**uantum **I**sing **N**umerical **A**nnealer
 
-Matrix-free simulator for the transverse-field Ising model (TFIM) quantum dynamics.
+Matrix-free quantum dynamics simulator for the Ising model with time-dependent local fields along arbitrary spin axes.
 
 **Links:** [Getting started](#getting-started)
 — [Installation](#Installation)
@@ -24,8 +24,15 @@ Matrix-free simulator for the transverse-field Ising model (TFIM) quantum dynami
 Hamiltonian:
 
 ```
-H(t) = A(s(t)) · H_driver + B(s(t)) · H_problem
-H_driver  = -Σ_i h_x_i X_i              (site-dependent transverse field, bit-flip)
+H(t) = H_driver(t) + b(t) · H_problem
+
+# Schedule(T, A, B, h_x) — X-only, time-dependent amplitude A(s(t))
+H_driver(t) = -A(s(t)) · Σ_i X_i                        # h_x_i = 1
+H_driver(t) = -A(s(t)) · Σ_i h_x_i · X_i                # site-dependent h_x
+
+# Schedule.from_xyz(T, g_x, b, g_y=, g_z=) — arbitrary axes, per-site, time-dependent
+H_driver(t) = Σ_i [g_x_i(t) · X_i + g_y_i(t) · Y_i + g_z_i(t) · Z_i]
+
 H_problem = a k-local polynomial in Z operators only (diagonal in the Z basis)
 ```
 
