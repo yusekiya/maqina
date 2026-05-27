@@ -5,7 +5,7 @@
 //! # 用途
 //!
 //! 既存 perf binary は単一 kernel 粒度:
-//!   - `perf_apply_h` (#79): `apply_h_kinema` 単独
+//!   - `perf_apply_h` (#79): `apply_h` 単独
 //!   - `perf_trotter_step` (#82): `trotter_step` 単独
 //!   - `perf_apply_single_mode_axis_i` (#90): `apply_single_mode_axis_i` 単独
 //!
@@ -61,7 +61,7 @@
 //! |---|---|---|
 //! | `full` | `cfm4_step_with_richardson_estimate` 1 step (= 6 Lanczos call) | Richardson 1 step (本番 N=18 で ~0.88s) |
 //! | `single_lanczos` | `lanczos_propagate` 1 call (m_max=24) | 1 Lanczos call (full の ~1/6) |
-//! | `matvec_only` | `apply_h_kinema` 1 call | matvec 単独 (perf_apply_h と同じパターン) |
+//! | `matvec_only` | `apply_h` 1 call | matvec 単独 (perf_apply_h と同じパターン) |
 //! | `gram_schmidt` | Lanczos 1 call 相当の 2-pass GS ループ | re-orthogonalization 単独 (matvec を抜いた残り) |
 //!
 //! # Schedule 係数
@@ -81,7 +81,7 @@ use std::env;
 use std::time::Instant;
 
 use _rust::bench_api::{
-    apply_h_kinema, axpy, cfm4_step_with_richardson_estimate, dot_conj, lanczos_propagate,
+    apply_h, axpy, cfm4_step_with_richardson_estimate, dot_conj, lanczos_propagate,
 };
 use num_complex::Complex64;
 
@@ -225,7 +225,7 @@ fn main() {
             // warmup. matvec closure を毎回構築する (per-iter overhead 無視可).
             for _ in 0..3 {
                 let matvec = |v_in: &[Complex64], y_out: &mut [Complex64]| {
-                    apply_h_kinema(v_in, y_out, &h_x, &h_p_diag, a_t, b_t, n);
+                    apply_h(v_in, y_out, &h_x, &h_p_diag, a_t, b_t, n);
                 };
                 let _ = lanczos_propagate(matvec, &psi, dt, m_max, krylov_tol)
                     .expect("Lanczos (warmup) failed");
@@ -236,7 +236,7 @@ fn main() {
             let mut sink_acc = 0.0_f64;
             for _ in 0..n_steps {
                 let matvec = |v_in: &[Complex64], y_out: &mut [Complex64]| {
-                    apply_h_kinema(v_in, y_out, &h_x, &h_p_diag, a_t, b_t, n);
+                    apply_h(v_in, y_out, &h_x, &h_p_diag, a_t, b_t, n);
                 };
                 let (psi_new, m_eff, _beta_m, _c_m_abs) =
                     lanczos_propagate(matvec, &psi, dt, m_max, krylov_tol).expect("Lanczos failed");
@@ -255,12 +255,12 @@ fn main() {
             let mut y = vec![Complex64::new(0.0, 0.0); dim];
             // warmup.
             for _ in 0..10 {
-                apply_h_kinema(&psi, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+                apply_h(&psi, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
             }
 
             let t0 = Instant::now();
             for _ in 0..n_steps {
-                apply_h_kinema(&psi, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+                apply_h(&psi, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
             }
             elapsed_secs = t0.elapsed().as_secs_f64();
             sink = y.iter().take(8).map(|c| c.re + c.im).sum();

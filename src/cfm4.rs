@@ -13,7 +13,7 @@
 //! Magnus, 2 stage) を追加. ガウス-ルジャンドル 2 点ノード
 //! `c_1, c_2 = 1/2 ∓ √3/6` と線形結合係数 `a_high, a_low = 1/4 ± √3/6` を
 //! 用い, 各 stage で `(c_drv, c_diag)` スカラ 2 つに畳み込んで既存
-//! `apply_h_kinema` を呼ぶ「線形結合 callback 形式」を採用
+//! `apply_h` を呼ぶ「線形結合 callback 形式」を採用
 //! (`docs/design/05-2-lanczos.md` §5.2 末尾, §5.3). LTE ~ O(dt^5), per-step matvec は 2m.
 //!
 //! Phase 4 で `cfm4_step_with_m2_estimate` / `cfm4_step_with_
@@ -40,12 +40,12 @@ use pyo3::prelude::*;
 use crate::blas::nrm2;
 use crate::chebyshev::chebyshev_propagate;
 use crate::krylov::lanczos_propagate;
-use crate::matvec::{apply_h_drv, apply_h_kinema, apply_h_p_diag};
+use crate::matvec::{apply_h, apply_h_drv, apply_h_p_diag};
 
 /// `psi_new = exp(-i dt · H(t + dt/2)) · psi` を中点則で計算する.
 ///
 /// 時間依存 `H(t) = A(s(t)) · H_driver + B(s(t)) · H_problem` の中点で
-/// スケジュール係数を凍結し, `apply_h_kinema(·, ·, h_x, h_p_diag, a_mid,
+/// スケジュール係数を凍結し, `apply_h(·, ·, h_x, h_p_diag, a_mid,
 /// b_mid, n)` を closure として `lanczos_propagate` に渡す.
 ///
 /// # 引数
@@ -64,7 +64,7 @@ use crate::matvec::{apply_h_drv, apply_h_kinema, apply_h_p_diag};
 /// * `Err`: `lanczos_propagate` 内で tridiag 固有分解が収束しなかった場合.
 ///
 /// # Panics
-/// `lanczos_propagate` / `apply_h_kinema` の precondition と同じ
+/// `lanczos_propagate` / `apply_h` の precondition と同じ
 /// (長さ不整合, `m == 0`).
 //
 // 数値カーネル primitive は cv_ising 流に引数フラットで持つ. 構造体化は
@@ -82,7 +82,7 @@ pub(crate) fn m2_midpoint_step(
     n: usize,
 ) -> PyResult<Vec<Complex64>> {
     let matvec = |v: &[Complex64], y: &mut [Complex64]| {
-        apply_h_kinema(v, y, h_x, h_p_diag, a_mid, b_mid, n);
+        apply_h(v, y, h_x, h_p_diag, a_mid, b_mid, n);
     };
     // issue #93 (Phase 7): lanczos_propagate は (psi, m_eff, β_m, |c_m|) を返すが,
     // m2_midpoint_step は固定 dt 経路 (adaptive ではない) なので末尾 3 要素を
@@ -279,7 +279,7 @@ pub(crate) fn cfm4_a_low() -> f64 {
 ///           c_diag = a_low ·B_1 + a_high·B_2
 /// ```
 ///
-/// 各 stage は `apply_h_kinema(·, ·, h_x, h_p_diag, c_drv, c_diag, n)` を
+/// 各 stage は `apply_h(·, ·, h_x, h_p_diag, c_drv, c_diag, n)` を
 /// closure として `lanczos_propagate` に渡す「線形結合 callback 形式」
 /// (`docs/design/05-2-lanczos.md` §5.2 末尾) で実装される. これにより Lanczos 2 回 / step,
 /// per-step matvec は 2m, LTE ~ O(dt^5).
@@ -315,15 +315,15 @@ pub(crate) fn cfm4_a_low() -> f64 {
 /// が同じ入口 ψ を共有するので, 2 つの `cfm4_step` 呼出に同じ cache を渡せ
 /// **2 個の primitive matvec / Richardson step** を削減できる (`cfm4_step_with_
 /// richardson_estimate` 参照). `iter0_cache = None` のときは従来通り
-/// `apply_h_kinema` を iter 0 でも呼ぶ.
+/// `apply_h` を iter 0 でも呼ぶ.
 ///
 /// cache 経路は `(cache_drv · c_drv + cache_diag · c_diag) / ‖ψ‖` の演算順序
-/// が直接 `apply_h_kinema` (diag pass + bit-flip accumulate) と異なるため
+/// が直接 `apply_h` (diag pass + bit-flip accumulate) と異なるため
 /// **bit-identical ではない** が, IEEE 754 の誤差累積から `rel < 1e-15`
 /// (issue #100 acceptance) を期待する.
 ///
 /// # Panics
-/// `lanczos_propagate` / `apply_h_kinema` の precondition と同じ
+/// `lanczos_propagate` / `apply_h` の precondition と同じ
 /// (長さ不整合, `m == 0`).
 //
 // 数値カーネル primitive は cv_ising 流に引数フラットで持つ. 構造体化は
@@ -382,7 +382,7 @@ pub(crate) fn cfm4_step(
                     return;
                 }
             }
-            apply_h_kinema(v, y, h_x, h_p_diag, c_drv_1, c_diag_1, n);
+            apply_h(v, y, h_x, h_p_diag, c_drv_1, c_diag_1, n);
         };
         lanczos_propagate(matvec, psi, dt, m, krylov_tol)?
     };
@@ -392,7 +392,7 @@ pub(crate) fn cfm4_step(
     let c_drv_2 = a_low * a_s1 + a_high * a_s2;
     let c_diag_2 = a_low * b_s1 + a_high * b_s2;
     let matvec = |v: &[Complex64], y: &mut [Complex64]| {
-        apply_h_kinema(v, y, h_x, h_p_diag, c_drv_2, c_diag_2, n);
+        apply_h(v, y, h_x, h_p_diag, c_drv_2, c_diag_2, n);
     };
     let (psi_new, m_eff_stage2, beta_m_2, c_m_abs_2) =
         lanczos_propagate(matvec, &psi_mid, dt, m, krylov_tol)?;
@@ -2303,7 +2303,7 @@ mod tests {
     ///
     /// cache 経路: stage 1 iter 0 で `(c_drv_1 · H_drv · ψ + c_diag_1 · H_p_diag · ψ) / ‖ψ‖`
     /// を precomputed primitive cache の線形結合で組む.
-    /// 非 cache 経路: stage 1 iter 0 で `apply_h_kinema(v_0, ...)` を直接呼ぶ.
+    /// 非 cache 経路: stage 1 iter 0 で `apply_h(v_0, ...)` を直接呼ぶ.
     /// 両者は演算順序が異なるため bit-identical ではないが, IEEE 754 の積/和精度
     /// から Lanczos m_eff ステージ全体で累積しても `rel < 2e-15` (≈ 数 ulp)
     /// で一致するはず. これは issue #100 acceptance 基準の数値同等性契約

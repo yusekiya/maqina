@@ -77,7 +77,7 @@ class QuantumResult:
         要求された driver step 数. adaptive 経路では呼出側 (``QuantumAnnealer``)
         が要求値を別途持たないため, 実 step 数と一致する.
     n_matvec
-        累積 matvec 呼出回数 (Lanczos 内部の ``apply_h_kinema`` 含む).
+        累積 matvec 呼出回数 (Lanczos 内部の ``apply_h`` 含む).
     success
         Phase 4 追加. 駆動が ``RuntimeError`` を出さずに完走したか.
         固定 dt 経路では常に ``True``. adaptive 経路で ``max_rejects``

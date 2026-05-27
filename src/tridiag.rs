@@ -199,7 +199,7 @@ pub(crate) fn tridiag_eigh(
 /// 主用途は `python/maqina/eigenstates.py` の `instantaneous_eigenstates`
 /// (Lanczos 経路で得た `(α, β)` の固有分解を Python 側から呼ぶ). Lanczos /
 /// CFM4:2 内部の固有分解は Rust 内で完結するため, 本関数は **eigenstates /
-/// 参照実装比較用** の公開 API である (`apply_h_kinema_py` 等と同じ位置付).
+/// 参照実装比較用** の公開 API である (`apply_h_py` 等と同じ位置付).
 ///
 /// # Python 側シグネチャ
 /// ```python

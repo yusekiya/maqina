@@ -13,7 +13,7 @@
 実装方針:
 
 * ``method="lanczos"`` (default): Python ループから
-  ``_rust.apply_h_kinema_into_py`` (in-place 版) を呼んで Krylov 部分空間
+  ``_rust.apply_h_into_py`` (in-place 版) を呼んで Krylov 部分空間
   (次元 ``m``, default 64) を構築し, ``_rust.tridiag_eigh_py`` で三重対角の
   完全固有分解を取って下位 ``k`` 個の Ritz vector を再構築する.
   ``w`` buffer を loop 外で 1 回確保し再利用することで境界の alloc/copy

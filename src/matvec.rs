@@ -10,7 +10,7 @@
 //!
 //! 本モジュールは以下の bit-flip pass 系 primitive を提供する:
 //!
-//! - [`apply_h_kinema`]: 計算ベクトル `v` に対し `y = H(t) v` を 1 回 apply
+//! - [`apply_h`]: 計算ベクトル `v` に対し `y = H(t) v` を 1 回 apply
 //!   する additive matvec. Lanczos (m 回) や CFM4:2 (各 stage) から繰り返し
 //!   呼ばれる. 詳細は `docs/design/05-1-matvec.md` §5.1.1.
 //! - [`apply_single_mode_axis_i`]: Trotter 経路で `R_i(θ) = cos(θ)·I + i·sin(θ)·X_i`
@@ -59,11 +59,11 @@ use rayon::prelude::*;
 /// # 値の見直し (Phase 6 C3, issue #64, 第 2 版)
 ///
 /// PR #78 初版で `1 << 14 = 16K` (= 256 KB) を `1 << 13 = 8K` (= 128 KB) に
-/// 縮めたが, Linux 本番 bench で `apply_h_kinema` の **N=18 が 0.69×,
+/// 縮めたが, Linux 本番 bench で `apply_h` の **N=18 が 0.69×,
 /// N=20 が 0.91× regression**, N=22 では 1.09× 改善という mixed な結果に
 /// なった (小 dim で並列度が落ちる方が L2 fit 改善より影響大). 旧値に戻す.
 ///
-/// L2 pressure 仮説は **chunk_size を縮める代わりに `apply_h_kinema_rayon`
+/// L2 pressure 仮説は **chunk_size を縮める代わりに `apply_h_rayon`
 /// 既存の動的 chunk_size 計算 `(dim / (nth * 4)).clamp(MIN, MAX)` の MAX
 /// 上限値で抑える** ことで間接的に効くことを期待する (thread 数が小さい
 /// 環境では大きい chunk, 64 thread 環境では target が MAX 未満になるので
@@ -90,7 +90,7 @@ const SIMD_BLOCK_MAX: usize = 8;
 ///
 /// # 根拠 (issue #62 本番 bench, cpu_count=64 Linux サーバー, BLAS thread=1)
 ///
-/// `apply_h_kinema` の speedup vs threads=1:
+/// `apply_h` の speedup vs threads=1:
 ///
 /// | N | dim | 2 threads | 4 threads | 評価 |
 /// |---|---|---|---|---|
@@ -107,11 +107,11 @@ const SIMD_BLOCK_MAX: usize = 8;
 #[cfg(feature = "rayon")]
 const MIN_RAYON_DIM: usize = 1 << 17;
 
-/// `apply_h_kinema` の bit-flip pass と `apply_single_mode_axis_i` の
+/// `apply_h` の bit-flip pass と `apply_single_mode_axis_i` の
 /// 2×2 ユニタリ pair update の i ∈ {0, 1, 2} (stride 1/2/4 連続アクセス領域)
 /// を `wide::f64x4` で SIMD 特化するカーネル群.
 ///
-/// - `bitflip_i{0,1,2}`: `apply_h_kinema` の bit-flip pass
+/// - `bitflip_i{0,1,2}`: `apply_h` の bit-flip pass
 ///   (`y[k] += coeff · v[k ^ mask]`) 用 (issue #63 Phase 6 C2).
 /// - `single_mode_i{0,1,2}`: `apply_single_mode_axis_i` /
 ///   `apply_fused_axes_to_chunk` (Phase 6 C3) の 2×2 ユニタリ pair update
@@ -150,10 +150,10 @@ const MIN_RAYON_DIM: usize = 1 << 17;
 ///
 /// i ≥ 3 (stride ≥ 8) は load/store が cache line を跨ぐため SIMD vectorize の
 /// 利得が小さい (`docs/design/12-release-plan.md` §12 Phase 6 C2). このカーネル群は i ≤ 2 のみ
-/// 提供し, i ≥ 3 は呼び出し側 (`apply_h_kinema_serial` /
-/// `apply_h_kinema_rayon`) で scalar inner loop に fallback する.
+/// 提供し, i ≥ 3 は呼び出し側 (`apply_h_serial` /
+/// `apply_h_rayon`) で scalar inner loop に fallback する.
 ///
-/// # `apply_h_kinema_serial` / `apply_h_kinema_rayon` 共用
+/// # `apply_h_serial` / `apply_h_rayon` 共用
 ///
 /// 同じ SIMD inner kernel を両 path から呼ぶ (issue #63 Implementation note,
 /// issue #68 follow-up で導入された `MIN_RAYON_DIM` dispatch との直交性).
@@ -169,7 +169,7 @@ const MIN_RAYON_DIM: usize = 1 << 17;
 /// 各 lane を独立に演算するので, 各 `y[k]` への更新は scalar 経路と同じ
 /// `y[k] + coeff * v[k ^ mask]` の単一 fadd になる. このため SIMD ON/OFF
 /// 両ビルドで **bit-identical** な結果になることを期待する (テスト
-/// `apply_h_kinema_simd_matches_serial` で検証).
+/// `apply_h_simd_matches_serial` で検証).
 ///
 /// `single_mode_iN` の方は 2×2 complex matmul を **complex broadcast +
 /// in-register swizzle** で f64x4 化する: `u_k = u_k_re + i·u_k_im` の作用
@@ -613,16 +613,16 @@ mod simd_kernels {
 ///
 /// # 実装
 /// `feature = "rayon"` (default ON) 時は **dim 閾値 dispatch**: `dim >=
-/// MIN_RAYON_DIM` (= 1 << 17 = 128K 要素) のときだけ [`apply_h_kinema_rayon`]
-/// が呼ばれ, それ未満では [`apply_h_kinema_serial`] にフォールバックする
+/// MIN_RAYON_DIM` (= 1 << 17 = 128K 要素) のときだけ [`apply_h_rayon`]
+/// が呼ばれ, それ未満では [`apply_h_serial`] にフォールバックする
 /// (issue #68: 小 dim では rayon barrier overhead が単スレッド計算時間を超え
-/// て regression する). `apply_h_kinema_rayon` 内では `y` を `par_chunks_mut`
+/// て regression する). `apply_h_rayon` 内では `y` を `par_chunks_mut`
 /// で分割し chunk closure 内で diag + 全 i bit-flip pass を完走する. 各 `y[k]`
 /// への書き込みは単一スレッドからしか発生せず, `v` は read-only のため
 /// race-free. 演算順序は chunk 内で serial と同じ (diag → i=0 → i=1 → ...)
 /// なので **rayon あり/なし両ビルドで bit-identical** に y[k] を生成する
-/// (詳細は `apply_h_kinema_rayon_matches_serial_*` テスト).
-/// `--no-default-features` 時は常に [`apply_h_kinema_serial`] にフォール
+/// (詳細は `apply_h_rayon_matches_serial_*` テスト).
+/// `--no-default-features` 時は常に [`apply_h_serial`] にフォール
 /// バック.
 ///
 /// `feature = "simd"` (default ON, Phase 6 C2 / issue #63) では bit-flip pass
@@ -635,7 +635,7 @@ mod simd_kernels {
 /// chunk_size を `SIMD_BLOCK_MAX = 8` Complex64 の倍数に丸める. SIMD と
 /// scalar 経路は各 `y[k]` への単一の `coeff * v[k^mask] + y[k]` を独立 lane で
 /// 並列実行するだけで演算順序は変わらないため, SIMD あり/なし両ビルドで
-/// **bit-identical** な結果を期待する (`apply_h_kinema_simd_matches_serial`
+/// **bit-identical** な結果を期待する (`apply_h_simd_matches_serial`
 /// テスト). 実 SIMD 速度向上は build 時の `target-cpu` 設定 (AVX2 / AVX-512 /
 /// NEON 有効化) に依存し, default `x86_64` target では `wide` が scalar
 /// fallback を選び正確性のみ提供する (`benchmarks/bench_simd_scaling.py` は
@@ -652,8 +652,8 @@ mod simd_kernels {
 /// `pub(crate)` から `pub` に上げているのは, `src/lib.rs` の `pub mod
 /// bench_api` 経由で in-tree binary (`src/bin/perf_apply_h.rs`) から呼べる
 /// ようにするため (Phase 6 D follow-up の perf 計測用). Python 側 API は
-/// 引き続き `apply_h_kinema_py` 経由なので外部影響なし.
-pub fn apply_h_kinema(
+/// 引き続き `apply_h_py` 経由なので外部影響なし.
+pub fn apply_h(
     v: &[Complex64],
     y: &mut [Complex64],
     h_x: &[f64],
@@ -671,25 +671,25 @@ pub fn apply_h_kinema(
     #[cfg(feature = "rayon")]
     {
         if dim < MIN_RAYON_DIM {
-            apply_h_kinema_serial(v, y, h_x, h_p_diag, a_t, b_t, n);
+            apply_h_serial(v, y, h_x, h_p_diag, a_t, b_t, n);
         } else {
-            apply_h_kinema_rayon(v, y, h_x, h_p_diag, a_t, b_t, n);
+            apply_h_rayon(v, y, h_x, h_p_diag, a_t, b_t, n);
         }
     }
     #[cfg(not(feature = "rayon"))]
     {
-        apply_h_kinema_serial(v, y, h_x, h_p_diag, a_t, b_t, n);
+        apply_h_serial(v, y, h_x, h_p_diag, a_t, b_t, n);
     }
 }
 
-/// `apply_h_kinema` の scalar 単スレッド実装. `feature = "rayon"` OFF
+/// `apply_h` の scalar 単スレッド実装. `feature = "rayon"` OFF
 /// ビルドおよび `#[cfg(test)]` 経路から rayon 経路との数値同一性比較に使う.
 ///
 /// `feature = "simd"` (default ON) では bit-flip pass のうち i ∈ {0, 1, 2}
 /// (stride 1/2/4 連続アクセス領域) を [`simd_kernels`] の f64x4 特化版に
 /// dispatch する (Phase 6 C2, issue #63). 残りの i ≥ 3 は scalar inner loop の
 /// まま. `feature = "simd"` OFF では従来の scalar pass を全 i で使う.
-fn apply_h_kinema_serial(
+fn apply_h_serial(
     v: &[Complex64],
     y: &mut [Complex64],
     h_x: &[f64],
@@ -742,7 +742,7 @@ fn apply_h_kinema_serial(
     }
 }
 
-/// `apply_h_kinema` の rayon 並列実装. `y` を `par_chunks_mut(chunk_size)`
+/// `apply_h` の rayon 並列実装. `y` を `par_chunks_mut(chunk_size)`
 /// で分割し, 各 chunk closure 内で diag pass → 全 i bit-flip pass を完走する.
 ///
 /// # 並列化スキーム (cache-blocked 形)
@@ -767,7 +767,7 @@ fn apply_h_kinema_serial(
 /// [`RAYON_CHUNK_MIN`] (closure overhead 償却) と [`RAYON_CHUNK_MAX`]
 /// (L2 cache 上限) で clamp する.
 #[cfg(feature = "rayon")]
-fn apply_h_kinema_rayon(
+fn apply_h_rayon(
     v: &[Complex64],
     y: &mut [Complex64],
     h_x: &[f64],
@@ -858,9 +858,9 @@ fn apply_h_kinema_rayon(
 /// `(c_drv · H_drv + c_diag · H_p_diag) · ψ` の線形結合に分解されることを
 /// 利用する).
 ///
-/// # `apply_h_kinema` との関係
+/// # `apply_h` との関係
 ///
-/// 既存の合成 matvec `apply_h_kinema` は **cache-blocked 形** (rayon path
+/// 既存の合成 matvec `apply_h` は **cache-blocked 形** (rayon path
 /// で `y_chunk` を L1 resident に保ったまま diag pass + 全 i bit-flip pass を
 /// 完走) で書かれている. 本 primitive を Lanczos hot path で呼ぶと cache
 /// blocked 形が壊れる (diag/bit-flip で y を 2 周 stream, barrier 2 個) ので
@@ -1173,7 +1173,7 @@ fn apply_single_mode_axis_i_rayon(psi: &mut [Complex64], u: &[Complex64; 4], i: 
     } else {
         // 複数 block: chunk_size を block の整数倍で動的計算する.
         //
-        // `apply_h_kinema_rayon` / `apply_multi_qubit_gate_fused_rayon`
+        // `apply_h_rayon` / `apply_multi_qubit_gate_fused_rayon`
         // と同じ動的式 `(dim / (nth · 4)).clamp(MIN, MAX)` に揃える. 64 thread
         // 環境 (Linux AMD EPYC 7713P) では N=18 で chunk_size = 1024 (16×),
         // N=20 で 4096 が確保され, broadcast 定数 (16 個の f64x4 splat) を
@@ -1201,7 +1201,7 @@ fn apply_single_mode_axis_i_rayon(psi: &mut [Complex64], u: &[Complex64; 4], i: 
         // (= 8 Complex64) の倍数に丸める. block ∈ {2,4,8} のとき chunk_size
         // = n_groups · block は target が非 power-of-2 のとき必ずしも SIMD
         // min unit の倍数になるとは限らないため明示的に整える
-        // (apply_h_kinema_rayon と同じ pattern). 丸めた結果が block 未満に
+        // (apply_h_rayon と同じ pattern). 丸めた結果が block 未満に
         // ならないよう最後に block で floor する.
         #[cfg(feature = "simd")]
         let chunk_size = (chunk_size - (chunk_size % SIMD_BLOCK_MAX)).max(block);
@@ -1367,7 +1367,7 @@ fn apply_multi_qubit_gate_fused_rayon(
     let k = u_list.len();
     let group_block = 1usize << (i_start + k);
 
-    // 既存 `apply_h_kinema_rayon` と同じ pattern で thread 数に応じた
+    // 既存 `apply_h_rayon` と同じ pattern で thread 数に応じた
     // chunk_size を取り, group_block (= 最大 axis の block 2 倍) の整数倍に
     // 揃える. これで dim が小さいときでも 64 thread に十分な chunk 数を
     // 配給できる (PR #78 v2 で N=18 が 0.69× regression したのを修正).
@@ -1544,13 +1544,13 @@ pub(crate) fn apply_single_mode_axis_i_inplace_py<'py>(
     Ok(())
 }
 
-/// `apply_h_kinema` の Python 入口で共通する shape 検査.
+/// `apply_h` の Python 入口で共通する shape 検査.
 ///
 /// `h_x` から `n` を取り `dim = 2^n` を計算し, `v.len() == dim` /
 /// `h_p_diag.len() == dim` を確認する. `y` の長さ検査は in-place 経路
-/// (`apply_h_kinema_into_py`) でのみ意味があるので, ここでは扱わず
+/// (`apply_h_into_py`) でのみ意味があるので, ここでは扱わず
 /// caller 側に任せる.
-fn validate_apply_h_kinema_shapes(
+fn validate_apply_h_shapes(
     v_len: usize,
     h_x_len: usize,
     h_p_diag_len: usize,
@@ -1572,13 +1572,13 @@ fn validate_apply_h_kinema_shapes(
     Ok((n, dim))
 }
 
-/// `apply_h_kinema` の Python wrap (allocate-and-return). `y` を内部で
+/// `apply_h` の Python wrap (allocate-and-return). `y` を内部で
 /// allocate して返す.
 ///
-/// Python 側 (`_rust.apply_h_kinema_py`) からは
+/// Python 側 (`_rust.apply_h_py`) からは
 ///
 /// ```python
-/// y = _rust.apply_h_kinema_py(v, h_x, h_p_diag, a_t, b_t)
+/// y = _rust.apply_h_py(v, h_x, h_p_diag, a_t, b_t)
 /// ```
 ///
 /// として呼ぶ. サイト数 `n` は `len(h_x)`, 状態次元 `dim = 2^n` は
@@ -1586,14 +1586,14 @@ fn validate_apply_h_kinema_shapes(
 /// 完結するため, 本関数は **参照実装比較とテスト用** の公開 API である
 /// (`docs/design/07-rust-extension.md` §7.3).
 ///
-/// **性能を出したい Python 側ループからは [`apply_h_kinema_into_py`]
+/// **性能を出したい Python 側ループからは [`apply_h_into_py`]
 /// (in-place 版) を使うこと**: 本関数は呼び出しごとに `dim · 16 B` の
 /// `complex128` array を新規 allocate するため, m=64 の Krylov loop や
 /// repeat 1000 回の bench measure 内に置くと alloc/copy overhead が Rust
 /// 側 micro-optimization の効果を覆い隠す (issue #79 / #85 で確認済み).
 #[pyfunction]
 #[pyo3(signature = (v, h_x, h_p_diag, a_t, b_t))]
-pub(crate) fn apply_h_kinema_py<'py>(
+pub(crate) fn apply_h_py<'py>(
     py: Python<'py>,
     v: PyReadonlyArray1<'py, Complex64>,
     h_x: PyReadonlyArray1<'py, f64>,
@@ -1605,29 +1605,28 @@ pub(crate) fn apply_h_kinema_py<'py>(
     let h_x_slice = h_x.as_slice()?;
     let h_p_diag_slice = h_p_diag.as_slice()?;
 
-    let (n, dim) =
-        validate_apply_h_kinema_shapes(v_slice.len(), h_x_slice.len(), h_p_diag_slice.len())?;
+    let (n, dim) = validate_apply_h_shapes(v_slice.len(), h_x_slice.len(), h_p_diag_slice.len())?;
 
     let mut y = vec![Complex64::new(0.0, 0.0); dim];
-    apply_h_kinema(v_slice, &mut y, h_x_slice, h_p_diag_slice, a_t, b_t, n);
+    apply_h(v_slice, &mut y, h_x_slice, h_p_diag_slice, a_t, b_t, n);
     Ok(y.into_pyarray(py))
 }
 
-/// `apply_h_kinema` の Python wrap (in-place 版). 結果を caller 側
+/// `apply_h` の Python wrap (in-place 版). 結果を caller 側
 /// pre-allocated `y_out` array に **上書き** する (戻り値 `None`).
 ///
-/// Python 側 (`_rust.apply_h_kinema_into_py`) からは
+/// Python 側 (`_rust.apply_h_into_py`) からは
 ///
 /// ```python
 /// y_out = np.empty(dim, dtype=np.complex128)  # ループ外で 1 回確保
 /// for ...:
-///     _rust.apply_h_kinema_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
+///     _rust.apply_h_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
 ///     # y_out が H(t)·v で上書きされる
 /// ```
 ///
-/// として呼ぶ. `apply_h_kinema` 本体は `y` を **上書き** (additive で
+/// として呼ぶ. `apply_h` 本体は `y` を **上書き** (additive で
 /// はなく) するため, caller は `np.zeros` ではなく `np.empty` で確保して良い.
-/// `apply_h_kinema_py` と同様, サイト数 `n` は `len(h_x)`, 状態次元
+/// `apply_h_py` と同様, サイト数 `n` は `len(h_x)`, 状態次元
 /// `dim = 2^n` は `len(h_p_diag)` から取り出す. `y_out.len() == dim`
 /// を境界で検査し, 不整合は `PyValueError`.
 ///
@@ -1637,7 +1636,7 @@ pub(crate) fn apply_h_kinema_py<'py>(
 /// §5.1.4 末尾.
 #[pyfunction]
 #[pyo3(signature = (v, y_out, h_x, h_p_diag, a_t, b_t))]
-pub(crate) fn apply_h_kinema_into_py<'py>(
+pub(crate) fn apply_h_into_py<'py>(
     v: PyReadonlyArray1<'py, Complex64>,
     mut y_out: PyReadwriteArray1<'py, Complex64>,
     h_x: PyReadonlyArray1<'py, f64>,
@@ -1650,8 +1649,7 @@ pub(crate) fn apply_h_kinema_into_py<'py>(
     let h_p_diag_slice = h_p_diag.as_slice()?;
     let y_slice = y_out.as_slice_mut()?;
 
-    let (n, dim) =
-        validate_apply_h_kinema_shapes(v_slice.len(), h_x_slice.len(), h_p_diag_slice.len())?;
+    let (n, dim) = validate_apply_h_shapes(v_slice.len(), h_x_slice.len(), h_p_diag_slice.len())?;
     if y_slice.len() != dim {
         return Err(PyValueError::new_err(format!(
             "y_out length {} does not match 2^len(h_x) = {}",
@@ -1660,7 +1658,7 @@ pub(crate) fn apply_h_kinema_into_py<'py>(
         )));
     }
 
-    apply_h_kinema(v_slice, y_slice, h_x_slice, h_p_diag_slice, a_t, b_t, n);
+    apply_h(v_slice, y_slice, h_x_slice, h_p_diag_slice, a_t, b_t, n);
     Ok(())
 }
 
@@ -1761,9 +1759,9 @@ mod tests {
         let v_vec = DVector::<Complex64>::from_vec(v.clone());
         let y_expected = &h_dense * &v_vec;
 
-        // 被テスト: apply_h_kinema.
+        // 被テスト: apply_h.
         let mut y = vec![Complex64::new(0.0, 0.0); dim];
-        apply_h_kinema(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+        apply_h(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
 
         let rel = relative_error(&y, &y_expected);
         assert!(
@@ -1798,7 +1796,7 @@ mod tests {
         let b_t = rng.signed();
 
         let mut y = vec![Complex64::new(0.0, 0.0); dim];
-        apply_h_kinema(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+        apply_h(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
 
         // 期待値: y[k] = b·H_p[k]·v[k].
         for k in 0..dim {
@@ -1827,7 +1825,7 @@ mod tests {
         let b_t = rng.signed(); // 出力には影響しないが渡しておく.
 
         let mut y = vec![Complex64::new(0.0, 0.0); dim];
-        apply_h_kinema(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+        apply_h(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
 
         // 参照: dense H_driver = -A · Σ_i h_x[i] · X_i.
         let h_dense = build_dense_h(n, &h_x, &h_p_diag, a_t, 0.0);
@@ -1838,7 +1836,7 @@ mod tests {
 
     #[test]
     fn sparse_h_x_matches_dense_reference() {
-        // h_x にゼロ要素を混ぜたケース. apply_h_kinema の bit-flip pass は
+        // h_x にゼロ要素を混ぜたケース. apply_h の bit-flip pass は
         // `coeff == 0` (= h_x[i] == 0) の i pass をスキップする最適化を持つが,
         // それでも数値結果は dense H · v と rel < 1e-13 で一致するはず
         // (スキップした i の dense H への寄与は元々 0 なので等価).
@@ -1861,13 +1859,13 @@ mod tests {
         let b_t = rng.signed();
 
         // 参照: dense H · v (build_dense_h は h_x[i]=0 で coeff=0 のため i pass
-        // を寄与なしで足し込む形, apply_h_kinema の短絡経路と等価).
+        // を寄与なしで足し込む形, apply_h の短絡経路と等価).
         let h_dense = build_dense_h(n, &h_x, &h_p_diag, a_t, b_t);
         let v_vec = DVector::<Complex64>::from_vec(v.clone());
         let y_expected = &h_dense * &v_vec;
 
         let mut y = vec![Complex64::new(0.0, 0.0); dim];
-        apply_h_kinema(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+        apply_h(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
 
         let rel = relative_error(&y, &y_expected);
         assert!(
@@ -1891,7 +1889,7 @@ mod tests {
         let b_t = rng.signed();
 
         let mut y = vec![Complex64::new(0.0, 0.0); dim];
-        apply_h_kinema(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+        apply_h(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
 
         // 期待値: y[k] = b_t · H_p_diag[k] · v[k] (diag のみ).
         for k in 0..dim {
@@ -1920,7 +1918,7 @@ mod tests {
         let b_t = 1.1;
 
         let mut y = [Complex64::new(0.0, 0.0); 2];
-        apply_h_kinema(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+        apply_h(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
 
         let off = -a_t * h_x[0];
         let expected = [
@@ -2187,7 +2185,7 @@ mod tests {
 
     // ===== rayon 並列化 (Phase 6 C1, issue #62) のテスト =====
 
-    /// rayon あり/なしで [`apply_h_kinema`] が要素ごとに bit-identical な
+    /// rayon あり/なしで [`apply_h`] が要素ごとに bit-identical な
     /// 結果を返すこと. 各 `y[k]` は単一スレッドで diag pass → i=0,1,...,n-1
     /// の順に同じ演算順序を踏むため bit-for-bit 一致を期待できる.
     ///
@@ -2196,7 +2194,7 @@ mod tests {
     /// `max(dim/(nth·4), RAYON_CHUNK_MIN)` で複数 chunk になる典型サイズ).
     #[cfg(feature = "rayon")]
     #[test]
-    fn apply_h_kinema_rayon_matches_serial() {
+    fn apply_h_rayon_matches_serial() {
         for n in [3, 6, 10, 12] {
             let dim = 1usize << n;
             for seed in [1u64, 17, 0xdead_beef] {
@@ -2208,10 +2206,10 @@ mod tests {
                 let b_t = rng.signed();
 
                 let mut y_serial = vec![Complex64::new(0.0, 0.0); dim];
-                apply_h_kinema_serial(&v, &mut y_serial, &h_x, &h_p_diag, a_t, b_t, n);
+                apply_h_serial(&v, &mut y_serial, &h_x, &h_p_diag, a_t, b_t, n);
 
                 let mut y_par = vec![Complex64::new(0.0, 0.0); dim];
-                apply_h_kinema_rayon(&v, &mut y_par, &h_x, &h_p_diag, a_t, b_t, n);
+                apply_h_rayon(&v, &mut y_par, &h_x, &h_p_diag, a_t, b_t, n);
 
                 for k in 0..dim {
                     assert_eq!(
@@ -2286,13 +2284,13 @@ mod tests {
         }
     }
 
-    /// 8 thread の rayon pool で `apply_h_kinema` を 100 回反復実行し,
+    /// 8 thread の rayon pool で `apply_h` を 100 回反復実行し,
     /// 結果が **毎回 bit-identical** であることを確認する (race condition
     /// 検出). 各 `y[k]` への書き込みは disjoint な chunk に閉じるため
     /// thread スケジュールに依らない決定性を保つ. issue #62 acceptance.
     #[cfg(feature = "rayon")]
     #[test]
-    fn apply_h_kinema_rayon_determinism_8thread_100iter() {
+    fn apply_h_rayon_determinism_8thread_100iter() {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(8)
             .build()
@@ -2308,18 +2306,18 @@ mod tests {
         let b_t = rng.signed();
 
         // 1 回目を reference として保存し, 残り 99 回が全て bit-identical かを検証.
-        // 注: public `apply_h_kinema` は dim < MIN_RAYON_DIM = 1<<17 で scalar
+        // 注: public `apply_h` は dim < MIN_RAYON_DIM = 1<<17 で scalar
         // path に dispatch されるため (issue #68), rayon path 自体の決定性を
-        // テストするには `apply_h_kinema_rayon` を直接呼ぶ必要がある.
+        // テストするには `apply_h_rayon` を直接呼ぶ必要がある.
         let reference: Vec<Complex64> = pool.install(|| {
             let mut y = vec![Complex64::new(0.0, 0.0); dim];
-            apply_h_kinema_rayon(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+            apply_h_rayon(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
             y
         });
         for iter in 1..100 {
             let actual: Vec<Complex64> = pool.install(|| {
                 let mut y = vec![Complex64::new(0.0, 0.0); dim];
-                apply_h_kinema_rayon(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+                apply_h_rayon(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
                 y
             });
             for k in 0..dim {
@@ -2469,7 +2467,7 @@ mod tests {
     /// - i=1, n=2 (dim=4): block=4 で 1 block ぴったり.
     /// - i=2, n=3 (dim=8): block=8 で 1 block ぴったり.
     ///
-    /// これらは `apply_h_kinema_serial` 経路から直接 SIMD カーネルに渡る
+    /// これらは `apply_h_serial` 経路から直接 SIMD カーネルに渡る
     /// 最小 dim ケース. 各々 scalar reference と要素ごとに比較する.
     #[cfg(feature = "simd")]
     #[test]
@@ -2866,12 +2864,12 @@ mod tests {
     // ===== iter-0 cache primitive (issue #100) のテスト =====
 
     /// `apply_h_drv(ψ) + b·apply_h_p_diag(ψ)` の線形結合が
-    /// `apply_h_kinema(ψ, a, b)` と数値一致することを確認.
+    /// `apply_h(ψ, a, b)` と数値一致することを確認.
     ///
     /// 演算順序が異なる (合成 vs 2 primitive + axpy) ため bit-identical では
     /// ないが, IEEE 754 の積/和精度から `rel < 1e-13` で一致するはず.
     #[test]
-    fn primitive_linear_combination_matches_apply_h_kinema() {
+    fn primitive_linear_combination_matches_apply_h() {
         let mut rng = Xor64::new(0x_dead_c0de_b00b_1010);
         for n in 4..=8 {
             let dim = 1usize << n;
@@ -2881,9 +2879,9 @@ mod tests {
             let a_t = rng.signed();
             let b_t = rng.signed();
 
-            // expected: fused apply_h_kinema.
+            // expected: fused apply_h.
             let mut y_expected = vec![Complex64::new(0.0, 0.0); dim];
-            apply_h_kinema(&v, &mut y_expected, &h_x, &h_p_diag, a_t, b_t, n);
+            apply_h(&v, &mut y_expected, &h_x, &h_p_diag, a_t, b_t, n);
 
             // actual: primitive 2 個の線形結合.
             let mut cache_drv = vec![Complex64::new(0.0, 0.0); dim];
