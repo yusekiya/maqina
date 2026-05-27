@@ -97,13 +97,25 @@ A_half1_1 = α_half1_1 · H_drv + β_half1_1 · H_p_diag      (中点 t + c1·dt
   bit-flip pass を 1 chunk closure 内で完走) は維持し, 本 primitive は
   Richardson 入口で 1 step 1 回だけ呼ばれる。
 - `src/cfm4.rs::cfm4_step` のシグネチャに `iter0_cache: Option<(&[Complex64],
-  &[Complex64])>` 引数を追加 (crate-internal API)。Lanczos に渡す matvec
+  &[Complex64], f64, f64)>` 引数を追加 (crate-internal API)。Lanczos に渡す matvec
   closure 内で `first_call` フラグを持たせ, iter 0 のときだけ cache を線形結合:
   ```
-  y = (c_drv_1 · cache_drv + c_diag_1 · cache_diag) / ‖ψ‖
+  y = (c_drv_1 · cache_drv + c_b_stage · cache_diag) / ‖ψ‖
+    where c_drv_1 = a_high · a_s1_scalar + a_low · a_s2_scalar
   ```
-  iter 1 以降は v_k が分岐するので従来通り `apply_h` 経路。
+  iter 1 以降は v_k が分岐するので従来通り `apply_h_general` 経路。
   Lanczos 内部 API は不変 (matvec closure を 1 個受けるだけ)。
+  - Phase C / issue #142 C1 part 2-B で `cfm4_step` を per-site, per-axis 時間
+    依存場対応の signature に拡張した際, cache tuple は `(cache_drv, cache_diag,
+    a_s1_scalar, a_s2_scalar)` の **4 要素** に拡張。caller は X-only path
+    (`g_y_s* / g_z_s*` 全 None かつ `g_x_s* = -a_s*_scalar · basis_h_x` 線形性)
+    を契約として cache を渡す。XYZ 一般化された driver 経路 (将来) では None を
+    渡せば従来の `apply_h_general` を iter 0 でも呼ぶ経路に縮退する。
+  - `cfm4_step_with_richardson_estimate` の入口側は `iter0_cache_x_only:
+    Option<(&[f64], f64, f64, f64, f64)>` (= `(basis_h_x, a_s1_full, a_s2_full,
+    a_s1_h1, a_s2_h1)`) を取り, full_step / half_1 へ渡す cfm4_step cache tuple を
+    関数内で 2 種類組み立てる (basis_h_x + (a_s1_full, a_s2_full) /
+    basis_h_x + (a_s1_h1, a_s2_h1))。
 - full_step stage 1 / half_1 stage 1 に `iter0_cache = Some(...)` を渡し,
   half_2 (入口は `psi_mid` で異なる) と stage 2 (入口は各 stage 1 出口で異なる)
   には `None`。
