@@ -33,7 +33,7 @@ H_problem = a k-local polynomial in Z operators only (diagonal in the Z basis)
 
 ## Performance (work-precision diagram)
 
-| Narrow dynamic range                                       | Wide dynamic range                                   |
+| Narrow dynamic range problem                               | Wide dynamic range problem                           |
 | ---------------------------------------------------------- | ---------------------------------------------------- |
 | ![Pareto narrow](docs/figures/0.12.0_pareto_non_stiff.png) | ![Pareto wide](docs/figures/0.12.0_pareto_stiff.png) |
 
@@ -164,10 +164,10 @@ For details on tests / lint / build commands see
 
 ## References
 
-- [Ido Schaefer, Hillel Tal-Ezer and Ronnie Kosloff, "Semi-global approach for propagation of the time-dependent Schrödinger equation for time-dependent and nonlinear problems", Journal of Computational Physics 343, 368 (2017).](https://doi.org/10.1016/j.jcp.2017.04.017)
-- [Sergio Blanes, Fernando Casas and Mechthild Thalhammer, "High-order commutator-free quasi-Magnus exponential integrators for non-autonomous linear evolution equations", Computer Physics Communications 220, 243 (2017).](https://doi.org/10.1016/j.cpc.2017.07.016)
-- [Arieh Iserles, Karolina Kropielnicka, and Pranav Singh, "Magnus--Lanczos Methods with Simplified Commutators for the Schrödinger Equation with a Time-Dependent Potential", SIAM Journal on Numerical Analysis 56, 1547 (2010).](https://doi.org/10.1137/17M1149833)
-- [Andreas Alvermann and Holgera Fehske, "High-order commutator-free exponential time-propagation of driven quantum systems", Journal of Computational Physics 230, 5930 (2011).](https://doi.org/10.1016/j.jcp.2011.04.006)
+- Ido Schaefer, Hillel Tal-Ezer and Ronnie Kosloff, "Semi-global approach for propagation of the time-dependent Schrödinger equation for time-dependent and nonlinear problems", Journal of Computational Physics 343, 368 (2017). [link](https://doi.org/10.1016/j.jcp.2017.04.017)
+- Sergio Blanes, Fernando Casas and Mechthild Thalhammer, "High-order commutator-free quasi-Magnus exponential integrators for non-autonomous linear evolution equations", Computer Physics Communications 220, 243 (2017). [link](https://doi.org/10.1016/j.cpc.2017.07.016)
+- Arieh Iserles, Karolina Kropielnicka, and Pranav Singh, "Magnus--Lanczos Methods with Simplified Commutators for the Schrödinger Equation with a Time-Dependent Potential", SIAM Journal on Numerical Analysis 56, 1547 (2010). [link](https://doi.org/10.1137/17M1149833)
+- Andreas Alvermann and Holgera Fehske, "High-order commutator-free exponential time-propagation of driven quantum systems", Journal of Computational Physics 230, 5930 (2011). [link](https://doi.org/10.1016/j.jcp.2011.04.006)
 
 ## License
 
