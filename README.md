@@ -87,7 +87,7 @@ in [`docs/quickstart.md`](docs/quickstart.md).
 ## Requirements
 
 - Python `>=3.13`
-- Rust toolchain (`cargo`)
+- Rust toolchain (`cargo`) — install via `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` (see [rustup.rs](https://rustup.rs/))
 - macOS: Apple Accelerate is used automatically (no extra install)
 - Linux: system OpenBLAS (`libopenblas-dev` etc.) is required
   (`--no-default-features` for a fallback build)
