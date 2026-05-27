@@ -725,7 +725,7 @@ def _python_trotter_step(
     * ``R_i(dt)``: ``θ_i = +a_mid · h_x_i · dt`` の 2×2 ユニタリ
       ``[cos θ, i·sin θ; i·sin θ, cos θ]`` を bit ``i`` 軸に in-place 適用.
       符号 convention は ``src/trotter.rs`` 冒頭 docstring 参照 (``H_drv =
-      -Σ h_x_i X_i`` の負号は ``θ`` 側に巻き取らず ``apply_h_kinema``
+      -Σ h_x_i X_i`` の負号は ``θ`` 側に巻き取らず ``apply_h``
       の ``coeff = -a_t · h_x_i`` と統一).
 
     全因子が unitary なので ``‖psi_new‖ = ‖psi‖`` が machine precision で

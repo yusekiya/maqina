@@ -64,7 +64,7 @@ def _dense_exp_minus_i_dt_h(
 ) -> np.ndarray:
     """``exp(-i dt · (a_t · H_drv + b_t · diag(h_p_diag)))`` の dense 構築.
 
-    ``H_drv = -Σ_i h_x_i X_i`` (``apply_h_kinema`` と同 convention,
+    ``H_drv = -Σ_i h_x_i X_i`` (``apply_h`` と同 convention,
     ``coeff = -a_t · h_x_i``).
     """
     n = h_x.shape[0]

@@ -21,7 +21,7 @@
 │  │    m2_midpoint_step   (M2 中点則 1 step)               │  │
 │  │    cfm4_step_with_*_estimate (embedded error 推定子)   │  │
 │  │    trotter_step       (Strang / Suzuki 1 step, Phase 2)│  │
-│  │    apply_h_kinema  (matvec; bit-flip + 対角積)      │  │
+│  │    apply_h  (matvec; bit-flip + 対角積)      │  │
 │  │    apply_single_mode_axis_i (2×2 ユニタリ in-place適用)│  │
 │  └────────────────────────────────────────────────────────┘  │
 │         ▼                                                    │
@@ -35,7 +35,7 @@
 |---|---|
 | Python (`python/maqina/`) | 公開 API、`IsingProblem` / `Schedule` / `Annealer` の組み立て、結果オブジェクト、瞬時固有状態への投影、入力検証、QuTiP 比較ヘルパ |
 | Rust (`src/`) | Lanczos ループ (`lanczos_propagate`)、CFM4:2 / M2 / Richardson 推定子の段階指数積、Trotter step (Phase 2 以降)、三重対角固有分解 (hand-rolled QL)、BLAS 経由の Level-1/2 ops |
-| Rust matvec / primitives | `apply_h_kinema` (matvec, bit-flip + 対角積) と `apply_single_mode_axis_i` (Trotter 用 2×2 ユニタリ axis i 作用) を Python callback を介さず Rust 内で完結 |
+| Rust matvec / primitives | `apply_h` (matvec, bit-flip + 対角積) と `apply_single_mode_axis_i` (Trotter 用 2×2 ユニタリ axis i 作用) を Python callback を介さず Rust 内で完結 |
 
 #### matvec を Rust 側に置く理由
 
@@ -88,7 +88,7 @@ maqina/
 │   └── benchmarks.md
 ├── src/                        # ← Rust ソース (maturin 標準位置)
 │   ├── lib.rs                  # PyO3 エントリポイント (#[pymodule] fn _rust)
-│   ├── matvec.rs               # apply_h_kinema, apply_single_mode_axis_i
+│   ├── matvec.rs               # apply_h, apply_single_mode_axis_i
 │   ├── krylov.rs               # lanczos_propagate (ndarray ベース)
 │   ├── cfm4.rs                 # CFM4:2 / M2 / Richardson
 │   ├── trotter.rs              # trotter_step (Phase 2 で追加)

@@ -56,7 +56,7 @@
 //!
 //! - `n`: TFIM サイト数. dim = 2^n. default = 20.
 //! - `iterations`: `apply_single_mode_axis_i` 呼出回数. default = 500.
-//!   per-iter cost は `apply_h_kinema` の半分程度 (1 pass のみ) だが,
+//!   per-iter cost は `apply_h` の半分程度 (1 pass のみ) だが,
 //!   trotter_step と同じ規模感に合わせて 500 を default にして実行時間を
 //!   5-10 秒オーダーに保つ.
 //! - `i`: 適用する axis (qubit index, `0 <= i < n`). default = 0

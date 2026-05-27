@@ -1,4 +1,4 @@
-//! Phase 6 D (issue #79) follow-up: `apply_h_kinema` の真の bottleneck を
+//! Phase 6 D (issue #79) follow-up: `apply_h` の真の bottleneck を
 //! Linux `perf stat` の hardware counter で特定するための pure-Rust 計測 binary.
 //!
 //! # 用途
@@ -10,7 +10,7 @@
 //! - rayon barrier overhead
 //! - hyperthread / scheduling 干渉
 //!
-//! のどれなのか切り分けられない. 本 binary は `apply_h_kinema` を N 回ループ
+//! のどれなのか切り分けられない. 本 binary は `apply_h` を N 回ループ
 //! するだけのミニマルな実行体で, `perf stat` で hardware counter (cache miss,
 //! DRAM controller throughput, stall reasons, IPC) を採取してボトルネックを
 //! 切り分ける.
@@ -59,7 +59,7 @@
 use std::env;
 use std::time::Instant;
 
-use _rust::bench_api::apply_h_kinema;
+use _rust::bench_api::apply_h;
 use num_complex::Complex64;
 
 fn main() {
@@ -88,16 +88,16 @@ fn main() {
 
     // warmup (rayon pool 起動, page fault 解消, cache warm).
     for _ in 0..10 {
-        apply_h_kinema(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+        apply_h(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
     }
 
     let t0 = Instant::now();
     for _ in 0..iterations {
-        apply_h_kinema(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+        apply_h(&v, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
     }
     let elapsed = t0.elapsed();
 
-    // DCE 防止: y の先頭数要素を sink. compiler が apply_h_kinema 呼出を
+    // DCE 防止: y の先頭数要素を sink. compiler が apply_h 呼出を
     // 削除しないことを保証する.
     let sink: f64 = y.iter().take(8).map(|c| c.re + c.im).sum();
 

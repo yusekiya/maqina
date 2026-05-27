@@ -13,7 +13,7 @@
 //! |---|---|---|
 //! | `full` (default) | `cfm4_step_chebyshev_with_richardson_estimate` 1 step | Richardson 1 step (6 chebyshev_propagate call) 全体 |
 //! | `single_chebyshev` | `chebyshev_propagate` 1 call (frozen schedule) | Chebyshev layer 単独 (`perf_chebyshev` と同等; 同一 binary で counter set を揃えるため重複露出) |
-//! | `matvec_only` | `apply_h_kinema` 1 call | matvec 単独 (`perf_apply_h` と同等; Chebyshev / Lanczos 共通の最下層) |
+//! | `matvec_only` | `apply_h` 1 call | matvec 単独 (`perf_apply_h` と同等; Chebyshev / Lanczos 共通の最下層) |
 //!
 //! 3 mode を **同じ counter set** で取って per-step → propagator → matvec の
 //! 各層 wall % を実測 breakdown する. 既存 `perf_cfm4_richardson` の同名
@@ -69,7 +69,7 @@ use std::env;
 use std::time::Instant;
 
 use _rust::bench_api::{
-    apply_h_kinema, cfm4_step_chebyshev_with_richardson_estimate, chebyshev_propagate,
+    apply_h, cfm4_step_chebyshev_with_richardson_estimate, chebyshev_propagate,
 };
 use num_complex::Complex64;
 
@@ -287,12 +287,12 @@ fn main() {
             let mut y = vec![Complex64::new(0.0, 0.0); dim];
             // warmup.
             for _ in 0..10 {
-                apply_h_kinema(&psi, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+                apply_h(&psi, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
             }
 
             let t0 = Instant::now();
             for _ in 0..n_steps {
-                apply_h_kinema(&psi, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
+                apply_h(&psi, &mut y, &h_x, &h_p_diag, a_t, b_t, n);
             }
             elapsed_secs = t0.elapsed().as_secs_f64();
             sink = y.iter().take(8).map(|c| c.re + c.im).sum();

@@ -10,7 +10,7 @@
 //!
 //! * **Closure matvec**: `F: FnMut(&[Complex64], &mut [Complex64])` を取り,
 //!   `y = H · v` を 1 回適用する. CFM4:2 の各 stage では
-//!   `(c_drv, c_diag)` を畳み込んだ `apply_h_kinema` をクロージャに
+//!   `(c_drv, c_diag)` を畳み込んだ `apply_h` をクロージャに
 //!   ラップして渡せる (§5.2 末尾).
 //! * **Full re-orthogonalization (Gram-Schmidt 2-pass)**: m が小さく (m ≈ 24)
 //!   かつ Lanczos の数値直交性が直ちに崩れる経験則 (Paige 1971) に従い,
@@ -44,7 +44,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::blas::{axpy, dot_conj, gemv_col_major, nrm2, scal_real};
-use crate::matvec::apply_h_kinema;
+use crate::matvec::apply_h;
 use crate::tridiag::tridiag_eigh;
 
 /// β_k が numerical breakdown とみなされる閾値 (machine eps スケール).
@@ -332,7 +332,7 @@ where
 /// `lanczos_propagate` の **テスト用 Python wrap**.
 ///
 /// 内部 `lanczos_propagate` (closure 受け取り) は Python から直接呼べないため,
-/// `apply_h_kinema` を closure として固定した形で
+/// `apply_h` を closure として固定した形で
 /// `psi_new = exp(-i dt · H(a_t, b_t)) · ψ` を計算する関数を露出する.
 /// `H(a_t, b_t) = a_t · H_driver + b_t · H_problem` で時間に独立な
 /// (フリーズ済の) Hamiltonian を仮定する点が `m2_midpoint_step_py` と異なる
@@ -395,7 +395,7 @@ pub(crate) fn lanczos_propagate_py<'py>(
     }
 
     let matvec = |v: &[Complex64], y: &mut [Complex64]| {
-        apply_h_kinema(v, y, h_x_slice, h_p_diag_slice, a_t, b_t, n);
+        apply_h(v, y, h_x_slice, h_p_diag_slice, a_t, b_t, n);
     };
     // issue #93 (Phase 7): lanczos_propagate は (psi, m_eff, β_m, |c_m|) を返す.
     // Python テスト (`tests/test_krylov.py`) も対応する 4-tuple destructure に追従.
@@ -566,7 +566,7 @@ mod tests {
     #[test]
     fn diagonal_h_applies_phase_per_component() {
         // H = diag(λ) → ψ_new[k] = ψ[k] · exp(-i dt λ_k).
-        // (h_x = 0 で apply_h_kinema は対角項のみ計算する.)
+        // (h_x = 0 で apply_h は対角項のみ計算する.)
         let n = 4_usize;
         let dim = 1usize << n;
         let h_x = vec![0.0_f64; n];
@@ -578,7 +578,7 @@ mod tests {
         let b_t = 1.0_f64;
 
         let matvec = |v: &[Complex64], y: &mut [Complex64]| {
-            apply_h_kinema(v, y, &h_x, &h_p_diag, a_t, b_t, n);
+            apply_h(v, y, &h_x, &h_p_diag, a_t, b_t, n);
         };
         let (result, _m_eff, beta_m, c_m_abs) =
             lanczos_propagate(matvec, &psi, dt, 16, 1e-12).expect("ok");
@@ -615,7 +615,7 @@ mod tests {
         let b_t = 1.1_f64;
 
         let matvec = |v: &[Complex64], y: &mut [Complex64]| {
-            apply_h_kinema(v, y, &h_x, &h_p_diag, a_t, b_t, n);
+            apply_h(v, y, &h_x, &h_p_diag, a_t, b_t, n);
         };
         let (result, _m_eff, _beta_m, _c_m_abs) =
             lanczos_propagate(matvec, &psi, dt, 24, 1e-12).expect("ok");
@@ -642,7 +642,7 @@ mod tests {
         let b_t = rng.signed();
 
         let matvec = |v: &[Complex64], y: &mut [Complex64]| {
-            apply_h_kinema(v, y, &h_x, &h_p_diag, a_t, b_t, n);
+            apply_h(v, y, &h_x, &h_p_diag, a_t, b_t, n);
         };
         // dim 以上の m は意味が無いので min(24, dim).
         let m = std::cmp::min(24, dim);

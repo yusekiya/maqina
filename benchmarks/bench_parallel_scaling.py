@@ -1,7 +1,7 @@
 """rayon parallel scaling sweep for matvec / Trotter primitives.
 
 issue #62 (Phase 6 C1) の DoD「物理コア数 vs スループット sweep をベンチに
-含める, メモリ帯域律速点を出力に明示」用. `apply_h_kinema` と
+含める, メモリ帯域律速点を出力に明示」用. `apply_h` と
 `apply_single_mode_axis_i` の per-call wall time を, スピン数
 ``N ∈ {16, 18, 20}`` × rayon thread 数 ``{1, 2, 4, 8, 16, 32, 64}`` で
 sweep する.
@@ -59,7 +59,7 @@ artefact は merge 後 issue コメントとして付与する.
 
 - ``bench_parallel_scaling.csv``: 全 trial 生データ (n, dim, threads, kernel,
   trial, wall_sec, calls_per_sec). ``kernel`` は次の 3 種:
-    - ``apply_h_kinema``: matvec primitive 単発 (Lanczos / CFM4:2 の
+    - ``apply_h``: matvec primitive 単発 (Lanczos / CFM4:2 の
       ホットパスを 1 call 単位で計測).
     - ``trotter_step``: ``_rust.trotter_step_py`` 1 回 = full Strang Trotter
       step (phase pass + 全 i bit-flip pass + phase pass). 本番ホットパス
@@ -153,24 +153,24 @@ def child_run(
 
     results: list[TrialResult] = []
 
-    # ---- apply_h_kinema ----
+    # ---- apply_h ----
     # in-place 版を使い ``y_out`` を warmup 前に 1 回 alloc して再利用する
-    # (issue #85). 旧 ``apply_h_kinema_py`` だと毎 call で alloc/copy が
+    # (issue #85). 旧 ``apply_h_py`` だと毎 call で alloc/copy が
     # 計測域に混入し rayon scaling 評価を歪める.
     y_out = np.empty(dim, dtype=np.complex128)
     # warm up
     for _ in range(warmup):
-        _rust.apply_h_kinema_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
     for trial in range(repeat):
         t0 = time.perf_counter()
-        _rust.apply_h_kinema_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
         t1 = time.perf_counter()
         results.append(
             TrialResult(
                 n=n,
                 dim=dim,
                 threads=threads,
-                kernel="apply_h_kinema",
+                kernel="apply_h",
                 trial=trial,
                 wall_sec=t1 - t0,
             )

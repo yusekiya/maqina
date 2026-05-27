@@ -25,7 +25,7 @@ $$
 
 - $H_\mathrm{drv} = -\sum_i h_{x,i} X_i$ (サイト依存横磁場, off-diagonal)
 - $\mathrm{diag}(h_p)$ は Z 基底で対角 (`h_p_diag: (2^N,) float64`)
-- `apply_h_kinema(ψ, H_drv, h_p, a_t, b_t)` が $H \psi$ を 1 dim-walk で計算する
+- `apply_h(ψ, H_drv, h_p, a_t, b_t)` が $H \psi$ を 1 dim-walk で計算する
   既存の matvec primitive (`src/matvec.rs`)
 
 ベンチマーク的事実 (issue #120 PoC):
@@ -401,7 +401,7 @@ phi_prev (= φ_{k-1}), phi_curr (= φ_k), scratch (= H · φ_k → φ_{k+1})
 
 各 $k$ ステップで:
 
-1. **matvec**: `scratch := H · phi_curr` (`apply_h_kinema` 経由, $O(\dim)$ pass)
+1. **matvec**: `scratch := H · phi_curr` (`apply_h` 経由, $O(\dim)$ pass)
 2. **scaling**: `scratch := 2 · (scratch - E_c · phi_curr) / R - phi_prev`
 3. **accumulate**: `psi_acc += c_k · scratch`
 4. **rotate**: `phi_prev ← phi_curr`, `phi_curr ← scratch`
@@ -443,7 +443,7 @@ $k \ge 2$ の inner loop で walk 2 (scaling) と walk 3 (accumulate) を
 
 `chebyshev_recurrence_fused_rayon` で $k \ge 2$ inner loop を
 `par_chunks_mut` で chunk 分割し, 各 chunk 内で SIMD kernel を呼ぶ
-2 段並列. `apply_h_kinema` (matvec) は #62 で既に rayon 並列化済なので,
+2 段並列. `apply_h` (matvec) は #62 で既に rayon 並列化済なので,
 これで Chebyshev 経路の non-matvec hot loop もスケールする
 (64 thread で parallel efficiency 27% → 44%).
 

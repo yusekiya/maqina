@@ -1,4 +1,4 @@
-"""SIMD scaling bench: `apply_h_kinema` per-pass time の SIMD ON/OFF 比較.
+"""SIMD scaling bench: `apply_h` per-pass time の SIMD ON/OFF 比較.
 
 issue #63 (Phase 6 C2) の acceptance「N=18, i=0,1,2 集中時の per-pass time
 **>=1.5× 改善** (cpu_count=64 Linux サーバーで, BLAS thread=1)」を計測する
@@ -9,7 +9,7 @@ parent/child 自動切替はせず, **操作員が異なる build で 2 回 meas
 
 ## 計測対象
 
-`_rust.apply_h_kinema_py` の per-call wall time を以下 2 設定で取る:
+`_rust.apply_h_py` の per-call wall time を以下 2 設定で取る:
 
 - ``all-i`` (h_x = all-ones): 全 i bit-flip pass が寄与. 本番ホットパス
   (Lanczos / CFM4:2) を最も忠実に再現する.
@@ -122,12 +122,12 @@ SIMD_TARGET_I_VALUES = (0, 1, 2)
 
 
 def _measure_apply_h(n: int, h_x: np.ndarray, repeat: int, warmup: int) -> list[float]:
-    """`_rust.apply_h_kinema_into_py` の wall time を repeat 回計測して返す.
+    """`_rust.apply_h_into_py` の wall time を repeat 回計測して返す.
 
     warmup 回数だけ捨てた後, repeat 回の wall time を秒単位で返す.
 
     in-place 版を使い ``y_out`` を warmup 前に 1 回 alloc して再利用する.
-    旧 ``apply_h_kinema_py`` だと毎 call で ``dim · 16 B`` の新規 alloc/copy
+    旧 ``apply_h_py`` だと毎 call で ``dim · 16 B`` の新規 alloc/copy
     が計測域に混入する (issue #79 / #85).
     """
     from maqina import _rust  # pyright: ignore[reportMissingImports]
@@ -144,12 +144,12 @@ def _measure_apply_h(n: int, h_x: np.ndarray, repeat: int, warmup: int) -> list[
     y_out = np.empty(dim, dtype=np.complex128)
 
     for _ in range(warmup):
-        _rust.apply_h_kinema_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
 
     timings: list[float] = []
     for _ in range(repeat):
         t0 = time.perf_counter()
-        _rust.apply_h_kinema_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_into_py(v, y_out, h_x, h_p_diag, a_t, b_t)
         t1 = time.perf_counter()
         timings.append(t1 - t0)
     return timings
@@ -261,11 +261,11 @@ def mode_measure(args: argparse.Namespace) -> int:
         if n < 3:
             print(f"[measure] skip n={n} (n < 3, SIMD i=2 が踏めない)", flush=True)
             continue
-        # apply_h_kinema_py sweep (issue #63 / Phase 6 C2).
+        # apply_h_py sweep (issue #63 / Phase 6 C2).
         for mode in ("all-i", "i012-focus"):
             h_x = _build_h_x(n, mode)
             print(
-                f"[measure] n={n} dim={1 << n} kernel=apply_h_kinema mode={mode}",
+                f"[measure] n={n} dim={1 << n} kernel=apply_h mode={mode}",
                 flush=True,
             )
             timings = _measure_apply_h(n, h_x, repeat=args.repeat, warmup=args.warmup)
@@ -275,7 +275,7 @@ def mode_measure(args: argparse.Namespace) -> int:
                         "label": args.label,
                         "n": n,
                         "dim": 1 << n,
-                        "kernel": "apply_h_kinema",
+                        "kernel": "apply_h",
                         "mode": mode,
                         "trial": trial_idx,
                         "wall_sec": t,
@@ -339,13 +339,13 @@ def _summarize_median(
 ) -> dict[tuple[int, str, str], float]:
     """(n, kernel, mode) ごとの median wall_sec を返す.
 
-    issue #71 で `kernel` 次元を追加 (apply_h_kinema /
+    issue #71 で `kernel` 次元を追加 (apply_h /
     apply_single_mode_axis_i). 旧 JSON (kernel 欠落) は
-    `kernel = "apply_h_kinema"` として扱い後方互換.
+    `kernel = "apply_h"` として扱い後方互換.
     """
     buckets: dict[tuple[int, str, str], list[float]] = {}
     for r in trials:
-        kernel = str(r.get("kernel", "apply_h_kinema"))
+        kernel = str(r.get("kernel", "apply_h"))
         buckets.setdefault((int(r["n"]), kernel, str(r["mode"])), []).append(
             float(r["wall_sec"])
         )
@@ -401,7 +401,7 @@ def mode_compare(args: argparse.Namespace) -> int:
     lines.append("# bench_simd_scaling (Phase 6 C2 / C2.5, issue #63 / #71)")
     lines.append("")
     lines.append(
-        "`apply_h_kinema` (C2) と `apply_single_mode_axis_i` (C2.5) の "
+        "`apply_h` (C2) と `apply_single_mode_axis_i` (C2.5) の "
         "per-pass time を SIMD ON/OFF で比較する."
     )
     lines.append("")
@@ -434,7 +434,7 @@ def mode_compare(args: argparse.Namespace) -> int:
         )
     lines.append("")
     lines.append(
-        "issue #63 acceptance: N=18 `apply_h_kinema` `i012-focus` で "
+        "issue #63 acceptance: N=18 `apply_h` `i012-focus` で "
         "speedup ≥ 1.5× を満たすこと."
     )
     lines.append(

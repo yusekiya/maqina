@@ -383,7 +383,7 @@ def instantaneous_eigenstates(
 
 実装方針:
 
-- `method="lanczos"` (default): Python ループから `_rust.apply_h_kinema_py`
+- `method="lanczos"` (default): Python ループから `_rust.apply_h_py`
   を呼んで Krylov 部分空間 (次元 `m`, default 64) を構築し,
   `_rust.tridiag_eigh_py` (`src/tridiag.rs` の hand-rolled QL を thin-wrap)
   で三重対角の完全固有分解を取って下位 `k` 個の Ritz vector を再構築する。
@@ -391,7 +391,7 @@ def instantaneous_eigenstates(
   ループで組み合わせる方針 (固有値計算は時間発展に比べて頻度が低く
   Python 越境のオーバヘッドは無視できる)。`m` は時間発展用 (`m ≈ 24`) より
   大きめのデフォルト (64) を取り, Ritz 値の収束を担保する。
-- `method="exact"`: 小規模問題 (`n <= 12`) 向け、`_rust.apply_h_kinema_py`
+- `method="exact"`: 小規模問題 (`n <= 12`) 向け、`_rust.apply_h_py`
   を standard basis `e_j` に当てて `H(t)` の列を 1 本ずつ抽出 (Kronecker
   product より重複コードが無くビット規約の取り違いも避けられる) → Python
   側で `numpy.linalg.eigh` を呼ぶ参照経路 (Rust 経由で LAPACK を呼ばない)。

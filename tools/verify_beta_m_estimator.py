@@ -45,7 +45,7 @@ from pathlib import Path
 import numpy as np
 
 # 内部 API (Phase 7 着手前なので production 経路は触らず, raw matvec を直接使う)
-from maqina._rust import apply_h_kinema_py
+from maqina._rust import apply_h_py
 from maqina.initial_states import uniform_superposition
 
 
@@ -76,7 +76,7 @@ def matvec_factory(h_x: np.ndarray, h_p_diag: np.ndarray, a_t: float, b_t: float
     """exp(-i dt H) を Lanczos で近似するための matvec closure."""
 
     def matvec(v: np.ndarray) -> np.ndarray:
-        return apply_h_kinema_py(v, h_x, h_p_diag, a_t, b_t)
+        return apply_h_py(v, h_x, h_p_diag, a_t, b_t)
 
     return matvec
 

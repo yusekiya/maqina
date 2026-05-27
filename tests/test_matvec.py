@@ -1,4 +1,4 @@
-"""``_rust.apply_h_kinema_py`` の Python smoke test.
+"""``_rust.apply_h_py`` の Python smoke test.
 
 Rust 側 ``#[cfg(test)] mod tests`` で nalgebra dense 構築との rel < 1e-13
 一致を網羅的に検証している (``src/matvec.rs``). 本テストは
@@ -16,8 +16,8 @@ import numpy as np
 import pytest
 
 
-def test_apply_h_kinema_py_matches_dense_reference() -> None:
-    """``_rust.apply_h_kinema_py`` の出力が dense 構築 H · v と一致する.
+def test_apply_h_py_matches_dense_reference() -> None:
+    """``_rust.apply_h_py`` の出力が dense 構築 H · v と一致する.
 
     n=3 (dim=8) で固定 seed の擬似乱数を使い, 結果が **relative error
     1e-13 未満** で dense reference と一致することを確認する.
@@ -37,7 +37,7 @@ def test_apply_h_kinema_py_matches_dense_reference() -> None:
     b_t = float(rng.uniform(-1.0, 1.0))
 
     # 被テスト.
-    y = _rust.apply_h_kinema_py(v, h_x, h_p_diag, a_t, b_t)
+    y = _rust.apply_h_py(v, h_x, h_p_diag, a_t, b_t)
 
     # 参照: dense H · v.
     # H_drv = -Σ_i h_x[i] · X_i, X_i は bit i を flip する作用素.
@@ -58,12 +58,12 @@ def test_apply_h_kinema_py_matches_dense_reference() -> None:
     assert y.dtype == np.complex128
 
 
-def test_apply_h_kinema_py_simd_path_smoke_for_i0_i1_i2() -> None:
-    """SIMD bit-flip pass (i=0,1,2) を踏みやすい設定で apply_h_kinema_py が
+def test_apply_h_py_simd_path_smoke_for_i0_i1_i2() -> None:
+    """SIMD bit-flip pass (i=0,1,2) を踏みやすい設定で apply_h_py が
     dense reference と ``rel < 1e-13`` で一致することを確認する (issue #63).
 
     SIMD 経路の有無は build 時の ``simd`` feature で決まる. default build
-    (``__has_simd__ = True``) では Rust 側 ``apply_h_kinema_serial`` /
+    (``__has_simd__ = True``) では Rust 側 ``apply_h_serial`` /
     ``_rayon`` のいずれも i ∈ {0,1,2} について ``simd_kernels::bitflip_iN``
     に dispatch される. SIMD ON のビルドが正しい数値を返すことを Python 越境
     後にも smoke 確認する役割 (Rust 単体テスト
@@ -85,7 +85,7 @@ def test_apply_h_kinema_py_simd_path_smoke_for_i0_i1_i2() -> None:
     a_t = float(rng.uniform(-1.0, 1.0))
     b_t = float(rng.uniform(-1.0, 1.0))
 
-    y = _rust.apply_h_kinema_py(v, h_x, h_p_diag, a_t, b_t)
+    y = _rust.apply_h_py(v, h_x, h_p_diag, a_t, b_t)
 
     # 参照: dense H · v.
     h_drv = np.zeros((dim, dim), dtype=np.complex128)
@@ -97,14 +97,14 @@ def test_apply_h_kinema_py_simd_path_smoke_for_i0_i1_i2() -> None:
     y_expected = h_dense @ v
 
     rel = float(np.linalg.norm(y - y_expected) / max(np.linalg.norm(y_expected), 1.0))
-    assert rel < 1e-13, f"SIMD-path apply_h_kinema_py rel={rel} >= 1e-13"
+    assert rel < 1e-13, f"SIMD-path apply_h_py rel={rel} >= 1e-13"
 
 
-def test_apply_h_kinema_into_py_matches_alloc_variant_bitwise() -> None:
-    """``apply_h_kinema_into_py`` の結果が ``apply_h_kinema_py`` と
+def test_apply_h_into_py_matches_alloc_variant_bitwise() -> None:
+    """``apply_h_into_py`` の結果が ``apply_h_py`` と
     **bit-for-bit** 一致する (issue #85 acceptance).
 
-    両者は内部で同じ ``apply_h_kinema`` を呼ぶので, ``y`` を新規 alloc
+    両者は内部で同じ ``apply_h`` を呼ぶので, ``y`` を新規 alloc
     して返すか caller 提供の buffer に上書きするかが唯一の違い. 演算順序
     は完全に同一なので bit-identical を期待する.
 
@@ -124,10 +124,10 @@ def test_apply_h_kinema_into_py_matches_alloc_variant_bitwise() -> None:
     a_t = float(rng.uniform(-1.0, 1.0))
     b_t = float(rng.uniform(-1.0, 1.0))
 
-    y_alloc = _rust.apply_h_kinema_py(v, h_x, h_p_diag, a_t, b_t)
+    y_alloc = _rust.apply_h_py(v, h_x, h_p_diag, a_t, b_t)
 
     y_inplace = np.empty(dim, dtype=np.complex128)
-    ret = _rust.apply_h_kinema_into_py(v, y_inplace, h_x, h_p_diag, a_t, b_t)
+    ret = _rust.apply_h_into_py(v, y_inplace, h_x, h_p_diag, a_t, b_t)
     assert ret is None  # PyResult<()> は Python では None.
 
     # 演算順序が同じなので bit-identical を期待 (`np.array_equal` は
@@ -142,8 +142,8 @@ def test_apply_h_kinema_into_py_matches_alloc_variant_bitwise() -> None:
     assert y_inplace.dtype == np.complex128
 
 
-def test_apply_h_kinema_into_py_rejects_wrong_shape() -> None:
-    """``apply_h_kinema_into_py`` の境界チェック.
+def test_apply_h_into_py_rejects_wrong_shape() -> None:
+    """``apply_h_into_py`` の境界チェック.
 
     ``y_out`` の長さが ``dim = 2^len(h_x)`` と不一致なら ``ValueError``.
     """
@@ -162,7 +162,7 @@ def test_apply_h_kinema_into_py_rejects_wrong_shape() -> None:
     # 長さ違いの y_out で ValueError を期待.
     y_wrong = np.empty(dim + 1, dtype=np.complex128)
     with pytest.raises(ValueError, match="y_out length"):
-        _rust.apply_h_kinema_into_py(v, y_wrong, h_x, h_p_diag, a_t, b_t)
+        _rust.apply_h_into_py(v, y_wrong, h_x, h_p_diag, a_t, b_t)
 
 
 @pytest.mark.parametrize("i", [0, 1, 2])

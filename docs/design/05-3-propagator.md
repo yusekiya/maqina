@@ -53,7 +53,7 @@ stage 2 :  c_drv = a_low ·A(s_1) + a_high·A(s_2)
            c_diag = a_low ·B(s_1) + a_high·B(s_2)
 ```
 
-ここで `s_i = s(t + c_i·dt)`。Rust 側 `apply_h_kinema` に
+ここで `s_i = s(t + c_i·dt)`。Rust 側 `apply_h` に
 `(c_drv, c_diag)` のスカラー 2 つを渡せば 1 stage の matvec が組める
 (線形結合係数を 1 つに畳み込む経路、§5.2 末尾参照)。Lanczos 2 回 / step、
 LTE ~ O(dt^5)。
@@ -93,7 +93,7 @@ A_half1_1 = α_half1_1 · H_drv + β_half1_1 · H_p_diag      (中点 t + c1·dt
 実装:
 
 - `src/matvec.rs::apply_h_drv` / `apply_h_p_diag`: cache 計算専用の primitive
-  matvec 関数。既存 `apply_h_kinema` の cache-blocked 形 (diag + 全 i
+  matvec 関数。既存 `apply_h` の cache-blocked 形 (diag + 全 i
   bit-flip pass を 1 chunk closure 内で完走) は維持し, 本 primitive は
   Richardson 入口で 1 step 1 回だけ呼ばれる。
 - `src/cfm4.rs::cfm4_step` のシグネチャに `iter0_cache: Option<(&[Complex64],
@@ -102,7 +102,7 @@ A_half1_1 = α_half1_1 · H_drv + β_half1_1 · H_p_diag      (中点 t + c1·dt
   ```
   y = (c_drv_1 · cache_drv + c_diag_1 · cache_diag) / ‖ψ‖
   ```
-  iter 1 以降は v_k が分岐するので従来通り `apply_h_kinema` 経路。
+  iter 1 以降は v_k が分岐するので従来通り `apply_h` 経路。
   Lanczos 内部 API は不変 (matvec closure を 1 個受けるだけ)。
 - full_step stage 1 / half_1 stage 1 に `iter0_cache = Some(...)` を渡し,
   half_2 (入口は `psi_mid` で異なる) と stage 2 (入口は各 stage 1 出口で異なる)
@@ -308,7 +308,7 @@ Phase B 完了直後の直交最適化。`chebyshev_propagate` の k ≥ 2 hot l
 旧実装で 3 つの dim-walk を発生させていた:
 
 ```
-walk 1: scratch := H · phi_curr                      (matvec, apply_h_kinema)
+walk 1: scratch := H · phi_curr                      (matvec, apply_h)
 walk 2: scratch := 2·(scratch - E_c·phi_curr)/R - phi_prev  (scalar)
 walk 3: psi_acc += c_k · scratch                     (scalar)
 ```
@@ -359,7 +359,7 @@ merge / 5-10% で marginal accept / < 5% で 中止. 詳細は `12-release-plan.
 #126 の SIMD + fusion 完了後の直交最適化。`chebyshev_recurrence_fused` は
 single-thread で走っていたため, #124 perf archive で **Chebyshev の parallel
 efficiency が 64 thread で 44% に留まる** (Lanczos の 27% より良いが理想 100%
-には程遠い) ことが判明した。`apply_h_kinema` は #62 で rayon 並列化済だが,
+には程遠い) ことが判明した。`apply_h` は #62 で rayon 並列化済だが,
 Chebyshev 固有の non-matvec hot loop (recurrence scaling + accumulator) が
 serial bottleneck になっている。
 
@@ -371,7 +371,7 @@ serial bottleneck になっている。
       chebyshev_recurrence_fused_scalar (SIMD OFF) を呼ぶ
 ```
 
-chunk_size は `matvec.rs::apply_h_kinema_rayon` と同じ式
+chunk_size は `matvec.rs::apply_h_rayon` と同じ式
 `(dim / (nth * 4)).clamp(RAYON_CHUNK_MIN_CHEB, RAYON_CHUNK_MAX_CHEB)` で動的
 決定 (定数は matvec 側と同値 `1 << 6` / `1 << 14` を chebyshev module 内に
 localize)。SIMD kernel の偶数長前提を満たすため chunk_size を 2 倍数に丸める
@@ -422,7 +422,7 @@ U(dt) ≈ exp(-i dt H_p / 2) · exp(-i dt H_drv) · exp(-i dt H_p / 2)
 各 `R_i(dt) = cos(A·h_x_i·dt)·I + i·sin(A·h_x_i·dt)·X_i` は §5.1.2 の
 `apply_single_mode_axis_i` で 1 軸 in-place 適用。`H_drv = -Σ h_x_i X_i`
 の負符号は `exp(-i·dt·H_drv) = Π_i exp(+i·a·h_x_i·dt·X_i)` で打ち消されて
-`R_i` の `θ = +a·h_x_i·dt` に乗る (`apply_h_kinema` の
+`R_i` の `θ = +a·h_x_i·dt` に乗る (`apply_h` の
 `coeff = -a_t·h_x_i` と同 convention)。
 
 per-step コスト: `(N + 1) · dim` 要素アクセス (matvec の 1 pass 相当が
