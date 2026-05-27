@@ -103,18 +103,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RESULTS_ROOT = REPO_ROOT / "benchmarks" / "results"
 
 # サポートする method 一覧. ``QuantumAnnealer.run`` の Literal 型ヒントと
-# 揃える. Phase 4 C3 で ``cfm4_adaptive_richardson_krylov`` 追加.
+# 揃える. Phase 4 C3 で ``cfm4_adaptive_richardson_krylov`` 追加. Phase B
+# (#122) で ``cfm4_adaptive_richardson_chebyshev`` 追加.
 _VALID_METHODS: tuple[str, ...] = (
     "m2",
     "trotter",
     "trotter_suzuki4",
     "cfm4",
     "cfm4_adaptive_richardson_krylov",
+    "cfm4_adaptive_richardson_chebyshev",
 )
 
 # adaptive 経路の集合. n_steps を driver に渡さず, ``atol`` / ``dt_init``
 # を渡す経路を判別するための小ヘルパ.
-_ADAPTIVE_METHODS: frozenset[str] = frozenset({"cfm4_adaptive_richardson_krylov"})
+_ADAPTIVE_METHODS: frozenset[str] = frozenset(
+    {
+        "cfm4_adaptive_richardson_krylov",
+        "cfm4_adaptive_richardson_chebyshev",
+    }
+)
 
 # adaptive 経路で final state を比較する参照解の生成パラメータ.
 # 同じ ``T`` / ``schedule`` で fixed CFM4:2 を多 step 走らせた終端 ψ を
