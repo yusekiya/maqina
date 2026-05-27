@@ -386,6 +386,184 @@ mod simd_kernels {
     }
 
     // ====================================================================
+    // bitflip_iN_complex: bit-flip pass の **complex 係数** 版 (Phase C / issue #142).
+    //
+    // Hamiltonian `H(t) = Σ_i [g_x_i(t) X_i + g_y_i(t) Y_i + g_z_i(t) Z_i] +
+    // b(t) · H_p_diag` の per-site, per-axis 時間依存場拡張を支える.
+    //
+    // ペア `(k_lo, k_hi)` (`bit_i(k_lo) = 0`, `k_hi = k_lo | mask`) に対し,
+    // 複素係数 `c = g_x + i·g_y` を畳んで:
+    //
+    //   y[k_lo] += conj(c) · v[k_hi]
+    //   y[k_hi] +=     c  · v[k_lo]
+    //
+    // を加算する. Hermitian 構造 (`(g_x X + g_y Y)` が複素対称) から下半行は
+    // `conj(c)` 倍, 上半行は `c` 倍になる. `c.im == 0` の特化は呼出側 (`apply_h_general`)
+    // で既存 real-only kernel に dispatch するため, ここでは `c.im != 0` 経路
+    // に集中する.
+    //
+    // # SIMD 設計
+    //
+    // 既存 `bitflip_iN` (real) と同じ block layout を維持 (i=0: 2 Complex64 /
+    // block, i=1: 4, i=2: 8). 各 lane に `c.re · v_partner` と `c.im · v_partner_swap_reim`
+    // を 2 FMA で合成する.
+    //
+    // lo / hi の更新で `c.im` の符号パターンが反転する点に注意:
+    //
+    // | i | lo 側 c.im 符号  | hi 側 c.im 符号 |
+    // |---|---|---|
+    // | 0 | (lane 0,1) [+, -]; lo/hi が同一 f64x4 内 | (lane 2,3) [-, +] |
+    // | 1 | [+, -, +, -] | [-, +, -, +] |
+    // | 2 | [+, -, +, -] (× 2 f64x4) | [-, +, -, +] (× 2 f64x4) |
+    //
+    // c.re は lo/hi で同符号で, 単一 `f64x4::splat(c.re)` を使い回せる.
+    //
+    // # 数値同一性
+    //
+    // SIMD 経路と scalar 経路の演算は各 `y[k]` への
+    // `y[k] + Re/Im(c · v_partner[k]) + Re/Im(c.im · ...)` で同一の出力を生成する.
+    // FMA 折り畳みと lane の演算順序差で ulp 差が出うるため,
+    // `simd_bitflip_complex_kernels_match_scalar_fuzz_100iter` で `rel < 1e-13`
+    // を契約とする.
+    // ====================================================================
+
+    /// `bitflip_iN_complex` 共通の `(c_re_v, c_im_signed_for_lo, c_im_signed_for_hi)`
+    /// を組み立てるヘルパ.
+    ///
+    /// `i ≥ 1` 用の符号パターンを返す (lo: `[+c.im, -c.im, +c.im, -c.im]`,
+    /// hi: `[-c.im, +c.im, -c.im, +c.im]`). i=0 専用の `[+c.im, -c.im, -c.im, +c.im]`
+    /// は `bitflip_i0_complex` 内で別途構築する.
+    #[inline]
+    fn unpack_c_broadcast_i_ge1(c: Complex64) -> (f64x4, f64x4, f64x4) {
+        let c_re_v = f64x4::splat(c.re);
+        let c_im_lo = f64x4::new([c.im, -c.im, c.im, -c.im]);
+        let c_im_hi = f64x4::new([-c.im, c.im, -c.im, c.im]);
+        (c_re_v, c_im_lo, c_im_hi)
+    }
+
+    /// `y[k_lo] += conj(c) · v[k_hi]; y[k_hi] += c · v[k_lo]` を i=0 (mask=1,
+    /// block=2 Complex64) に対し SIMD 適用する.
+    ///
+    /// `len = v.len() = y.len()` は `>= 2` かつ `2` の倍数であること. 1 SIMD iter
+    /// で 1 block (= 2 Complex64 = 4 f64 = 1 × f64x4) を処理する.
+    ///
+    /// lo / hi が同一 f64x4 内に収まるため, lane 0,1 が lo, lane 2,3 が hi.
+    /// c.im の符号パターンは `[+c.im, -c.im, -c.im, +c.im]` (lo は conj(c), hi は c).
+    #[inline]
+    pub(super) fn bitflip_i0_complex(v: &[Complex64], y: &mut [Complex64], c: Complex64) {
+        debug_assert_eq!(v.len(), y.len(), "v and y must have equal length");
+        debug_assert!(v.len() >= 2, "len must be >= 2 (i=0 block)");
+        debug_assert_eq!(v.len() % 2, 0, "len must be a multiple of 2 (i=0 block)");
+
+        let c_re_v = f64x4::splat(c.re);
+        let c_im_signed = f64x4::new([c.im, -c.im, -c.im, c.im]);
+        let v_f64 = as_f64_slice(v);
+        let y_f64 = as_f64_slice_mut(y);
+        for (v_chunk, y_chunk) in v_f64.chunks_exact(4).zip(y_f64.chunks_exact_mut(4)) {
+            // SAFETY: chunks_exact(4) は各 chunk の長さを 4 (= 32 bytes f64) と
+            // 保証する.
+            unsafe {
+                // v_raw = [v_lo.re, v_lo.im, v_hi.re, v_hi.im].
+                let v_raw = load_f64x4_unaligned(v_chunk.as_ptr());
+                // 128-bit lane swap: [v_lo.re, v_lo.im, v_hi.re, v_hi.im] ->
+                // [v_hi.re, v_hi.im, v_lo.re, v_lo.im].
+                let arr = v_raw.to_array();
+                let v_partner = f64x4::new([arr[2], arr[3], arr[0], arr[1]]);
+                // re/im swap within each Complex of v_partner.
+                let p_arr = v_partner.to_array();
+                let v_partner_swap = f64x4::new([p_arr[1], p_arr[0], p_arr[3], p_arr[2]]);
+                let y_load = load_f64x4_unaligned(y_chunk.as_ptr());
+                // y += c.re · v_partner + c_im_signed · v_partner_swap (2 FMA).
+                let t1 = c_re_v.mul_add(v_partner, y_load);
+                let new_y = c_im_signed.mul_add(v_partner_swap, t1);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr(), new_y);
+            }
+        }
+    }
+
+    /// 同上を i=1 (mask=2, block=4 Complex64 = 8 f64 = 2 × f64x4) に対し適用.
+    ///
+    /// `len = v.len() = y.len()` は `>= 4` かつ `4` の倍数. 1 SIMD iter で
+    /// 1 block を処理し, lo half (= 1 × f64x4) と hi half (= 1 × f64x4) を
+    /// それぞれ `[+,-,+,-]` / `[-,+,-,+]` の c.im 符号で更新する.
+    #[inline]
+    pub(super) fn bitflip_i1_complex(v: &[Complex64], y: &mut [Complex64], c: Complex64) {
+        debug_assert_eq!(v.len(), y.len(), "v and y must have equal length");
+        debug_assert!(v.len() >= 4, "len must be >= 4 (i=1 block)");
+        debug_assert_eq!(v.len() % 4, 0, "len must be a multiple of 4 (i=1 block)");
+
+        let (c_re_v, c_im_lo, c_im_hi) = unpack_c_broadcast_i_ge1(c);
+        let v_f64 = as_f64_slice(v);
+        let y_f64 = as_f64_slice_mut(y);
+        for (v_chunk, y_chunk) in v_f64.chunks_exact(8).zip(y_f64.chunks_exact_mut(8)) {
+            // SAFETY: chunks_exact(8).
+            unsafe {
+                let v_lo = load_f64x4_unaligned(v_chunk.as_ptr());
+                let v_hi = load_f64x4_unaligned(v_chunk.as_ptr().add(4));
+                let v_lo_swap = swap_reim(v_lo);
+                let v_hi_swap = swap_reim(v_hi);
+                let y_lo_load = load_f64x4_unaligned(y_chunk.as_ptr());
+                let y_hi_load = load_f64x4_unaligned(y_chunk.as_ptr().add(4));
+                // y_lo += conj(c) · v_hi.
+                let t_lo = c_re_v.mul_add(v_hi, y_lo_load);
+                let new_lo = c_im_lo.mul_add(v_hi_swap, t_lo);
+                // y_hi += c · v_lo.
+                let t_hi = c_re_v.mul_add(v_lo, y_hi_load);
+                let new_hi = c_im_hi.mul_add(v_lo_swap, t_hi);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr(), new_lo);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr().add(4), new_hi);
+            }
+        }
+    }
+
+    /// 同上を i=2 (mask=4, block=8 Complex64 = 16 f64 = 4 × f64x4) に対し適用.
+    ///
+    /// `len = v.len() = y.len()` は `>= 8` かつ `8` の倍数. 1 SIMD iter で
+    /// 1 block を処理し, lo half (= 2 × f64x4) と hi half (= 2 × f64x4) を
+    /// それぞれ 4 FMA で更新する.
+    #[inline]
+    pub(super) fn bitflip_i2_complex(v: &[Complex64], y: &mut [Complex64], c: Complex64) {
+        debug_assert_eq!(v.len(), y.len(), "v and y must have equal length");
+        debug_assert!(v.len() >= 8, "len must be >= 8 (i=2 block)");
+        debug_assert_eq!(v.len() % 8, 0, "len must be a multiple of 8 (i=2 block)");
+
+        let (c_re_v, c_im_lo, c_im_hi) = unpack_c_broadcast_i_ge1(c);
+        let v_f64 = as_f64_slice(v);
+        let y_f64 = as_f64_slice_mut(y);
+        for (v_chunk, y_chunk) in v_f64.chunks_exact(16).zip(y_f64.chunks_exact_mut(16)) {
+            // SAFETY: chunks_exact(16).
+            unsafe {
+                let v_lo_a = load_f64x4_unaligned(v_chunk.as_ptr());
+                let v_lo_b = load_f64x4_unaligned(v_chunk.as_ptr().add(4));
+                let v_hi_a = load_f64x4_unaligned(v_chunk.as_ptr().add(8));
+                let v_hi_b = load_f64x4_unaligned(v_chunk.as_ptr().add(12));
+                let v_lo_a_swap = swap_reim(v_lo_a);
+                let v_lo_b_swap = swap_reim(v_lo_b);
+                let v_hi_a_swap = swap_reim(v_hi_a);
+                let v_hi_b_swap = swap_reim(v_hi_b);
+                let y_lo_a_load = load_f64x4_unaligned(y_chunk.as_ptr());
+                let y_lo_b_load = load_f64x4_unaligned(y_chunk.as_ptr().add(4));
+                let y_hi_a_load = load_f64x4_unaligned(y_chunk.as_ptr().add(8));
+                let y_hi_b_load = load_f64x4_unaligned(y_chunk.as_ptr().add(12));
+                // y_lo += conj(c) · v_hi (2 × f64x4).
+                let t_lo_a = c_re_v.mul_add(v_hi_a, y_lo_a_load);
+                let new_lo_a = c_im_lo.mul_add(v_hi_a_swap, t_lo_a);
+                let t_lo_b = c_re_v.mul_add(v_hi_b, y_lo_b_load);
+                let new_lo_b = c_im_lo.mul_add(v_hi_b_swap, t_lo_b);
+                // y_hi += c · v_lo (2 × f64x4).
+                let t_hi_a = c_re_v.mul_add(v_lo_a, y_hi_a_load);
+                let new_hi_a = c_im_hi.mul_add(v_lo_a_swap, t_hi_a);
+                let t_hi_b = c_re_v.mul_add(v_lo_b, y_hi_b_load);
+                let new_hi_b = c_im_hi.mul_add(v_lo_b_swap, t_hi_b);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr(), new_lo_a);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr().add(4), new_lo_b);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr().add(8), new_hi_a);
+                store_f64x4_unaligned(y_chunk.as_mut_ptr().add(12), new_hi_b);
+            }
+        }
+    }
+
+    // ====================================================================
     // single_mode_iN: 2×2 complex matmul を broadcast + swizzle で SIMD 化.
     //
     // `apply_single_mode_axis_i` の規約: `(psi[lo], psi[hi]) = (a, b)` に
@@ -662,33 +840,23 @@ pub fn apply_h(
     b_t: f64,
     n: usize,
 ) {
-    let dim = 1usize << n;
-    assert_eq!(v.len(), dim, "v must have length 2^n");
-    assert_eq!(y.len(), dim, "y must have length 2^n");
-    assert_eq!(h_x.len(), n, "h_x must have length n");
-    assert_eq!(h_p_diag.len(), dim, "h_p_diag must have length 2^n");
-
-    #[cfg(feature = "rayon")]
-    {
-        if dim < MIN_RAYON_DIM {
-            apply_h_serial(v, y, h_x, h_p_diag, a_t, b_t, n);
-        } else {
-            apply_h_rayon(v, y, h_x, h_p_diag, a_t, b_t, n);
-        }
-    }
-    #[cfg(not(feature = "rayon"))]
-    {
-        apply_h_serial(v, y, h_x, h_p_diag, a_t, b_t, n);
-    }
+    // X-only shim: `g_x[i] = -a_t · h_x[i]` を構築して `apply_h_general` に
+    // 委譲する (Phase C / issue #142). `g_y = None, gz_eff_diag = None` のため
+    // apply_h_general 内部の per-axis 分岐は **既存 real-only fast path** に落ち,
+    // 旧 apply_h と同等の演算経路を踏む (byte-identical を契約する).
+    //
+    // g_x_buf の `Vec` alloc は per-call で発生するが, n ≤ 30 程度の小サイズで
+    // matvec 本体 (`dim · O(N)`) のコスト比は無視可能.
+    let g_x_buf: Vec<f64> = h_x.iter().map(|h| -a_t * h).collect();
+    apply_h_general(v, y, &g_x_buf, None, h_p_diag, b_t, None, n);
 }
 
-/// `apply_h` の scalar 単スレッド実装. `feature = "rayon"` OFF
-/// ビルドおよび `#[cfg(test)]` 経路から rayon 経路との数値同一性比較に使う.
+/// `apply_h` の scalar 単スレッド実装 (テスト経路の `#[cfg(test)]` 直接呼出用).
 ///
-/// `feature = "simd"` (default ON) では bit-flip pass のうち i ∈ {0, 1, 2}
-/// (stride 1/2/4 連続アクセス領域) を [`simd_kernels`] の f64x4 特化版に
-/// dispatch する (Phase 6 C2, issue #63). 残りの i ≥ 3 は scalar inner loop の
-/// まま. `feature = "simd"` OFF では従来の scalar pass を全 i で使う.
+/// Phase C / issue #142 で `apply_h_general_serial` に内部実装を統合済み. 本関数は
+/// `g_x[i] = -a_t · h_x[i]` を構築して同関数に **`g_y = None, gz_eff_diag = None`**
+/// で委譲する thin shim. rayon ON/OFF 両ビルドで意味的に変わらず, 既存テスト
+/// (`apply_h_rayon_matches_serial` 等) がそのまま動く.
 fn apply_h_serial(
     v: &[Complex64],
     y: &mut [Complex64],
@@ -698,74 +866,16 @@ fn apply_h_serial(
     b_t: f64,
     n: usize,
 ) {
-    let dim = 1usize << n;
-    // 対角部分: y[k] = b_t · H_p_diag[k] · v[k] (上書き).
-    for k in 0..dim {
-        y[k] = Complex64::new(b_t * h_p_diag[k], 0.0) * v[k];
-    }
-    // bit-flip 部分: y[k] += -a_t · h_x[i] · v[k ^ mask] を i について accumulate.
-    for (i, &h_x_i) in h_x.iter().enumerate() {
-        let coeff = -a_t * h_x_i;
-        // coeff == 0 (a_t == 0 もしくは h_x[i] == 0) のときは数値的に no-op
-        // (y[k] += 0 * v[k ^ mask] = y[k]) なので i pass 全体をスキップする.
-        // sparse h_x (`bench_simd_scaling.py` の i012-focus 等) で支配的に効く
-        // 最適化. `coeff == 0.0` は IEEE 754 で +0 / -0 両方に対し true.
-        if coeff == 0.0 {
-            continue;
-        }
-        let mask = 1usize << i;
-
-        // SIMD dispatch for i ∈ {0, 1, 2}.
-        #[cfg(feature = "simd")]
-        {
-            match i {
-                0 => {
-                    simd_kernels::bitflip_i0(v, y, coeff);
-                    continue;
-                }
-                1 => {
-                    simd_kernels::bitflip_i1(v, y, coeff);
-                    continue;
-                }
-                2 => {
-                    simd_kernels::bitflip_i2(v, y, coeff);
-                    continue;
-                }
-                _ => {} // i ≥ 3: scalar inner loop 経路にフォールスルー.
-            }
-        }
-
-        // Scalar inner loop: i ≥ 3 (mask ≥ 8) もしくは `simd` feature OFF.
-        for k in 0..dim {
-            y[k] += Complex64::new(coeff, 0.0) * v[k ^ mask];
-        }
-    }
+    let g_x_buf: Vec<f64> = h_x.iter().map(|h| -a_t * h).collect();
+    apply_h_general_serial(v, y, &g_x_buf, None, h_p_diag, b_t, None, n);
 }
 
-/// `apply_h` の rayon 並列実装. `y` を `par_chunks_mut(chunk_size)`
-/// で分割し, 各 chunk closure 内で diag pass → 全 i bit-flip pass を完走する.
+/// `apply_h` の rayon 並列実装 (テスト経路の `#[cfg(test)]` 直接呼出用).
 ///
-/// # 並列化スキーム (cache-blocked 形)
-///
-/// chunk 単位の closure に diag + 全 i を **fuse** することで:
-///
-/// 1. `y_chunk` (~`chunk_size`要素) が closure 実行中 L1 cache resident に
-///    保たれ, `(n+1)` 回の touch を re-load なしで処理できる.
-/// 2. rayon barrier が **per-call 1 個** で済む (i ごとに par section を
-///    張る形だと `(n+1)` 個入る). dim が小さい matvec を Lanczos の各
-///    step で繰り返す呼出パターンに有利.
-/// 3. 後段の SIMD (Phase 6 C2) は内側 `li` loop に, cache block-fusion
-///    (Phase 6 C3) は同 closure 内 i loop に直接重ねられる.
-///
-/// `v[k ^ mask]` の読み込みは chunk 境界を跨ぐことがある (mask > chunk_size)
-/// が `v` は read-only で race-free. 各 `y[k]` への書き込みは disjoint な
-/// chunk 内に閉じる.
-///
-/// # チャンクサイズ
-///
-/// `current_num_threads() * 4` 個のチャンクを目標に `dim / (nth*4)` を取り,
-/// [`RAYON_CHUNK_MIN`] (closure overhead 償却) と [`RAYON_CHUNK_MAX`]
-/// (L2 cache 上限) で clamp する.
+/// Phase C / issue #142 で `apply_h_general_rayon` に内部実装を統合済み. 本関数は
+/// `g_x[i] = -a_t · h_x[i]` を構築して同関数に **`g_y = None, gz_eff_diag = None`**
+/// で委譲する thin shim. 既存 fuzz テスト (`apply_h_rayon_matches_serial`,
+/// `apply_h_rayon_determinism_8thread_100iter` 等) がそのまま動く.
 #[cfg(feature = "rayon")]
 fn apply_h_rayon(
     v: &[Complex64],
@@ -776,16 +886,221 @@ fn apply_h_rayon(
     b_t: f64,
     n: usize,
 ) {
+    let g_x_buf: Vec<f64> = h_x.iter().map(|h| -a_t * h).collect();
+    apply_h_general_rayon(v, y, &g_x_buf, None, h_p_diag, b_t, None, n);
+}
+
+/// per-site, per-axis 時間依存場をサポートする一般 matvec (Phase C / issue #142).
+///
+/// Hamiltonian
+///
+/// ```text
+/// H(t) = Σ_i [g_x_i(t) X_i + g_y_i(t) Y_i + g_z_i(t) Z_i] + b(t) · H_p_diag
+/// ```
+///
+/// の `y = H(t) · v` を 1 回 apply する additive matvec. 既存 [`apply_h`] は本関数
+/// に `(g_x = -a_t · h_x, g_y = None, c_b = b_t, gz_eff_diag = None)` を渡す
+/// shim として実装される (X-only specialized 経路は `Option`-based skip で
+/// 既存 real-only SIMD/rayon kernel に dispatch する).
+///
+/// # 入出力
+/// - `v` (length `2^n`), `y` (length `2^n`): 入力 / 出力. alias 禁止.
+/// - `g_x` (length `n`): X 軸 per-site 係数. `c_i = g_x[i] + i·g_y[i]` の実部.
+/// - `g_y` (`None` または length `n`): Y 軸 per-site 係数. `None` または `g_y[i] == 0.0`
+///   の axis では実数 coeff `c_i = g_x[i]` の **既存 real-only kernel** に dispatch
+///   される (旧 API perf 回帰なし; issue #142 Risk #3).
+/// - `h_p_diag` (length `2^n`): Z 基底での H_problem 対角ベクトル (`IsingProblem`
+///   構築時に固定).
+/// - `c_b`: H_p_diag に掛けるスカラ係数 (= `cB_stage` in issue #142).
+/// - `gz_eff_diag` (`None` または length `2^n`): Z 場の per-stage 対角寄与
+///   `Σ_i g_z_i · σ_z_i(k)` を呼出側で precompute 済の値. `None` のときは加算項
+///   が完全に skip され, 対角 pass は既存 `apply_h` と byte-identical になる.
+/// - `n`: サイト数.
+///
+/// # アルゴリズム
+/// 1. 対角部分: `y[k] = (c_b · h_p_diag[k] + opt_gz(k)) · v[k]` を全 `k` に上書き.
+///    `gz_eff_diag = None` のとき加算項は 0 として完全に消える (1 dim walk).
+/// 2. bit-flip 部分: 各サイト `i` について:
+///    - `c_x = g_x[i]`, `c_y = g_y.map(|gy| gy[i]).unwrap_or(0.0)`.
+///    - `c_x == 0.0 && c_y == 0.0` なら i pass 全体を skip (sparse field 最適化).
+///    - `c_y == 0.0` のとき: 既存 real-only kernel に dispatch
+///      (`y[k] += c_x · v[k ^ mask]`).
+///    - `c_y != 0.0` のとき: complex-coeff kernel に dispatch
+///      (`y[k_lo] += conj(c) · v[k_hi]`, `y[k_hi] += c · v[k_lo]`).
+///
+/// per-axis 分岐は **axis loop の外** に置く (inner loop 内分岐は branch predictor
+/// stall を招く; issue #142 Risk #2).
+///
+/// # 実装
+/// `feature = "rayon"` (default ON) では [`apply_h`] と同じ `dim >= MIN_RAYON_DIM`
+/// 閾値 dispatch で [`apply_h_general_rayon`] / [`apply_h_general_serial`] を切替.
+/// `feature = "simd"` (default ON) では axis i ∈ {0, 1, 2} で:
+/// - 実係数 (c_y = 0): 既存 `simd_kernels::bitflip_iN` (Phase 6 C2 / issue #63).
+/// - 複素係数 (c_y ≠ 0): 新規 `simd_kernels::bitflip_iN_complex` (Phase C / issue #142).
+///
+/// # Panics
+/// - `v.len() != 1 << n`, `y.len() != 1 << n`
+/// - `g_x.len() != n`, `g_y.map(|gy| gy.len()) != Some(n)` (Some の場合)
+/// - `h_p_diag.len() != 1 << n`
+/// - `gz_eff_diag.map(|gz| gz.len()) != Some(1 << n)` (Some の場合)
+#[allow(clippy::too_many_arguments)]
+pub fn apply_h_general(
+    v: &[Complex64],
+    y: &mut [Complex64],
+    g_x: &[f64],
+    g_y: Option<&[f64]>,
+    h_p_diag: &[f64],
+    c_b: f64,
+    gz_eff_diag: Option<&[f64]>,
+    n: usize,
+) {
+    let dim = 1usize << n;
+    assert_eq!(v.len(), dim, "v must have length 2^n");
+    assert_eq!(y.len(), dim, "y must have length 2^n");
+    assert_eq!(g_x.len(), n, "g_x must have length n");
+    if let Some(gy) = g_y {
+        assert_eq!(gy.len(), n, "g_y must have length n");
+    }
+    assert_eq!(h_p_diag.len(), dim, "h_p_diag must have length 2^n");
+    if let Some(gz) = gz_eff_diag {
+        assert_eq!(gz.len(), dim, "gz_eff_diag must have length 2^n");
+    }
+
+    #[cfg(feature = "rayon")]
+    {
+        if dim < MIN_RAYON_DIM {
+            apply_h_general_serial(v, y, g_x, g_y, h_p_diag, c_b, gz_eff_diag, n);
+        } else {
+            apply_h_general_rayon(v, y, g_x, g_y, h_p_diag, c_b, gz_eff_diag, n);
+        }
+    }
+    #[cfg(not(feature = "rayon"))]
+    {
+        apply_h_general_serial(v, y, g_x, g_y, h_p_diag, c_b, gz_eff_diag, n);
+    }
+}
+
+/// [`apply_h_general`] の scalar 単スレッド実装. SIMD dispatch + scalar fallback の
+/// 二段構成.
+#[allow(clippy::too_many_arguments)]
+fn apply_h_general_serial(
+    v: &[Complex64],
+    y: &mut [Complex64],
+    g_x: &[f64],
+    g_y: Option<&[f64]>,
+    h_p_diag: &[f64],
+    c_b: f64,
+    gz_eff_diag: Option<&[f64]>,
+    n: usize,
+) {
+    let dim = 1usize << n;
+    // 対角 pass. gz_eff_diag = None のときは既存 `apply_h` と byte-identical.
+    match gz_eff_diag {
+        Some(gz) => {
+            for k in 0..dim {
+                y[k] = Complex64::new(c_b * h_p_diag[k] + gz[k], 0.0) * v[k];
+            }
+        }
+        None => {
+            for k in 0..dim {
+                y[k] = Complex64::new(c_b * h_p_diag[k], 0.0) * v[k];
+            }
+        }
+    }
+    // bit-flip pass.
+    for i in 0..n {
+        let c_x = g_x[i];
+        let c_y = g_y.map(|gy| gy[i]).unwrap_or(0.0);
+        // sparse 最適化: 両軸 0 なら no-op.
+        if c_x == 0.0 && c_y == 0.0 {
+            continue;
+        }
+        let mask = 1usize << i;
+        if c_y == 0.0 {
+            // 実係数 fast-path. 既存 SIMD / scalar kernel に dispatch.
+            #[cfg(feature = "simd")]
+            {
+                match i {
+                    0 => {
+                        simd_kernels::bitflip_i0(v, y, c_x);
+                        continue;
+                    }
+                    1 => {
+                        simd_kernels::bitflip_i1(v, y, c_x);
+                        continue;
+                    }
+                    2 => {
+                        simd_kernels::bitflip_i2(v, y, c_x);
+                        continue;
+                    }
+                    _ => {} // i ≥ 3 は scalar inner loop.
+                }
+            }
+            for k in 0..dim {
+                y[k] += Complex64::new(c_x, 0.0) * v[k ^ mask];
+            }
+        } else {
+            // 複素係数経路. y[k_lo] += conj(c) · v[k_hi]; y[k_hi] += c · v[k_lo].
+            let c = Complex64::new(c_x, c_y);
+            #[cfg(feature = "simd")]
+            {
+                match i {
+                    0 => {
+                        simd_kernels::bitflip_i0_complex(v, y, c);
+                        continue;
+                    }
+                    1 => {
+                        simd_kernels::bitflip_i1_complex(v, y, c);
+                        continue;
+                    }
+                    2 => {
+                        simd_kernels::bitflip_i2_complex(v, y, c);
+                        continue;
+                    }
+                    _ => {} // i ≥ 3 は scalar inner loop.
+                }
+            }
+            // Scalar complex inner loop. block-step で k_lo を取り pair update する
+            // (`if k & mask != 0 { continue; }` の分岐スキップを避ける形).
+            let c_conj = c.conj();
+            let block = 2 * mask;
+            for base in (0..dim).step_by(block) {
+                for offset in 0..mask {
+                    let k_lo = base + offset;
+                    let k_hi = k_lo + mask;
+                    let v_lo = v[k_lo];
+                    let v_hi = v[k_hi];
+                    y[k_lo] += c_conj * v_hi;
+                    y[k_hi] += c * v_lo;
+                }
+            }
+        }
+    }
+}
+
+/// [`apply_h_general`] の rayon 並列実装. 既存 [`apply_h_rayon`] と同じ
+/// cache-blocked 形 (chunk 内で diag + 全 i bit-flip を完走). 各 axis で real-only /
+/// complex-coeff の dispatch を持つ.
+///
+/// `feature = "simd"` ON では chunk_size を [`SIMD_BLOCK_MAX`] (=8 Complex64) の
+/// 倍数に丸めるのも既存 path と同じ. complex SIMD kernel
+/// (`bitflip_iN_complex`) も real kernel と同じ block-aligned 前提を持つので
+/// chunk_size はそのまま使える.
+#[cfg(feature = "rayon")]
+#[allow(clippy::too_many_arguments)]
+fn apply_h_general_rayon(
+    v: &[Complex64],
+    y: &mut [Complex64],
+    g_x: &[f64],
+    g_y: Option<&[f64]>,
+    h_p_diag: &[f64],
+    c_b: f64,
+    gz_eff_diag: Option<&[f64]>,
+    n: usize,
+) {
     let dim = 1usize << n;
     let nth = rayon::current_num_threads().max(1);
     let chunk_size = (dim / (nth * 4)).clamp(RAYON_CHUNK_MIN, RAYON_CHUNK_MAX);
-
-    // `feature = "simd"` ON では SIMD kernel が block-aligned 入力を前提とする
-    // ため, chunk_size を SIMD_BLOCK_MAX (=8 Complex64) の倍数に丸める. これに
-    // より各 chunk start `idx * chunk_size` が SIMD block 境界に揃い, i ∈ {0,1,2}
-    // で chunk-internal な v[k ^ mask] アクセスが SIMD カーネルの前提を満たす.
-    // RAYON_CHUNK_MIN = 64 も SIMD_BLOCK_MAX の倍数なので, 丸めた後でも
-    // chunk_size ≥ MIN が保たれる. SIMD OFF では従来の C1 chunking のまま.
     #[cfg(feature = "simd")]
     let chunk_size = chunk_size - (chunk_size % SIMD_BLOCK_MAX);
 
@@ -794,48 +1109,99 @@ fn apply_h_rayon(
         .for_each(|(idx, y_chunk)| {
             let base = idx * chunk_size;
             let chunk_len = y_chunk.len();
-            // 対角 pass: y_chunk[li] = b_t · H_p[k] · v[k].
-            for (li, y_k) in y_chunk.iter_mut().enumerate() {
-                let k = base + li;
-                *y_k = Complex64::new(b_t * h_p_diag[k], 0.0) * v[k];
+            // 対角 pass.
+            match gz_eff_diag {
+                Some(gz) => {
+                    for (li, y_k) in y_chunk.iter_mut().enumerate() {
+                        let k = base + li;
+                        *y_k = Complex64::new(c_b * h_p_diag[k] + gz[k], 0.0) * v[k];
+                    }
+                }
+                None => {
+                    for (li, y_k) in y_chunk.iter_mut().enumerate() {
+                        let k = base + li;
+                        *y_k = Complex64::new(c_b * h_p_diag[k], 0.0) * v[k];
+                    }
+                }
             }
-            // bit-flip pass: 全 i を同一 chunk 内で完走 (y_chunk が L1 resident).
-            for (i, &h_x_i) in h_x.iter().enumerate() {
-                let coeff = -a_t * h_x_i;
-                // coeff == 0 のときは数値的に no-op なのでスキップ. sparse h_x で
-                // 支配的に効く最適化 (serial path と同じ; 詳細はそちらコメント).
-                if coeff == 0.0 {
+            // bit-flip pass.
+            for i in 0..n {
+                let c_x = g_x[i];
+                let c_y = g_y.map(|gy| gy[i]).unwrap_or(0.0);
+                if c_x == 0.0 && c_y == 0.0 {
                     continue;
                 }
                 let mask = 1usize << i;
-
-                // SIMD dispatch for i ∈ {0, 1, 2}: mask ≤ 4 < SIMD_BLOCK_MAX なので
-                // chunk-internal な v[k ^ mask] (k ∈ [base, base+chunk_len)) が
-                // chunk subslice 内に閉じる. base は SIMD_BLOCK_MAX 倍数で揃って
-                // いるため SIMD kernel の block-aligned 前提も満たす.
-                #[cfg(feature = "simd")]
-                match i {
-                    0 => {
-                        simd_kernels::bitflip_i0(&v[base..base + chunk_len], y_chunk, coeff);
-                        continue;
+                if c_y == 0.0 {
+                    // 実係数 fast-path.
+                    #[cfg(feature = "simd")]
+                    match i {
+                        0 => {
+                            simd_kernels::bitflip_i0(&v[base..base + chunk_len], y_chunk, c_x);
+                            continue;
+                        }
+                        1 => {
+                            simd_kernels::bitflip_i1(&v[base..base + chunk_len], y_chunk, c_x);
+                            continue;
+                        }
+                        2 => {
+                            simd_kernels::bitflip_i2(&v[base..base + chunk_len], y_chunk, c_x);
+                            continue;
+                        }
+                        _ => {}
                     }
-                    1 => {
-                        simd_kernels::bitflip_i1(&v[base..base + chunk_len], y_chunk, coeff);
-                        continue;
+                    for (li, y_k) in y_chunk.iter_mut().enumerate() {
+                        let k = base + li;
+                        *y_k += Complex64::new(c_x, 0.0) * v[k ^ mask];
                     }
-                    2 => {
-                        simd_kernels::bitflip_i2(&v[base..base + chunk_len], y_chunk, coeff);
-                        continue;
+                } else {
+                    // 複素係数経路.
+                    let c = Complex64::new(c_x, c_y);
+                    #[cfg(feature = "simd")]
+                    match i {
+                        0 => {
+                            simd_kernels::bitflip_i0_complex(
+                                &v[base..base + chunk_len],
+                                y_chunk,
+                                c,
+                            );
+                            continue;
+                        }
+                        1 => {
+                            simd_kernels::bitflip_i1_complex(
+                                &v[base..base + chunk_len],
+                                y_chunk,
+                                c,
+                            );
+                            continue;
+                        }
+                        2 => {
+                            simd_kernels::bitflip_i2_complex(
+                                &v[base..base + chunk_len],
+                                y_chunk,
+                                c,
+                            );
+                            continue;
+                        }
+                        _ => {}
                     }
-                    _ => {} // i ≥ 3: scalar inner loop 経路にフォールスルー.
-                }
-
-                // Scalar inner loop: i ≥ 3 (mask ≥ 8) は v[k ^ mask] が chunk 外に
-                // 出ることがあるため full v 参照. `feature = "simd"` OFF では
-                // 全 i がここに来る.
-                for (li, y_k) in y_chunk.iter_mut().enumerate() {
-                    let k = base + li;
-                    *y_k += Complex64::new(coeff, 0.0) * v[k ^ mask];
+                    // Scalar complex inner loop (i ≥ 3, または simd OFF). i ≥ 3 では
+                    // mask ≥ 8 で v[k ^ mask] が chunk 外に出ることもあるので full v 参照.
+                    // chunk_size は SIMD_BLOCK_MAX (=8) 倍数に丸めてあるので, 同一 chunk 内
+                    // の k_lo と k_hi (k_hi = k_lo + mask) はペアで同 thread が処理する
+                    // 範囲を超えない. ここでは確実性のため `(k_lo, k_hi)` ペアではなく
+                    // 全 k を walk して `k & mask == 0` 判定する形にする (chunk 外 v は read).
+                    let c_conj = c.conj();
+                    for (li, y_k) in y_chunk.iter_mut().enumerate() {
+                        let k = base + li;
+                        if k & mask == 0 {
+                            // k = k_lo: y[k_lo] += conj(c) · v[k_hi]
+                            *y_k += c_conj * v[k | mask];
+                        } else {
+                            // k = k_hi: y[k_hi] += c · v[k_lo]
+                            *y_k += c * v[k ^ mask];
+                        }
+                    }
                 }
             }
         });
@@ -2946,5 +3312,329 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ===== apply_h_general (Phase C / issue #142) のテスト =====
+
+    /// 一般 XYZ Hamiltonian の dense 行列を構築する.
+    ///
+    /// `H = Σ_i [g_x_i X_i + g_y_i Y_i + g_z_i Z_i] + c_b · diag(h_p_diag)`
+    /// (Z 場は呼出側で `g_z[i] · σ_z_i(k)` を `gz_eff_diag` に畳んだ形で渡される
+    /// ので, ここでは builder 側で σ_z 展開を行う).
+    fn build_dense_h_xyz(
+        n: usize,
+        g_x: &[f64],
+        g_y: &[f64],
+        g_z: &[f64],
+        h_p_diag: &[f64],
+        c_b: f64,
+    ) -> nalgebra::DMatrix<Complex64> {
+        let dim = 1usize << n;
+        let mut h = nalgebra::DMatrix::<Complex64>::zeros(dim, dim);
+        // Diagonal: c_b · h_p_diag + Σ_i g_z_i · σ_z_i.
+        for k in 0..dim {
+            let mut diag = c_b * h_p_diag[k];
+            for (i, &gz_i) in g_z.iter().enumerate() {
+                let sigma_z = if (k >> i) & 1 == 0 { 1.0 } else { -1.0 };
+                diag += gz_i * sigma_z;
+            }
+            h[(k, k)] = Complex64::new(diag, 0.0);
+        }
+        // Off-diagonal X + Y per axis.
+        // X_i: |k⟩ → |k ⊕ mask⟩ (係数 1)
+        // Y_i: |k⟩ → ±i |k ⊕ mask⟩ (bit_i(k) = 0 で +i, =1 で -i)
+        for i in 0..n {
+            let mask = 1usize << i;
+            let gx = g_x[i];
+            let gy = g_y[i];
+            for k in 0..dim {
+                let k_flip = k ^ mask;
+                // (g_x X)[k_flip, k] += g_x (Hermitian: same).
+                h[(k_flip, k)] += Complex64::new(gx, 0.0);
+                // (g_y Y)[k_flip, k]: bit_i(k) = 0 → +i·g_y, = 1 → -i·g_y.
+                let sign = if (k >> i) & 1 == 0 { 1.0 } else { -1.0 };
+                h[(k_flip, k)] += Complex64::new(0.0, sign * gy);
+            }
+        }
+        h
+    }
+
+    /// `gz_eff_diag` を naive O(N · 2^N) で構築するテスト helper.
+    fn build_gz_eff_diag_naive(g_z: &[f64], n: usize) -> Vec<f64> {
+        let dim = 1usize << n;
+        let mut out = vec![0.0_f64; dim];
+        for (k, slot) in out.iter_mut().enumerate() {
+            let mut s = 0.0;
+            for (i, &gz_i) in g_z.iter().enumerate() {
+                let sigma_z = if (k >> i) & 1 == 0 { 1.0 } else { -1.0 };
+                s += gz_i * sigma_z;
+            }
+            *slot = s;
+        }
+        out
+    }
+
+    /// XYZ 全成分を含むランダム入力で `apply_h_general` の dense 行列との一致を
+    /// rel < 1e-13 で検証する.
+    #[test]
+    fn apply_h_general_dense_xyz_matches_dense_matmul() {
+        for n in 3..=6 {
+            for seed in [1u64, 17, 0xdead_beef] {
+                let dim = 1usize << n;
+                let mut rng = Xor64::new(seed.wrapping_add(n as u64));
+                let g_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+                let g_y: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+                let g_z: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+                let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+                let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+                let c_b = rng.signed();
+
+                let gz_eff = build_gz_eff_diag_naive(&g_z, n);
+
+                // 参照: dense H · v.
+                let h_dense = build_dense_h_xyz(n, &g_x, &g_y, &g_z, &h_p_diag, c_b);
+                let v_vec = nalgebra::DVector::<Complex64>::from_vec(v.clone());
+                let y_expected = &h_dense * &v_vec;
+
+                // 被テスト: apply_h_general.
+                let mut y = vec![Complex64::new(0.0, 0.0); dim];
+                apply_h_general(
+                    &v,
+                    &mut y,
+                    &g_x,
+                    Some(&g_y),
+                    &h_p_diag,
+                    c_b,
+                    Some(&gz_eff),
+                    n,
+                );
+
+                // 相対誤差.
+                let mut diff_sq = 0.0_f64;
+                let mut ref_sq = 0.0_f64;
+                for k in 0..dim {
+                    let d = y[k] - y_expected[k];
+                    diff_sq += d.norm_sqr();
+                    ref_sq += y_expected[k].norm_sqr();
+                }
+                let rel = diff_sq.sqrt() / ref_sq.sqrt().max(1.0);
+                assert!(
+                    rel < 1e-13,
+                    "n={}, seed={}: apply_h_general XYZ rel = {} >= 1e-13",
+                    n,
+                    seed,
+                    rel,
+                );
+            }
+        }
+    }
+
+    /// `g_y = None, gz_eff_diag = None` で呼び出した `apply_h_general` が
+    /// 既存 `apply_h` (`g_x = -a_t · h_x, c_b = b_t` 経由) と **byte-identical**
+    /// な結果を返すことを確認 (Phase C / issue #142 Risk #3 acceptance).
+    #[test]
+    fn apply_h_general_x_only_matches_apply_h_bit_identical() {
+        for n in 3..=8 {
+            let dim = 1usize << n;
+            for seed in [1u64, 17, 0xc0ff_eeba_baad] {
+                let mut rng = Xor64::new(seed.wrapping_add(n as u64));
+                let h_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+                let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+                let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+                let a_t = rng.signed();
+                let b_t = rng.signed();
+
+                // 旧経路: apply_h.
+                let mut y_old = vec![Complex64::new(0.0, 0.0); dim];
+                apply_h(&v, &mut y_old, &h_x, &h_p_diag, a_t, b_t, n);
+
+                // 新経路: apply_h_general (g_y = None, gz_eff_diag = None).
+                let g_x: Vec<f64> = h_x.iter().map(|h| -a_t * h).collect();
+                let mut y_new = vec![Complex64::new(0.0, 0.0); dim];
+                apply_h_general(&v, &mut y_new, &g_x, None, &h_p_diag, b_t, None, n);
+
+                for k in 0..dim {
+                    assert_eq!(
+                        y_old[k].re.to_bits(),
+                        y_new[k].re.to_bits(),
+                        "n={}, seed={}, k={}: apply_h_general re-bits differ from apply_h",
+                        n,
+                        seed,
+                        k,
+                    );
+                    assert_eq!(
+                        y_old[k].im.to_bits(),
+                        y_new[k].im.to_bits(),
+                        "n={}, seed={}, k={}: apply_h_general im-bits differ from apply_h",
+                        n,
+                        seed,
+                        k,
+                    );
+                }
+            }
+        }
+    }
+
+    /// `apply_h_general_serial` と `apply_h_general_rayon` が XYZ 入力で
+    /// bit-identical を返すこと (各 `y[k]` への書き込みは disjoint chunk 内に閉じ,
+    /// 演算順序は同じ axis loop / scalar-vs-SIMD dispatch を踏むため).
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn apply_h_general_rayon_matches_serial_xyz() {
+        for n in [3, 6, 10, 12] {
+            let dim = 1usize << n;
+            for seed in [3u64, 31, 0xfeed_face] {
+                let mut rng = Xor64::new(seed.wrapping_add(n as u64));
+                let g_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+                let g_y: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+                let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+                let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+                let gz_eff: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+                let c_b = rng.signed();
+
+                let mut y_serial = vec![Complex64::new(0.0, 0.0); dim];
+                apply_h_general_serial(
+                    &v,
+                    &mut y_serial,
+                    &g_x,
+                    Some(&g_y),
+                    &h_p_diag,
+                    c_b,
+                    Some(&gz_eff),
+                    n,
+                );
+
+                let mut y_par = vec![Complex64::new(0.0, 0.0); dim];
+                apply_h_general_rayon(
+                    &v,
+                    &mut y_par,
+                    &g_x,
+                    Some(&g_y),
+                    &h_p_diag,
+                    c_b,
+                    Some(&gz_eff),
+                    n,
+                );
+
+                for k in 0..dim {
+                    assert_eq!(
+                        y_par[k].re.to_bits(),
+                        y_serial[k].re.to_bits(),
+                        "n={}, seed={}, k={}: rayon re-bits differ from serial (XYZ)",
+                        n,
+                        seed,
+                        k,
+                    );
+                    assert_eq!(
+                        y_par[k].im.to_bits(),
+                        y_serial[k].im.to_bits(),
+                        "n={}, seed={}, k={}: rayon im-bits differ from serial (XYZ)",
+                        n,
+                        seed,
+                        k,
+                    );
+                }
+            }
+        }
+    }
+
+    /// 複素係数 SIMD bit-flip kernel (`bitflip_iN_complex`, i ∈ {0, 1, 2}) と
+    /// scalar reference (`y[k_lo] += conj(c) · v[k_hi]`, `y[k_hi] += c · v[k_lo]`)
+    /// の数値同等性 fuzz. `rel < 1e-13` (FMA 折り畳み差を許容).
+    #[cfg(feature = "simd")]
+    #[test]
+    fn simd_bitflip_complex_kernels_match_scalar_fuzz_100iter() {
+        let mut rng = Xor64::new(0xc0c0_d1d1_e2e2_f3f3);
+        for iter in 0..100 {
+            let n = 2 + (rng.next_u64() % 7) as usize;
+            let dim = 1usize << n;
+            let i_cap = (n - 1).min(2);
+            let i = (rng.next_u64() % (i_cap as u64 + 1)) as usize;
+            let mask = 1usize << i;
+            let c = Complex64::new(rng.signed(), rng.signed());
+            let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+            let y0: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+
+            // SIMD 経路.
+            let mut y_simd = y0.clone();
+            match i {
+                0 => simd_kernels::bitflip_i0_complex(&v, &mut y_simd, c),
+                1 => simd_kernels::bitflip_i1_complex(&v, &mut y_simd, c),
+                2 => simd_kernels::bitflip_i2_complex(&v, &mut y_simd, c),
+                _ => unreachable!("i is capped to {{0,1,2}}"),
+            }
+
+            // Scalar reference: pair update with `conj(c)` / `c`.
+            let mut y_scalar = y0;
+            let c_conj = c.conj();
+            let block = 2 * mask;
+            for base in (0..dim).step_by(block) {
+                for offset in 0..mask {
+                    let k_lo = base + offset;
+                    let k_hi = k_lo + mask;
+                    let v_lo = v[k_lo];
+                    let v_hi = v[k_hi];
+                    y_scalar[k_lo] += c_conj * v_hi;
+                    y_scalar[k_hi] += c * v_lo;
+                }
+            }
+
+            // 相対誤差.
+            let mut diff_sq = 0.0_f64;
+            let mut ref_sq = 0.0_f64;
+            for k in 0..dim {
+                let d = y_simd[k] - y_scalar[k];
+                diff_sq += d.norm_sqr();
+                ref_sq += y_scalar[k].norm_sqr();
+            }
+            let rel = diff_sq.sqrt() / ref_sq.sqrt().max(1.0);
+            assert!(
+                rel < 1e-13,
+                "iter={}, n={}, i={}, c={:?}: SIMD-vs-scalar complex rel={} >= 1e-13",
+                iter,
+                n,
+                i,
+                c,
+                rel,
+            );
+        }
+    }
+
+    /// `apply_h_general` の g_y[i] == 0.0 個別判定が axis loop の外で動くこと
+    /// (axis 0 を実係数, axis 1 を複素係数, axis 2 を gy = 0 で混在させたケース).
+    /// 真の dense H · v 一致で確認.
+    #[test]
+    fn apply_h_general_mixed_zero_gy_per_axis_matches_dense() {
+        let n = 5;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(0xabad_1d3a_face_b00b);
+        let mut g_x: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let mut g_y: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        // axis 0: 実係数のみ (g_y = 0).
+        g_y[0] = 0.0;
+        // axis 2: 完全ゼロ (両軸 0 で skip 経路を踏む).
+        g_x[2] = 0.0;
+        g_y[2] = 0.0;
+        let g_z = vec![0.0_f64; n];
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let v: Vec<Complex64> = (0..dim).map(|_| rng.complex_signed()).collect();
+        let c_b = rng.signed();
+
+        let h_dense = build_dense_h_xyz(n, &g_x, &g_y, &g_z, &h_p_diag, c_b);
+        let v_vec = nalgebra::DVector::<Complex64>::from_vec(v.clone());
+        let y_expected = &h_dense * &v_vec;
+
+        let mut y = vec![Complex64::new(0.0, 0.0); dim];
+        apply_h_general(&v, &mut y, &g_x, Some(&g_y), &h_p_diag, c_b, None, n);
+
+        let mut diff_sq = 0.0_f64;
+        let mut ref_sq = 0.0_f64;
+        for k in 0..dim {
+            let d = y[k] - y_expected[k];
+            diff_sq += d.norm_sqr();
+            ref_sq += y_expected[k].norm_sqr();
+        }
+        let rel = diff_sq.sqrt() / ref_sq.sqrt().max(1.0);
+        assert!(rel < 1e-13, "mixed g_y rel = {} >= 1e-13", rel);
     }
 }
