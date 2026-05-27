@@ -295,6 +295,29 @@ Phase 6 C1 (rayon) + C2 (SIMD) を入れた後の本番 bench (issue #68 follow-
 > 解釈は不変, C3 の trotter_step 集中改善 (multi-qubit gate fusion +
 > phase_p 並列化) は perf 上でも正当 (issue #82 audit で真の compute
 > speedup 5.30× を確認).
+>
+> **追記 (現状再計測, 2026-05-27, AMD EPYC 7713P 64-Core)**: 上記の 23.8 ms
+> / 6.13× は **#68 当時の snapshot** であり, 現状 main では C2 SIMD (#63)
+> + C2.5 chunk_size 動的化 (#71 / #90) + C3 fusion (#64) の累積効果で
+> **`apply_h` scaling 自体が大幅改善している**:
+>
+> | NT | per-iter | speedup | IPC | cache-miss rate | L2 avg fill latency |
+> |---:|---:|---:|---:|---:|---:|
+> | 1 | 17.142 ms | 1.00× | 4.96 | 6.27% | 41.0 cyc |
+> | 8 | 2.572 ms | 6.66× | 4.71 | 3.40% | 88.8 cyc |
+> | 16 | 1.439 ms | 11.91× | 4.49 | 2.86% | 128.7 cyc |
+> | 32 | 0.845 ms | 20.30× | 3.92 | 2.38% | 174.9 cyc |
+> | 64 | 0.739 ms | **23.20×** | 3.23 | 2.68% | 157.6 cyc |
+>
+> NT=64 plateau efficiency は **9.6% → 36%** に改善 (理論 64× 比). 単
+> スレッド per-iter も **23.8 ms → 17.14 ms (1.39× 短縮)**. ただし
+> **構造は当時の理解通り** — DRAM bound の徴候なし (cache-miss rate 2-6%,
+> NT↑ で total L2 miss 数も減少 = 各 thread の working set が L2 に
+> 収まる), L2 fill latency は NT↑ で 41 → 175 cycles (+4.3×) に伸びる
+> = `L2 fill latency が真の制約軸` が定量的に再確認された. NT=32→64 で
+> efficiency が 57% に落ちる挙動は 1 CCX = 8 core を越えた cross-CCX
+> レイテンシ contention の典型パターン. archive 表の 6.13× は当時の
+> snapshot として保持する (履歴情報として有用).
 
 C3 着手当時は両ボトルネックの本質を **「v / psi に対する DRAM round trip
 回数が compute 量に比して過大」** と解釈し, memory traffic 削減を狙う

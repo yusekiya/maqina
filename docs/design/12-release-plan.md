@@ -146,7 +146,19 @@ Phase 1 の baseline と比較できることが本 phase の前提。
   barrier 多重化由来の `trotter_step` 1.55× 頭打ちの両方を解消する目的で
   企画された最適化レイヤ。issue #68 follow-up bench での観測を受けて
   **本 issue では trotter_step 側を集中改善** (`apply_h` 側は follow-up #79
-  に切り出し, 後に §5.1.4 で「DRAM bound 仮説」が反証され revert)。 C3 は以下 2 つの独立サブ最適化で構成
+  に切り出し, 後に §5.1.4 で「DRAM bound 仮説」が反証され revert)。
+
+  > **現状再計測 (2026-05-27, AMD EPYC 7713P 64-Core)**: `apply_h` の
+  > parallel scaling は C2 SIMD (#63) + C2.5 chunk_size 動的化 (#71 / #90)
+  > + C3 fusion (#64) の累積効果で **#68 当時の 6.13× plateau から 23.20×
+  > (NT=64, N=20)** に改善している (efficiency 9.6% → 36%, 単スレッド
+  > per-iter も 23.8 ms → 17.14 ms と 1.39× 短縮). 構造的には当時の理解
+  > 通り「L2 fill latency が真の制約軸」(NT↑ で L2 avg fill latency 41 →
+  > 175 cycles, +4.3×) が定量再確認, DRAM bound の徴候なし (cache-miss
+  > rate 全 NT で 2-6%, 総 L2 miss 数も NT↑ で減少). 詳細表は §5.1.3
+  > 末尾 archive blockquote 内.
+
+  C3 は以下 2 つの独立サブ最適化で構成
   (§5.1.3 を一次資料):
   - **A. multi-qubit gate fusion (per-axis 逐次経路)**: 連続 k qubit (default
     k=4) の R_i を **1 つの rayon chunk closure 内で per-axis 2-pair update を
