@@ -11,6 +11,21 @@
   (`0.N.0` → `0.N+1.0`) で破壊的変更を吸収する (`docs/conventions.md`
   §2 参照).
 
+## Unreleased — Phase C follow-up
+
+### Added
+
+- **`Schedule.reverse(..., pause_duration=0.0)`** (PR #147): `s_target` に到達
+  後一定時間 `s = s_target` を保ってから `s_init` に戻る reverse + pause
+  schedule (Marshall-Venturelli-Rieffel 2019 / Chen-Lidar 2020 流) を表現可能
+  に。ramp 区間は前後対称で `(T - pause_duration) / 2` ずつ。`pause_duration < 0`
+  または `>= T` で `ValueError`。`pause_duration = 0` で従来の純 V 字形に縮退
+  するため既存ユーザー影響なし。Crosson-Harrow 2016 流の純 V 字専用 builder を
+  別途追加するのではなく既存 `Schedule.reverse` のオプション引数として統合し,
+  D-Wave 文献の実験プロトコル (warm-start + pause) を 1 builder で表現する設計
+  に統一。`tests/test_schedule.py` に 3 テスト追加 (pause 区間定数性 /
+  `pause_duration=0` の従来 V 字一致 / validation)。
+
 ## 0.13.0 - 2026-05-28 — Phase C: per-site/per-axis 時間依存場 (XYZ driver) 拡張 + `Schedule` に `h_x` 統合 (issue #142)
 
 旧 API の **driver = X 単体 + global scalar envelope** という制約
