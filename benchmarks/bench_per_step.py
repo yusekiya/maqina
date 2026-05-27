@@ -206,10 +206,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="number of warmup trials per (n) cell (default: 1)",
     )
     parser.add_argument(
-        "--T",
-        type=float,
-        default=1.0,
-        help="total anneal time T (default: 1.0)",
+        "--T", type=float, default=1.0, help="total anneal time T (default: 1.0)"
     )
     parser.add_argument(
         "--blas-threads",
@@ -244,7 +241,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def make_random_problem(n: int, seed: int) -> IsingProblem:
+def make_random_problem(n: int, seed: int) -> tuple[IsingProblem, np.ndarray]:
     """ランダム ``H_p_diag`` (実数 ``[-1, 1]``) と一様 ``h_x = 1`` で
     ``IsingProblem`` を作る.
 
@@ -255,7 +252,7 @@ def make_random_problem(n: int, seed: int) -> IsingProblem:
     dim = 1 << n
     h_p = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
     h_x = np.ones(n, dtype=np.float64)
-    return IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
+    return IsingProblem(n=n, H_p_diag=h_p), h_x
 
 
 def time_method_run(
@@ -584,10 +581,10 @@ def main(argv: list[str] | None = None) -> int:
     summary: list[dict[str, float | int | str]] = []
     adaptive_summary: list[dict[str, float | int | str]] = []
     reference_wall_by_n: dict[int, float] = {}
-    schedule = Schedule.linear(T=args.T)
 
     for n in args.n_values:
-        problem = make_random_problem(n, seed=args.seed)
+        problem, h_x = make_random_problem(n, seed=args.seed)
+        schedule = Schedule.linear(T=args.T, h_x=h_x)
         psi0 = uniform_superposition(n)
         dim = 1 << n
         print(

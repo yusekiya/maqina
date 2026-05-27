@@ -332,6 +332,37 @@ class QuantumAnnealer:
         """
         ...
 
+    def _validate_save_tlist(self, save_tlist: np.ndarray | None, t0: float, t1: float) -> np.ndarray | None:
+        """``save_tlist`` の dtype / monotonicity / [t0, t1] 範囲を検証する.
+
+        ``None`` のときは ``None`` をそのまま返す (最節約モード). 非 None の
+        とき shape 1D, dtype float64, monotonic increasing (重複は許容),
+        全要素が ``[t0, t1]`` の範囲内であることを検証し, C-contiguous な
+        float64 array を返す.
+        """
+        ...
+
+    def _validate_observables(self, observables: dict[str, Observable] | None) -> dict[str, Observable] | None:
+        """``observables`` が ``dict[str, Observable]`` で各 diag が
+        ``(2**n,)`` shape であることを検証する.
+
+        ``None`` のとき ``None`` をそのまま返す. 空 dict は ``None`` と
+        同義扱い (driver 側で空 dict を渡しても何も評価しないが,
+        ``QuantumResult.observables_history`` を非空 dict として保存しない
+        よう, ここで ``None`` に正規化する).
+        """
+        ...
+
+    def _build_result(self, *, psi_final: np.ndarray, snapshot: dict[str, np.ndarray | dict[str, np.ndarray] | None] | None, method: str, n_steps: int, n_matvec: int, n_steps_actual: int, m_eff_stats: dict[str, int | float] | None, beta_m_stats: dict[str, float] | None=None, n_krylov_insufficient: int | None=None) -> QuantumResult:
+        """``QuantumResult`` を組み立てる. ``probabilities`` は常に eager 計算.
+
+        ``snapshot`` (driver の ``save_tlist`` 経路で組まれる dict) から
+        ``times`` / ``states`` / ``observables_history`` を取り出し,
+        ``save_tlist=None`` 経路では ``times=states=None`` /
+        ``observables_history={}`` を返す.
+        """
+        ...
+
     def create_simulator(self, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> AnnealingSimulator:
         """``AnnealingSimulator`` (step-wise stateful API) を生成する.
 

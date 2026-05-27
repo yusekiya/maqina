@@ -40,17 +40,16 @@ try:
     from maqina import _rust as _rust_mod  # noqa: F401
 except ImportError:  # pragma: no cover - 拡張なし環境
     pytest.skip(
-        "maqina._rust extension required for Chebyshev tests",
-        allow_module_level=True,
+        "maqina._rust extension required for Chebyshev tests", allow_module_level=True
     )
 
 
-def _make_random_problem(n: int, seed: int) -> IsingProblem:
+def _make_random_problem(n: int, seed: int) -> tuple[IsingProblem, np.ndarray]:
     rng = np.random.default_rng(seed)
     dim = 1 << n
     h_p = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
     h_x = np.ones(n, dtype=np.float64)
-    return IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
+    return IsingProblem(n=n, H_p_diag=h_p), h_x
 
 
 def _build_qutip_hamiltonian(h_x: np.ndarray, h_p_diag: np.ndarray, T: float) -> list:
@@ -95,8 +94,8 @@ def test_adaptive_chebyshev_matches_qutip() -> None:
     """
     n = 4
     T = 5.0
-    prob = _make_random_problem(n, seed=20260522)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260522)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     (
@@ -111,7 +110,6 @@ def test_adaptive_chebyshev_matches_qutip() -> None:
         n_cheb_insufficient,
         _snapshot,
     ) = evolve_schedule_adaptive_richardson_chebyshev(
-        h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
         psi0=psi0,
@@ -121,7 +119,7 @@ def test_adaptive_chebyshev_matches_qutip() -> None:
         dt0=0.5,
     )
 
-    expected = _qutip_reference(prob.h_x, prob.H_p_diag, T)
+    expected = _qutip_reference(h_x, prob.H_p_diag, T)
     fid = _fidelity(psi_final, expected)
     assert fid > 1.0 - 1e-6, (
         f"adaptive_chebyshev vs QuTiP fidelity = {fid} (< 1 - 1e-6); "
@@ -149,12 +147,11 @@ def test_adaptive_chebyshev_matches_lanczos_rel_small() -> None:
     """
     n = 4
     T = 3.0
-    prob = _make_random_problem(n, seed=20260523)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260523)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     psi_lan = evolve_schedule_adaptive_richardson(
-        h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
         psi0=psi0,
@@ -164,7 +161,6 @@ def test_adaptive_chebyshev_matches_lanczos_rel_small() -> None:
         dt0=0.5,
     )[0]
     psi_che = evolve_schedule_adaptive_richardson_chebyshev(
-        h_x=prob.h_x,
         h_p_diag=prob.H_p_diag,
         schedule=sched,
         psi0=psi0,
@@ -187,25 +183,19 @@ def test_annealer_chebyshev_smoke() -> None:
     """
     n = 4
     T = 4.0
-    prob = _make_random_problem(n, seed=20260524)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260524)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     annealer = QuantumAnnealer(prob, sched)
     result_che = annealer.run(
-        psi0,
-        t0=0.0,
-        t1=T,
-        method="cfm4_adaptive_richardson_chebyshev",
+        psi0, t0=0.0, t1=T, method="cfm4_adaptive_richardson_chebyshev"
     )
     result_lan = annealer.run(
-        psi0,
-        t0=0.0,
-        t1=T,
-        method="cfm4_adaptive_richardson_krylov",
+        psi0, t0=0.0, t1=T, method="cfm4_adaptive_richardson_krylov"
     )
 
-    expected = _qutip_reference(prob.h_x, prob.H_p_diag, T)
+    expected = _qutip_reference(h_x, prob.H_p_diag, T)
     fid_che = _fidelity(result_che.psi_final, expected)
     fid_lan = _fidelity(result_lan.psi_final, expected)
     assert fid_che > 1.0 - 1e-6, (
@@ -231,19 +221,15 @@ def test_simulator_chebyshev_smoke() -> None:
     """
     n = 4
     T = 3.0
-    prob = _make_random_problem(n, seed=20260525)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260525)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     sim = AnnealingSimulator(
-        prob,
-        sched,
-        psi0,
-        0.0,
-        method="cfm4_adaptive_richardson_chebyshev",
+        prob, sched, psi0, 0.0, method="cfm4_adaptive_richardson_chebyshev"
     )
     sim.advance_to(T)
-    expected = _qutip_reference(prob.h_x, prob.H_p_diag, T)
+    expected = _qutip_reference(h_x, prob.H_p_diag, T)
     fid = _fidelity(sim.psi, expected)
     assert fid > 1.0 - 1e-6, f"simulator Chebyshev vs QuTiP fidelity = {fid}"
     assert sim.method == "cfm4_adaptive_richardson_chebyshev"
@@ -258,18 +244,14 @@ def test_chebyshev_rejects_m_max_param() -> None:
     """
     n = 4
     T = 1.0
-    prob = _make_random_problem(n, seed=20260526)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260526)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     annealer = QuantumAnnealer(prob, sched)
     with pytest.raises(ValueError, match="m_max is not supported"):
         annealer.run(
-            psi0,
-            t0=0.0,
-            t1=T,
-            method="cfm4_adaptive_richardson_chebyshev",
-            m_max=16,
+            psi0, t0=0.0, t1=T, method="cfm4_adaptive_richardson_chebyshev", m_max=16
         )
 
     # AnnealingSimulator も同様.
@@ -297,8 +279,8 @@ def test_chebyshev_default_propagator_tol_is_fixed_1e_minus_12() -> None:
 
     n = 5
     T = 5.0
-    prob = _make_random_problem(n, seed=20260526)
-    sched = Schedule.linear(T=T)
+    prob, h_x = _make_random_problem(n, seed=20260526)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     # propagator_tol=None default で atol を 2 桁振る.
@@ -306,11 +288,7 @@ def test_chebyshev_default_propagator_tol_is_fixed_1e_minus_12() -> None:
     for atol in (1e-6, 1e-8):
         ann = QuantumAnnealer(prob, sched)  # propagator_tol=None default
         result = ann.run(
-            psi0,
-            t0=0.0,
-            t1=T,
-            method="cfm4_adaptive_richardson_chebyshev",
-            atol=atol,
+            psi0, t0=0.0, t1=T, method="cfm4_adaptive_richardson_chebyshev", atol=atol
         )
         assert result.m_eff_stats is not None
         k_used_means.append(float(result.m_eff_stats["mean"]))
@@ -332,18 +310,10 @@ def test_chebyshev_default_propagator_tol_is_fixed_1e_minus_12() -> None:
         prob, sched, propagator_tol=_KRYLOV_TOL_FIXED_DEFAULT
     )
     res_default = ann_default.run(
-        psi0,
-        t0=0.0,
-        t1=T,
-        method="cfm4_adaptive_richardson_chebyshev",
-        atol=1e-8,
+        psi0, t0=0.0, t1=T, method="cfm4_adaptive_richardson_chebyshev", atol=1e-8
     )
     res_explicit = ann_explicit.run(
-        psi0,
-        t0=0.0,
-        t1=T,
-        method="cfm4_adaptive_richardson_chebyshev",
-        atol=1e-8,
+        psi0, t0=0.0, t1=T, method="cfm4_adaptive_richardson_chebyshev", atol=1e-8
     )
     np.testing.assert_array_equal(res_default.psi_final, res_explicit.psi_final)
 
@@ -354,8 +324,8 @@ def test_old_krylov_tol_kwarg_raises_typeerror() -> None:
     保証するため ``TypeError`` を contract とする.
     """
     n = 3
-    prob = _make_random_problem(n, seed=20260526)
-    sched = Schedule.linear(T=1.0)
+    prob, h_x = _make_random_problem(n, seed=20260526)
+    sched = Schedule.linear(T=1.0, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     with pytest.raises(TypeError):

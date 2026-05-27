@@ -1736,6 +1736,619 @@ pub(crate) fn cfm4_step_chebyshev_with_richardson_estimate_py<'py>(
     ))
 }
 
+// ============================================================
+// XYZ-form Python wraps (Phase C / issue #142, C2)
+// ============================================================
+//
+// 新 API (`Schedule.from_xyz`) 経由の driver は per-axis 配列 (g_x / g_y(Option) /
+// g_z(Option) + scalar b) を直接渡す経路で Rust kernel を呼ぶ. ここで定義する
+// `*_xyz_py` wraps は per-axis 配列を `Option<PyReadonlyArray1<f64>>` で受け取り,
+// 内部の per-axis kernel (`apply_h_general` / `cfm4_step` / `cfm4_step_chebyshev*`
+// 等) に直接 dispatch する. X-only 旧 wrap (`cfm4_step_py` 等) は backward-compat
+// のために残置 (Rust 単体テスト 22 箇所が依存).
+//
+// `g_y` / `g_z` の `None` 渡しは axis loop 外で skip され
+// (`crate::matvec::apply_h_general` の Option-based fast path), 既存 X-only path
+// と byte-identical な演算経路に縮退する. 新 API でも `g_y = g_z = None` を渡せば
+// 旧 API 相当のコストになる (legacy shim 経路と同じ).
+//
+// `iter0_cache` (X-only path 専用最適化, issue #100) は XYZ path では None に
+// する (basis_h_x が無いため). 旧 API path は X-only wrap (`cfm4_step_py` /
+// `cfm4_step_with_richardson_estimate_py`) を経由するか, driver 側で X-only
+// 経路を判定して shim を選択する.
+
+/// `m2_midpoint_step` の per-axis 一般化 (Phase C / issue #142, C2).
+///
+/// 中点 `t + dt/2` でフリーズした per-axis 配列 + scalar `c_b` を用いて
+/// `exp(-i dt · H_mid) · psi` を Lanczos で計算する. `apply_h_general` を
+/// closure で渡す形で per-axis 分岐は axis loop 外で吸収される.
+///
+/// `g_y_mid = None` または `g_z_mid = None` のとき, それぞれの軸を skip する
+/// fast path に dispatch (X-only / XY-only 経路を新 API でも温存).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn m2_midpoint_step_xyz(
+    psi: &[Complex64],
+    h_p_diag: &[f64],
+    g_x_mid: &[f64],
+    g_y_mid: Option<&[f64]>,
+    g_z_mid: Option<&[f64]>,
+    b_mid: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+    n: usize,
+) -> PyResult<Vec<Complex64>> {
+    // g_z_mid が Some の場合は中点で凍結した `gz_eff_diag` を 1 度だけ
+    // precompute する (per-stage Walsh doubling, O(2^N)). None の場合は
+    // 既存 diag pass と byte-identical な fast path (`gz_eff_diag = None`)
+    // に縮退.
+    let gz_eff_diag_owned: Option<Vec<f64>> = g_z_mid.map(compute_gz_eff_diag);
+    let matvec = |v: &[Complex64], y: &mut [Complex64]| {
+        apply_h_general(
+            v,
+            y,
+            g_x_mid,
+            g_y_mid,
+            h_p_diag,
+            b_mid,
+            gz_eff_diag_owned.as_deref(),
+            n,
+        );
+    };
+    let (psi_new, _m_eff, _beta_m, _c_m_abs) = lanczos_propagate(matvec, psi, dt, m, krylov_tol)?;
+    Ok(psi_new)
+}
+
+/// 新 API 経由の M2 中点則 1 step in-place 版 Python wrap.
+///
+/// ```python
+/// _rust.m2_midpoint_step_xyz_inplace_py(
+///     psi, h_p_diag,
+///     g_x_mid, g_y_mid_or_none, g_z_mid_or_none, b_mid,
+///     dt, m, krylov_tol,
+/// )
+/// ```
+///
+/// `psi` を `exp(-i dt · H_mid) · psi` で in-place 上書きする (戻り値 None).
+/// shape 検証は `n = len(g_x_mid)` / `dim = 2^n` で行い `psi.len() == dim` /
+/// `h_p_diag.len() == dim` / `g_y_mid` 等の長さ整合性をチェック.
+#[pyfunction]
+#[pyo3(signature = (
+    psi, h_p_diag,
+    g_x_mid, g_y_mid, g_z_mid, b_mid,
+    dt, m, krylov_tol,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn m2_midpoint_step_xyz_inplace_py<'py>(
+    mut psi: PyReadwriteArray1<'py, Complex64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    g_x_mid: PyReadonlyArray1<'py, f64>,
+    g_y_mid: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_mid: Option<PyReadonlyArray1<'py, f64>>,
+    b_mid: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+) -> PyResult<()> {
+    let g_x_slice = g_x_mid.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let psi_slice = psi.as_slice_mut()?;
+    let n = g_x_slice.len();
+    let dim = 1usize << n;
+    if h_p_diag_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "h_p_diag length {} does not match 2^len(g_x_mid) = 2^{} = {}",
+            h_p_diag_slice.len(),
+            n,
+            dim,
+        )));
+    }
+    if psi_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "psi length {} does not match 2^len(g_x_mid) = {}",
+            psi_slice.len(),
+            dim,
+        )));
+    }
+    if m == 0 {
+        return Err(PyValueError::new_err("m must be >= 1"));
+    }
+    let g_y_slice_opt = match &g_y_mid {
+        Some(arr) => Some(arr.as_slice()?),
+        None => None,
+    };
+    if let Some(g_y) = g_y_slice_opt {
+        if g_y.len() != n {
+            return Err(PyValueError::new_err(format!(
+                "g_y_mid length {} does not match len(g_x_mid) = {}",
+                g_y.len(),
+                n,
+            )));
+        }
+    }
+    let g_z_slice_opt = match &g_z_mid {
+        Some(arr) => Some(arr.as_slice()?),
+        None => None,
+    };
+    if let Some(g_z) = g_z_slice_opt {
+        if g_z.len() != n {
+            return Err(PyValueError::new_err(format!(
+                "g_z_mid length {} does not match len(g_x_mid) = {}",
+                g_z.len(),
+                n,
+            )));
+        }
+    }
+
+    let psi_new = m2_midpoint_step_xyz(
+        psi_slice,
+        h_p_diag_slice,
+        g_x_slice,
+        g_y_slice_opt,
+        g_z_slice_opt,
+        b_mid,
+        dt,
+        m,
+        krylov_tol,
+        n,
+    )?;
+    psi_slice.copy_from_slice(&psi_new);
+    Ok(())
+}
+
+/// 新 API 経由の CFM4:2 1 step Python wrap.
+///
+/// per-axis 配列 (g_x_s1 / g_y_s1(Option) / g_z_s1(Option) / b_s1, stage 2 同様) を
+/// 受け取り `cfm4_step` に直接 dispatch する. iter-0 cache (X-only 専用最適化,
+/// issue #100) は XYZ path では適用しない (None 渡し).
+///
+/// ```python
+/// psi_new, m_eff_sum, err_lanczos_sum = _rust.cfm4_step_xyz_py(
+///     psi, h_p_diag,
+///     g_x_s1, g_y_s1_or_none, g_z_s1_or_none, b_s1,
+///     g_x_s2, g_y_s2_or_none, g_z_s2_or_none, b_s2,
+///     dt, m, krylov_tol,
+/// )
+/// ```
+#[pyfunction]
+#[pyo3(signature = (
+    psi, h_p_diag,
+    g_x_s1, g_y_s1, g_z_s1, b_s1,
+    g_x_s2, g_y_s2, g_z_s2, b_s2,
+    dt, m, krylov_tol,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_xyz_py<'py>(
+    py: Python<'py>,
+    psi: PyReadonlyArray1<'py, Complex64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    g_x_s1: PyReadonlyArray1<'py, f64>,
+    g_y_s1: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1: f64,
+    g_x_s2: PyReadonlyArray1<'py, f64>,
+    g_y_s2: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, usize, f64)> {
+    let psi_slice = psi.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let g_x_s1_slice = g_x_s1.as_slice()?;
+    let g_x_s2_slice = g_x_s2.as_slice()?;
+
+    let n = g_x_s1_slice.len();
+    let dim = 1usize << n;
+    validate_xyz_shapes(psi_slice.len(), h_p_diag_slice.len(), n, dim, m)?;
+    let (g_y_s1_slice, g_y_s2_slice, g_z_s1_slice, g_z_s2_slice) =
+        extract_optional_axes(&g_y_s1, &g_y_s2, &g_z_s1, &g_z_s2, g_x_s2_slice.len(), n)?;
+
+    let (psi_new, m_eff_sum, err_lanczos_sum) = cfm4_step(
+        psi_slice,
+        h_p_diag_slice,
+        g_x_s1_slice,
+        g_y_s1_slice,
+        g_z_s1_slice,
+        b_s1,
+        g_x_s2_slice,
+        g_y_s2_slice,
+        g_z_s2_slice,
+        b_s2,
+        dt,
+        m,
+        krylov_tol,
+        n,
+        None,
+    )?;
+    Ok((psi_new.into_pyarray(py), m_eff_sum, err_lanczos_sum))
+}
+
+/// 新 API 経由の CFM4:2 + step-doubling Richardson Python wrap (Lanczos variant).
+///
+/// 6 stage (full = stage1/2, half_1 = stage1/2, half_2 = stage1/2) 分の per-axis
+/// 配列を受け取り `cfm4_step_with_richardson_estimate` に直接 dispatch.
+///
+/// iter-0 cache (X-only 専用最適化, issue #100) は XYZ path では適用しない
+/// (`iter0_cache_x_only = None`).
+#[pyfunction]
+#[pyo3(signature = (
+    psi, h_p_diag,
+    g_x_s1_full, g_y_s1_full, g_z_s1_full, b_s1_full,
+    g_x_s2_full, g_y_s2_full, g_z_s2_full, b_s2_full,
+    g_x_s1_h1, g_y_s1_h1, g_z_s1_h1, b_s1_h1,
+    g_x_s2_h1, g_y_s2_h1, g_z_s2_h1, b_s2_h1,
+    g_x_s1_h2, g_y_s1_h2, g_z_s1_h2, b_s1_h2,
+    g_x_s2_h2, g_y_s2_h2, g_z_s2_h2, b_s2_h2,
+    dt, m, krylov_tol, extrapolate,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_with_richardson_estimate_xyz_py<'py>(
+    py: Python<'py>,
+    psi: PyReadonlyArray1<'py, Complex64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    g_x_s1_full: PyReadonlyArray1<'py, f64>,
+    g_y_s1_full: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1_full: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1_full: f64,
+    g_x_s2_full: PyReadonlyArray1<'py, f64>,
+    g_y_s2_full: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2_full: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2_full: f64,
+    g_x_s1_h1: PyReadonlyArray1<'py, f64>,
+    g_y_s1_h1: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1_h1: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1_h1: f64,
+    g_x_s2_h1: PyReadonlyArray1<'py, f64>,
+    g_y_s2_h1: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2_h1: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2_h1: f64,
+    g_x_s1_h2: PyReadonlyArray1<'py, f64>,
+    g_y_s1_h2: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1_h2: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1_h2: f64,
+    g_x_s2_h2: PyReadonlyArray1<'py, f64>,
+    g_y_s2_h2: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2_h2: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2_h2: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+    extrapolate: bool,
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, f64, usize, f64)> {
+    let psi_slice = psi.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let g_x_s1_full_slice = g_x_s1_full.as_slice()?;
+    let g_x_s2_full_slice = g_x_s2_full.as_slice()?;
+    let g_x_s1_h1_slice = g_x_s1_h1.as_slice()?;
+    let g_x_s2_h1_slice = g_x_s2_h1.as_slice()?;
+    let g_x_s1_h2_slice = g_x_s1_h2.as_slice()?;
+    let g_x_s2_h2_slice = g_x_s2_h2.as_slice()?;
+    let n = g_x_s1_full_slice.len();
+    let dim = 1usize << n;
+    validate_xyz_shapes(psi_slice.len(), h_p_diag_slice.len(), n, dim, m)?;
+    // 6 stages x 2 axes (g_y/g_z) = 12 optional arrays. Extract & validate.
+    let g_y_s1_full_opt = extract_axis_opt(&g_y_s1_full, n, "g_y_s1_full")?;
+    let g_z_s1_full_opt = extract_axis_opt(&g_z_s1_full, n, "g_z_s1_full")?;
+    let g_y_s2_full_opt = extract_axis_opt(&g_y_s2_full, n, "g_y_s2_full")?;
+    let g_z_s2_full_opt = extract_axis_opt(&g_z_s2_full, n, "g_z_s2_full")?;
+    let g_y_s1_h1_opt = extract_axis_opt(&g_y_s1_h1, n, "g_y_s1_h1")?;
+    let g_z_s1_h1_opt = extract_axis_opt(&g_z_s1_h1, n, "g_z_s1_h1")?;
+    let g_y_s2_h1_opt = extract_axis_opt(&g_y_s2_h1, n, "g_y_s2_h1")?;
+    let g_z_s2_h1_opt = extract_axis_opt(&g_z_s2_h1, n, "g_z_s2_h1")?;
+    let g_y_s1_h2_opt = extract_axis_opt(&g_y_s1_h2, n, "g_y_s1_h2")?;
+    let g_z_s1_h2_opt = extract_axis_opt(&g_z_s1_h2, n, "g_z_s1_h2")?;
+    let g_y_s2_h2_opt = extract_axis_opt(&g_y_s2_h2, n, "g_y_s2_h2")?;
+    let g_z_s2_h2_opt = extract_axis_opt(&g_z_s2_h2, n, "g_z_s2_h2")?;
+    // 同様に X 軸 length 整合性も check.
+    if g_x_s2_full_slice.len() != n
+        || g_x_s1_h1_slice.len() != n
+        || g_x_s2_h1_slice.len() != n
+        || g_x_s1_h2_slice.len() != n
+        || g_x_s2_h2_slice.len() != n
+    {
+        return Err(PyValueError::new_err(
+            "all g_x_* arrays must have the same length",
+        ));
+    }
+    let _ = dim;
+
+    let mut psi_owned: Vec<Complex64> = psi_slice.to_vec();
+    let (err, m_eff_total, err_lanczos_total) = cfm4_step_with_richardson_estimate(
+        &mut psi_owned,
+        h_p_diag_slice,
+        g_x_s1_full_slice,
+        g_y_s1_full_opt,
+        g_z_s1_full_opt,
+        b_s1_full,
+        g_x_s2_full_slice,
+        g_y_s2_full_opt,
+        g_z_s2_full_opt,
+        b_s2_full,
+        g_x_s1_h1_slice,
+        g_y_s1_h1_opt,
+        g_z_s1_h1_opt,
+        b_s1_h1,
+        g_x_s2_h1_slice,
+        g_y_s2_h1_opt,
+        g_z_s2_h1_opt,
+        b_s2_h1,
+        g_x_s1_h2_slice,
+        g_y_s1_h2_opt,
+        g_z_s1_h2_opt,
+        b_s1_h2,
+        g_x_s2_h2_slice,
+        g_y_s2_h2_opt,
+        g_z_s2_h2_opt,
+        b_s2_h2,
+        dt,
+        m,
+        krylov_tol,
+        n,
+        extrapolate,
+        None,
+    )?;
+    Ok((
+        psi_owned.into_pyarray(py),
+        err,
+        m_eff_total,
+        err_lanczos_total,
+    ))
+}
+
+/// 新 API 経由の CFM4:2 1 step (Chebyshev variant) Python wrap.
+#[pyfunction]
+#[pyo3(signature = (
+    psi, h_p_diag,
+    g_x_s1, g_y_s1, g_z_s1, b_s1,
+    g_x_s2, g_y_s2, g_z_s2, b_s2,
+    dt, chebyshev_tol,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_chebyshev_xyz_py<'py>(
+    py: Python<'py>,
+    psi: PyReadonlyArray1<'py, Complex64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    g_x_s1: PyReadonlyArray1<'py, f64>,
+    g_y_s1: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1: f64,
+    g_x_s2: PyReadonlyArray1<'py, f64>,
+    g_y_s2: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2: f64,
+    dt: f64,
+    chebyshev_tol: f64,
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, usize, f64)> {
+    let psi_slice = psi.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let g_x_s1_slice = g_x_s1.as_slice()?;
+    let g_x_s2_slice = g_x_s2.as_slice()?;
+    let n = g_x_s1_slice.len();
+    let dim = 1usize << n;
+    validate_xyz_shapes(psi_slice.len(), h_p_diag_slice.len(), n, dim, 1)?;
+    let (g_y_s1_slice, g_y_s2_slice, g_z_s1_slice, g_z_s2_slice) =
+        extract_optional_axes(&g_y_s1, &g_y_s2, &g_z_s1, &g_z_s2, g_x_s2_slice.len(), n)?;
+    let (psi_new, k_used_sum, err_cheb_sum) = cfm4_step_chebyshev(
+        psi_slice,
+        h_p_diag_slice,
+        g_x_s1_slice,
+        g_y_s1_slice,
+        g_z_s1_slice,
+        b_s1,
+        g_x_s2_slice,
+        g_y_s2_slice,
+        g_z_s2_slice,
+        b_s2,
+        dt,
+        chebyshev_tol,
+        n,
+    )?;
+    Ok((psi_new.into_pyarray(py), k_used_sum, err_cheb_sum))
+}
+
+/// 新 API 経由の CFM4:2 + Richardson Chebyshev variant Python wrap.
+#[pyfunction]
+#[pyo3(signature = (
+    psi, h_p_diag,
+    g_x_s1_full, g_y_s1_full, g_z_s1_full, b_s1_full,
+    g_x_s2_full, g_y_s2_full, g_z_s2_full, b_s2_full,
+    g_x_s1_h1, g_y_s1_h1, g_z_s1_h1, b_s1_h1,
+    g_x_s2_h1, g_y_s2_h1, g_z_s2_h1, b_s2_h1,
+    g_x_s1_h2, g_y_s1_h2, g_z_s1_h2, b_s1_h2,
+    g_x_s2_h2, g_y_s2_h2, g_z_s2_h2, b_s2_h2,
+    dt, chebyshev_tol, extrapolate,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_chebyshev_with_richardson_estimate_xyz_py<'py>(
+    py: Python<'py>,
+    psi: PyReadonlyArray1<'py, Complex64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    g_x_s1_full: PyReadonlyArray1<'py, f64>,
+    g_y_s1_full: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1_full: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1_full: f64,
+    g_x_s2_full: PyReadonlyArray1<'py, f64>,
+    g_y_s2_full: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2_full: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2_full: f64,
+    g_x_s1_h1: PyReadonlyArray1<'py, f64>,
+    g_y_s1_h1: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1_h1: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1_h1: f64,
+    g_x_s2_h1: PyReadonlyArray1<'py, f64>,
+    g_y_s2_h1: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2_h1: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2_h1: f64,
+    g_x_s1_h2: PyReadonlyArray1<'py, f64>,
+    g_y_s1_h2: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1_h2: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1_h2: f64,
+    g_x_s2_h2: PyReadonlyArray1<'py, f64>,
+    g_y_s2_h2: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2_h2: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2_h2: f64,
+    dt: f64,
+    chebyshev_tol: f64,
+    extrapolate: bool,
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, f64, usize, f64)> {
+    let psi_slice = psi.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let g_x_s1_full_slice = g_x_s1_full.as_slice()?;
+    let g_x_s2_full_slice = g_x_s2_full.as_slice()?;
+    let g_x_s1_h1_slice = g_x_s1_h1.as_slice()?;
+    let g_x_s2_h1_slice = g_x_s2_h1.as_slice()?;
+    let g_x_s1_h2_slice = g_x_s1_h2.as_slice()?;
+    let g_x_s2_h2_slice = g_x_s2_h2.as_slice()?;
+    let n = g_x_s1_full_slice.len();
+    let dim = 1usize << n;
+    validate_xyz_shapes(psi_slice.len(), h_p_diag_slice.len(), n, dim, 1)?;
+    let g_y_s1_full_opt = extract_axis_opt(&g_y_s1_full, n, "g_y_s1_full")?;
+    let g_z_s1_full_opt = extract_axis_opt(&g_z_s1_full, n, "g_z_s1_full")?;
+    let g_y_s2_full_opt = extract_axis_opt(&g_y_s2_full, n, "g_y_s2_full")?;
+    let g_z_s2_full_opt = extract_axis_opt(&g_z_s2_full, n, "g_z_s2_full")?;
+    let g_y_s1_h1_opt = extract_axis_opt(&g_y_s1_h1, n, "g_y_s1_h1")?;
+    let g_z_s1_h1_opt = extract_axis_opt(&g_z_s1_h1, n, "g_z_s1_h1")?;
+    let g_y_s2_h1_opt = extract_axis_opt(&g_y_s2_h1, n, "g_y_s2_h1")?;
+    let g_z_s2_h1_opt = extract_axis_opt(&g_z_s2_h1, n, "g_z_s2_h1")?;
+    let g_y_s1_h2_opt = extract_axis_opt(&g_y_s1_h2, n, "g_y_s1_h2")?;
+    let g_z_s1_h2_opt = extract_axis_opt(&g_z_s1_h2, n, "g_z_s1_h2")?;
+    let g_y_s2_h2_opt = extract_axis_opt(&g_y_s2_h2, n, "g_y_s2_h2")?;
+    let g_z_s2_h2_opt = extract_axis_opt(&g_z_s2_h2, n, "g_z_s2_h2")?;
+    if g_x_s2_full_slice.len() != n
+        || g_x_s1_h1_slice.len() != n
+        || g_x_s2_h1_slice.len() != n
+        || g_x_s1_h2_slice.len() != n
+        || g_x_s2_h2_slice.len() != n
+    {
+        return Err(PyValueError::new_err(
+            "all g_x_* arrays must have the same length",
+        ));
+    }
+    let _ = dim;
+
+    let mut psi_owned: Vec<Complex64> = psi_slice.to_vec();
+    let (err, k_used_total, err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate(
+        &mut psi_owned,
+        h_p_diag_slice,
+        g_x_s1_full_slice,
+        g_y_s1_full_opt,
+        g_z_s1_full_opt,
+        b_s1_full,
+        g_x_s2_full_slice,
+        g_y_s2_full_opt,
+        g_z_s2_full_opt,
+        b_s2_full,
+        g_x_s1_h1_slice,
+        g_y_s1_h1_opt,
+        g_z_s1_h1_opt,
+        b_s1_h1,
+        g_x_s2_h1_slice,
+        g_y_s2_h1_opt,
+        g_z_s2_h1_opt,
+        b_s2_h1,
+        g_x_s1_h2_slice,
+        g_y_s1_h2_opt,
+        g_z_s1_h2_opt,
+        b_s1_h2,
+        g_x_s2_h2_slice,
+        g_y_s2_h2_opt,
+        g_z_s2_h2_opt,
+        b_s2_h2,
+        dt,
+        chebyshev_tol,
+        n,
+        extrapolate,
+    )?;
+    Ok((
+        psi_owned.into_pyarray(py),
+        err,
+        k_used_total,
+        err_cheb_total,
+    ))
+}
+
+// ----- XYZ wrap 共通の小ヘルパ -----
+
+/// `*_xyz_py` wraps 共通の shape 検証. `n = len(g_x_s1)`, `dim = 2^n`.
+fn validate_xyz_shapes(
+    psi_len: usize,
+    h_p_diag_len: usize,
+    n: usize,
+    dim: usize,
+    m: usize,
+) -> PyResult<()> {
+    if h_p_diag_len != dim {
+        return Err(PyValueError::new_err(format!(
+            "h_p_diag length {} does not match 2^n = 2^{} = {}",
+            h_p_diag_len, n, dim,
+        )));
+    }
+    if psi_len != dim {
+        return Err(PyValueError::new_err(format!(
+            "psi length {} does not match 2^n = {}",
+            psi_len, dim,
+        )));
+    }
+    if m == 0 {
+        return Err(PyValueError::new_err("m must be >= 1"));
+    }
+    Ok(())
+}
+
+/// 単一 stage の per-axis Optional 引数 (g_y_s1, g_y_s2, g_z_s1, g_z_s2) を slice
+/// に変換し長さ整合性を検証する.
+#[allow(clippy::type_complexity)]
+fn extract_optional_axes<'a, 'py>(
+    g_y_s1: &'a Option<PyReadonlyArray1<'py, f64>>,
+    g_y_s2: &'a Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1: &'a Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2: &'a Option<PyReadonlyArray1<'py, f64>>,
+    g_x_s2_len: usize,
+    n: usize,
+) -> PyResult<(
+    Option<&'a [f64]>,
+    Option<&'a [f64]>,
+    Option<&'a [f64]>,
+    Option<&'a [f64]>,
+)> {
+    if g_x_s2_len != n {
+        return Err(PyValueError::new_err(format!(
+            "g_x_s2 length {} does not match g_x_s1 length {}",
+            g_x_s2_len, n,
+        )));
+    }
+    let g_y_s1_slice = extract_axis_opt(g_y_s1, n, "g_y_s1")?;
+    let g_y_s2_slice = extract_axis_opt(g_y_s2, n, "g_y_s2")?;
+    let g_z_s1_slice = extract_axis_opt(g_z_s1, n, "g_z_s1")?;
+    let g_z_s2_slice = extract_axis_opt(g_z_s2, n, "g_z_s2")?;
+    Ok((g_y_s1_slice, g_y_s2_slice, g_z_s1_slice, g_z_s2_slice))
+}
+
+/// 単一 axis の Optional 引数を slice に変換し長さ検証する.
+fn extract_axis_opt<'a, 'py>(
+    arr: &'a Option<PyReadonlyArray1<'py, f64>>,
+    expected_n: usize,
+    name: &str,
+) -> PyResult<Option<&'a [f64]>> {
+    match arr {
+        None => Ok(None),
+        Some(a) => {
+            let slice = a.as_slice()?;
+            if slice.len() != expected_n {
+                return Err(PyValueError::new_err(format!(
+                    "{} length {} does not match n = {}",
+                    name,
+                    slice.len(),
+                    expected_n,
+                )));
+            }
+            Ok(Some(slice))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -275,3 +275,51 @@ class AnnealingSimulator:
             ``observable.diag`` と ψ の shape 不一致 (Observable 側で raise).
         """
         ...
+
+    def _resolved_propagator_tol_fixed(self) -> float:
+        ...
+
+    def _resolved_propagator_tol_adaptive(self, tol_step: float) -> float:
+        """adaptive Richardson (Lanczos) 経路の propagator_tol 自動解決.
+
+        Lanczos a posteriori 早期打切は atol scaling で連動するのが望ましい
+        ため auto-coupling (``tol_step · _KRYLOV_TOL_ATOL_RATIO``) を採る.
+        """
+        ...
+
+    def _resolved_propagator_tol_chebyshev_adaptive(self) -> float:
+        """adaptive Richardson (Chebyshev variant) 経路の propagator_tol 自動解決.
+
+        issue #135 で auto-coupling (``tol_step · _KRYLOV_TOL_ATOL_RATIO``)
+        から **固定値 ``_KRYLOV_TOL_FIXED_DEFAULT`` (= 1e-12)** に変更.
+        Chebyshev は ``K_used ~ R·dt + log(1/propagator_tol)`` の対数依存で
+        propagator_tol を atol に連動させる動機が弱く, auto-coupling だと
+        atol↓ で machine precision 到達後に round-off accumulation で精度が
+        悪化する非単調性が発生する.
+        """
+        ...
+
+    def _run_fixed_dt(self, t_next: float, *, n_steps: int) -> None:
+        """固定 dt driver を ``[_t, t_next]`` 区間で呼んで状態更新する.
+
+        ``observables`` / ``save_tlist`` / ``store_states`` は Simulator
+        の用途外なので常に default (None / False) を渡す. ``run`` と同じ
+        driver を同じ引数で呼ぶため, 同じ schedule 評価点で bit-identical
+        な数値が出る.
+        """
+        ...
+
+    def _run_adaptive(self, t_next: float, *, dt_init_override: float | None=None, dt_max_override: float | None=None) -> None:
+        """adaptive Richardson driver を ``[_t, t_next]`` 区間で呼ぶ.
+
+        ``dt_init_override`` / ``dt_max_override`` を渡すと
+        ``__init__`` の ``dt_init`` / ``dt_max`` を無視してこちらを使う
+        (``step(dt)`` 経路用; 呼出側 ``dt`` を proposal にする).
+        override が None なら ``__init__`` の値を使い, それも None なら
+        ``QuantumAnnealer.run`` と同じ auto resolution を行う.
+
+        ``n_matvec`` は driver の ``m_eff_history`` 合計で正確に加算する
+        (早期打切で ``6m`` upper bound より小さくなる可能性があるため,
+        累積コストを正確に追う).
+        """
+        ...

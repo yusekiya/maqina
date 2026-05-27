@@ -58,13 +58,7 @@ from pathlib import Path
 
 import numpy as np
 
-from maqina import (
-    IsingProblem,
-    Observable,
-    QuantumAnnealer,
-    Schedule,
-    set_blas_threads,
-)
+from maqina import IsingProblem, Observable, QuantumAnnealer, Schedule, set_blas_threads
 from maqina.initial_states import uniform_superposition
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -152,10 +146,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="number of warmup trials per (n, method, mode) cell (default: 1)",
     )
     parser.add_argument(
-        "--T",
-        type=float,
-        default=1.0,
-        help="total anneal time T (default: 1.0)",
+        "--T", type=float, default=1.0, help="total anneal time T (default: 1.0)"
     )
     parser.add_argument(
         "--m",
@@ -183,20 +174,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--seed",
-        type=int,
-        default=20260516,
-        help="numpy RNG seed (default: 20260516)",
+        "--seed", type=int, default=20260516, help="numpy RNG seed (default: 20260516)"
     )
     return parser.parse_args(argv)
 
 
-def make_random_problem(n: int, seed: int) -> IsingProblem:
+def make_random_problem(n: int, seed: int) -> tuple[IsingProblem, np.ndarray]:
     rng = np.random.default_rng(seed)
     dim = 1 << n
     h_p = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
     h_x = np.ones(n, dtype=np.float64)
-    return IsingProblem(n=n, H_p_diag=h_p, h_x=h_x)
+    return IsingProblem(n=n, H_p_diag=h_p), h_x
 
 
 def _build_run_kwargs(
@@ -231,11 +219,7 @@ def _build_run_kwargs(
 
 
 def time_one_run(
-    annealer: QuantumAnnealer,
-    psi0: np.ndarray,
-    t0: float,
-    t1: float,
-    run_kwargs: dict,
+    annealer: QuantumAnnealer, psi0: np.ndarray, t0: float, t1: float, run_kwargs: dict
 ) -> tuple[float, int]:
     """``annealer.run`` の wall time (秒) を ``time.perf_counter`` で計る."""
     tic = time.perf_counter()
@@ -286,8 +270,8 @@ def main(argv: list[str] | None = None) -> int:
     rows: list[dict] = []
     for n in args.n_values:
         dim = 1 << n
-        prob = make_random_problem(n, args.seed)
-        sched = Schedule.linear(T=args.T)
+        prob, h_x = make_random_problem(n, args.seed)
+        sched = Schedule.linear(T=args.T, h_x=h_x)
         psi0 = uniform_superposition(n)
         ann = QuantumAnnealer(prob, sched, m=args.m)
         save_tlist = np.linspace(0.0, args.T, args.save_tlist_len, dtype=np.float64)
