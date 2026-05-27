@@ -90,11 +90,19 @@ class Schedule:
     ) -> "Schedule": ...
 
     @classmethod
-    def reverse(cls, T: float, s_init: float = 1.0, s_target: float = 0.5) -> "Schedule":
+    def reverse(
+        cls,
+        T: float,
+        s_init: float = 1.0,
+        s_target: float = 0.5,
+        pause_duration: float = 0.0,
+    ) -> "Schedule":
         """Reverse annealing schedule preset.
 
-        s(t) を s_init から s_target まで半分の時間で下げ, 残り半分で
-        s_init に戻す V 字形 (Crosson-Harrow 2016 流)。
+        s(t) を s_init から s_target まで `(T - pause_duration) / 2` の時間で
+        下げ, `pause_duration` だけ s_target を保ち, 残り `(T - pause_duration) / 2`
+        で s_init に戻す V 字 / 台形形 (Crosson-Harrow 2016 / Marshall-
+        Venturelli-Rieffel 2019)。`pause_duration = 0` で純 V 字に縮退。
         A(s) = 1 - s, B(s) = s は linear と同じ。
         """
         ...

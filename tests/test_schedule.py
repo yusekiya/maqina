@@ -112,6 +112,49 @@ def test_reverse_half_monotonic() -> None:
     assert all(b >= a for a, b in zip(s2, s2[1:], strict=False))
 
 
+def test_reverse_with_pause_constant_region() -> None:
+    T = 10.0
+    pause_duration = 4.0
+    s_init, s_target = 1.0, 0.3
+    h_x = np.ones(2, dtype=np.float64)
+    sched = Schedule.reverse(
+        T,
+        h_x=h_x,
+        s_init=s_init,
+        s_target=s_target,
+        pause_duration=pause_duration,
+    )
+    ramp = (T - pause_duration) / 2.0
+    pause_end = ramp + pause_duration
+    assert sched.s_at(0.0) == pytest.approx(s_init)
+    assert sched.s_at(ramp) == pytest.approx(s_target)
+    assert sched.s_at(T) == pytest.approx(s_init)
+    for t in [ramp, ramp + 1.0, pause_end - 1e-9, pause_end]:
+        assert sched.s_at(t) == pytest.approx(s_target)
+
+
+def test_reverse_with_pause_zero_matches_v_shape() -> None:
+    T = 8.0
+    h_x = np.ones(2, dtype=np.float64)
+    sched_default = Schedule.reverse(T, h_x=h_x, s_init=1.0, s_target=0.4)
+    sched_zero = Schedule.reverse(
+        T, h_x=h_x, s_init=1.0, s_target=0.4, pause_duration=0.0
+    )
+    for t in [0.0, 1.0, T / 2, 5.0, T]:
+        assert sched_default.s_at(t) == pytest.approx(sched_zero.s_at(t))
+
+
+def test_reverse_pause_duration_validation() -> None:
+    T = 5.0
+    h_x = np.ones(2, dtype=np.float64)
+    with pytest.raises(ValueError, match="pause_duration"):
+        Schedule.reverse(T, h_x=h_x, pause_duration=-0.1)
+    with pytest.raises(ValueError, match="pause_duration"):
+        Schedule.reverse(T, h_x=h_x, pause_duration=T)
+    with pytest.raises(ValueError, match="pause_duration"):
+        Schedule.reverse(T, h_x=h_x, pause_duration=T + 1.0)
+
+
 def test_pause_constant_region() -> None:
     T = 10.0
     t_pause = 3.0
