@@ -214,6 +214,8 @@ fn main() {
                     chebyshev_tol,
                     n,
                     true,
+                    h_p_min,
+                    h_p_max,
                 )
                 .expect("Chebyshev Richardson step (warmup) failed");
             }
@@ -252,6 +254,8 @@ fn main() {
                     chebyshev_tol,
                     n,
                     true,
+                    h_p_min,
+                    h_p_max,
                 )
                 .expect("Chebyshev Richardson step failed");
                 k_used_total += k_used;

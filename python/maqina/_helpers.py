@@ -155,8 +155,13 @@ def _gershgorin_norm_upper_bound(schedule: Schedule, problem: IsingProblem) -> f
       最大値 + ``max_k |H_p_diag[k]|`` を返す保守値. PI controller の
       Richardson breakdown 検出 fail-safe が dt を縮めるので, 多少楽観的でも
       driver 動作自体は安全 (issue #43 B の motivation).
+
+    対角項は ``IsingProblem`` 構築時 precompute 済の
+    ``h_p_diag_min`` / ``h_p_diag_max`` から ``max(|min|, |max|)`` で
+    closed-form に算出する (O(1)). issue #142 PR #146 follow-up で
+    ``np.max(np.abs(...))`` の O(2^N) walk を削除.
     """
-    h_p_max_abs = float(np.max(np.abs(problem.H_p_diag)))
+    h_p_max_abs = max(abs(problem.h_p_diag_min), abs(problem.h_p_diag_max))
     if schedule.is_xyz_api:
         # 新 API: t=0 と t=T で sample. callable は短時間で大きく振れる前提では
         # 無いので 2 点で大半のケースをカバーできる. より tight な見積もりが

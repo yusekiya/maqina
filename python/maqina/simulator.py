@@ -582,6 +582,8 @@ class AnnealingSimulator:
                 psi0=self._psi,
                 t0=self._t,
                 t1=t_next,
+                h_p_min=self.problem.h_p_diag_min,
+                h_p_max=self.problem.h_p_diag_max,
                 chebyshev_tol=propagator_tol,
                 tol_step=tol_step,
                 dt0=dt0,

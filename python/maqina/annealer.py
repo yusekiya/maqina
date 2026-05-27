@@ -588,6 +588,8 @@ class QuantumAnnealer:
                 psi0=psi0_arr,
                 t0=t0,
                 t1=t1,
+                h_p_min=self.problem.h_p_diag_min,
+                h_p_max=self.problem.h_p_diag_max,
                 chebyshev_tol=effective_propagator_tol,
                 tol_step=tol_step,
                 dt0=dt0,

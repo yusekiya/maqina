@@ -425,7 +425,7 @@ def evolve_schedule_adaptive_richardson(h_p_diag: np.ndarray, schedule: Schedule
     """
     ...
 
-def evolve_schedule_adaptive_richardson_chebyshev(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, chebyshev_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
+def evolve_schedule_adaptive_richardson_chebyshev(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, h_p_min: float, h_p_max: float, chebyshev_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
     """CFM4:2 + step-doubling Richardson + Chebyshev propagator (issue #122).
 
     既存 :func:`evolve_schedule_adaptive_richardson` (Lanczos 経路) と

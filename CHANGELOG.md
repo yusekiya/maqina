@@ -126,7 +126,48 @@ per-site で異なる時間関数は表現不可) を解消し, per-site / per-a
 - `_helpers.py::_gershgorin_norm_upper_bound(schedule, problem)` /
   `_resolve_dt_max_auto(schedule, problem, m, dt0)`: signature 変更
   (schedule から h_x_abs_sum (旧 API) または time-sampled
-  `_norm_upper_bound_factor_at` (新 API) を取得)。
+  `_norm_upper_bound_factor_at` (新 API) を取得)。`np.max(np.abs(H_p_diag))`
+  の O(2^N) walk を `problem.h_p_diag_min/max` precompute 経由の O(1)
+  closed-form に置換 (PR #146 follow-up と統合)。
+
+### Fixed (PR #146 follow-up — Linux 本番 perf bench で発覚)
+
+- **Chebyshev per-stage Gershgorin の O(2^N) walk regression**: PR #144 で
+  `gershgorin_bounds_cached` (O(1)) を per-stage form (`compute_stage_gershgorin`)
+  に再設計した際, `gz_eff_diag = None` (= 時間依存 Z 磁場なし; legacy API
+  および新 API の XY-only 経路) でも `h_p_diag` の full walk が走っていた。
+  per Richardson step で 6 stage × O(2^N) のオーバヘッドが発生し N=18 で
+  per-step wall に数 ms / N=20 で十数 ms の regression として観測される。
+  - 修正: `compute_stage_gershgorin(arrays, h_p_diag, h_p_min, h_p_max)`
+    シグネチャに `IsingProblem` 構築時 precompute 値 (`h_p_diag_min` /
+    `h_p_diag_max`) を渡し, `gz = None` 経路では closed-form
+    `(c_b · h_p_min, c_b · h_p_max)` (c_b 負なら swap) で O(1) 計算する。
+    `gz = Some(...)` 経路は構造的に O(2^N) walk 必要 (合成
+    `c_b · h_p_diag[k] + gz[k]` の min/max).
+  - 影響範囲 (内部 Rust API): `cfm4_step_chebyshev` /
+    `cfm4_step_chebyshev_with_richardson_estimate` に `h_p_min: f64,
+    h_p_max: f64` 引数追加。Python wrap (`cfm4_step_chebyshev_xyz_py` /
+    `cfm4_step_chebyshev_with_richardson_estimate_xyz_py`) にも追加。
+  - 影響範囲 (内部 Python API):
+    `evolve_schedule_adaptive_richardson_chebyshev` driver に
+    `h_p_min, h_p_max` キーワード引数追加 (必須)。`QuantumAnnealer` /
+    `AnnealingSimulator` からは `problem.h_p_diag_min/max` を渡す形に更新。
+  - 旧 X-only Python wrap (`cfm4_step_chebyshev_py` /
+    `cfm4_step_chebyshev_with_richardson_estimate_py`) は既に
+    `h_p_min, h_p_max` を末尾引数で受け取っており shim 内で ignore して
+    いたが, 修正で内部 `cfm4_step_chebyshev*` に propagate する形に。
+  - Lanczos 経路 (`cfm4_step` / `cfm4_step_with_richardson_estimate`) は
+    per-stage Gershgorin を呼ばないため影響なし (`build_stage_arrays` のみ
+    使用; PR #145 で分離した設計通り)。
+  - **acceptance テスト追加**: `src/cfm4.rs` 単体に
+    `compute_stage_gershgorin_no_z_matches_full_walk` (gz=None 経路で
+    precompute 値 ↔ full walk の bit-identical 一致, 4 通りの c_b 符号で)
+    と `compute_stage_gershgorin_with_z_walks_correctly` (gz=Some 経路で
+    precompute 引数が誤って使われないことの保証)。Python 側に
+    `test_chebyshev_h_p_bounds_match_h_p_diag_min_max` (tight bound と
+    意図的に緩めた bound で終端 ψ が `chebyshev_tol` 程度に一致することの
+    確認 — Gershgorin の意味的役割 (K_used を決める E_c/R 推定) が壊れて
+    いないことの契約)。
 
 ### Verification (本セッション再開時の test-runner subagent 並列実行)
 

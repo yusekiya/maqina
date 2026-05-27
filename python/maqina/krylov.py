@@ -2567,12 +2567,18 @@ def _adaptive_dispatch_richardson_estimate_chebyshev_xyz(
     dt: float,
     chebyshev_tol: float,
     extrapolate: bool,
+    h_p_min: float,
+    h_p_max: float,
 ) -> tuple[np.ndarray, float, int, float]:
     """Chebyshev 経路 Richardson 推定子のディスパッチ (per-axis form).
 
     Phase C / issue #142: 旧 X-only scalar 形を per-axis 配列形に refactor.
     Chebyshev 経路は Python リファレンス実装を持たない (Rust 側のみ).
     ``rust_mod`` が ``None`` なら ``NotImplementedError``.
+
+    ``h_p_min`` / ``h_p_max`` は ``IsingProblem`` 構築時 precompute 済の対角
+    下界 / 上界. Rust 側 per-stage Gershgorin (`compute_stage_gershgorin`) で
+    gz_eff_diag = None 経路の O(1) 計算に渡す (issue #142 PR #146 follow-up).
     """
     if rust_mod is None:
         raise NotImplementedError(
@@ -2611,6 +2617,8 @@ def _adaptive_dispatch_richardson_estimate_chebyshev_xyz(
             dt,
             chebyshev_tol,
             extrapolate,
+            h_p_min,
+            h_p_max,
         )
     )
     return psi_new, float(err), int(k_used_total), float(err_cheb_total)
@@ -2623,6 +2631,8 @@ def evolve_schedule_adaptive_richardson_chebyshev(
     t0: float,
     t1: float,
     *,
+    h_p_min: float,
+    h_p_max: float,
     chebyshev_tol: float = 1e-12,
     tol_step: float = 1e-8,
     dt0: float = 0.5,
@@ -2740,11 +2750,12 @@ def evolve_schedule_adaptive_richardson_chebyshev(
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     dim = int(psi.shape[0])
 
-    # Phase C / issue #142: Chebyshev XYZ wrap は per-stage Gershgorin を内部で
-    # 再計算するので h_x_abs_sum / h_p_min / h_p_max の driver 側 precompute は
-    # 不要 (PR #144 で chebyshev_propagate signature が per-stage form に
-    # 拡張されており, h_x_abs_sum / h_p_min / h_p_max は signature 互換のため
-    # 受け取るが内部処理では使われない).
+    # Phase C / issue #142 PR #146 follow-up: Chebyshev XYZ wrap は per-stage
+    # Gershgorin を Rust 側で再計算するが, ``gz_eff_diag = None`` 経路で
+    # ``h_p_diag`` を full walk すると per Richardson step で 6×O(2^N) の
+    # overhead が発生する (時間依存 Z 磁場なしの旧 X-only path 含む). caller
+    # から ``h_p_min`` / ``h_p_max`` (= IsingProblem 構築時 precompute 値) を
+    # 受け取って per-stage Gershgorin を O(1) で済ませる契約.
 
     recorder = (
         _SnapshotRecorder(save_tlist, observables, store_states, dim)
@@ -2847,6 +2858,8 @@ def evolve_schedule_adaptive_richardson_chebyshev(
                 dt_try,
                 chebyshev_tol,
                 richardson_extrapolate,
+                h_p_min,
+                h_p_max,
             )
         )
         err_magnus = max(0.0, err - err_chebyshev_total)

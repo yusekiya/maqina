@@ -115,6 +115,8 @@ def test_adaptive_chebyshev_matches_qutip() -> None:
         psi0=psi0,
         t0=0.0,
         t1=T,
+        h_p_min=prob.h_p_diag_min,
+        h_p_max=prob.h_p_diag_max,
         tol_step=1e-8,
         dt0=0.5,
     )
@@ -166,12 +168,71 @@ def test_adaptive_chebyshev_matches_lanczos_rel_small() -> None:
         psi0=psi0,
         t0=0.0,
         t1=T,
+        h_p_min=prob.h_p_diag_min,
+        h_p_max=prob.h_p_diag_max,
         tol_step=1e-8,
         dt0=0.5,
     )[0]
 
     rel = float(np.linalg.norm(psi_che - psi_lan))
     assert rel < 1e-7, f"Chebyshev vs Lanczos rel = {rel} (should be ≤ tol_step margin)"
+
+
+def test_chebyshev_h_p_bounds_match_h_p_diag_min_max() -> None:
+    """``Schedule.from_xyz`` で時間依存 Z 磁場なしの設定 (g_z=None) を組み,
+    Chebyshev driver に **正しい** ``h_p_min/h_p_max`` を渡したときと, 故意に
+    **緩めた** 境界 (例えば `-10·|H_p|, +10·|H_p|`) を渡したときで, 短時間
+    プロパゲータの数値結果が一致することを確認する.
+
+    Chebyshev の Gershgorin 上下界は **スペクトル中心 E_c と半径 R** を決める
+    入力でしかなく, R を上方にスケールしても K_used が増えるだけで切り捨て
+    残差は ``chebyshev_tol`` 以下に保たれる. したがって正しい bound と緩い
+    bound で終端 ψ は ``chebyshev_tol`` 程度で一致しなければならない.
+
+    issue #142 PR #146 follow-up: ``compute_stage_gershgorin`` を precompute
+    h_p_min/max 経由で算出する変更が, Gershgorin 自体の意味的役割を壊して
+    いないことの契約.
+    """
+    n = 4
+    T = 2.0
+    prob, h_x = _make_random_problem(n, seed=20260530)
+    sched = Schedule.linear(T=T, h_x=h_x)
+    psi0 = uniform_superposition(n)
+
+    # 正しい bound (= IsingProblem の precompute).
+    psi_tight = evolve_schedule_adaptive_richardson_chebyshev(
+        h_p_diag=prob.H_p_diag,
+        schedule=sched,
+        psi0=psi0,
+        t0=0.0,
+        t1=T,
+        h_p_min=prob.h_p_diag_min,
+        h_p_max=prob.h_p_diag_max,
+        tol_step=1e-8,
+        dt0=0.5,
+    )[0]
+
+    # 故意に緩めた bound (10× spread). chebyshev_tol で許容される範囲で
+    # K_used が増えるだけで, 終端 ψ は一致するはず.
+    spread = 10.0 * max(abs(prob.h_p_diag_min), abs(prob.h_p_diag_max), 1.0)
+    psi_loose = evolve_schedule_adaptive_richardson_chebyshev(
+        h_p_diag=prob.H_p_diag,
+        schedule=sched,
+        psi0=psi0,
+        t0=0.0,
+        t1=T,
+        h_p_min=-spread,
+        h_p_max=spread,
+        tol_step=1e-8,
+        dt0=0.5,
+    )[0]
+
+    rel = float(np.linalg.norm(psi_tight - psi_loose))
+    assert rel < 1e-7, (
+        f"tight vs loose Gershgorin bound rel = {rel} "
+        "(should be within chebyshev_tol margin; Chebyshev bound 緩めても "
+        "K_used が増えるだけで終端 ψ は一致するはず)"
+    )
 
 
 def test_annealer_chebyshev_smoke() -> None:
