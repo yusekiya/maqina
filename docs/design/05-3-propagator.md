@@ -58,6 +58,70 @@ stage 2 :  c_drv = a_low ·A(s_1) + a_high·A(s_2)
 (線形結合係数を 1 つに畳み込む経路、§5.2 末尾参照)。Lanczos 2 回 / step、
 LTE ~ O(dt^5)。
 
+##### per-stage 配列 / Gershgorin / `gz_eff_diag` doubling 構築 (Phase C / issue #142)
+
+Phase C C1 (PR #144 / #145) で `cfm4_step` 系のシグネチャを **per-site,
+per-axis 時間依存場 (XYZ driver)** に対応する形に拡張した。旧 scalar 4 個
+`(a_s1, b_s1, a_s2, b_s2)` (driver / problem の 2 stage 線形結合係数) を,
+per-axis array + scalar に置き換える:
+
+```text
+(g_x_s1, g_y_s1, g_z_s1, b_s1, g_x_s2, g_y_s2, g_z_s2, b_s2)
+   ^^^^^^^^^^^^^^^^^^^^         ^^^^^^^^^^^^^^^^^^^^
+   shape (N,) array each        scalar (problem envelope)
+```
+
+per-stage の組立ては `src/cfm4.rs::build_stage_arrays` ヘルパに集約され,
+`apply_h_general` に渡す `(g_x_stage, g_y_stage_opt, g_z_stage_opt, c_b_stage,
+gz_eff_diag_opt)` を返す。`g_y_stage` / `g_z_stage` が全 0 の場合は `Option::None`
+を伝播して `apply_h_general` の real-only fast path に dispatch する
+(旧 API shim / 新 API での XY only など)。
+
+per-stage で新規に必要となる計算は **`gz_eff_diag[k] = Σ_i g_z_stage[i] ·
+σ_z_i(k)` (length 2^N)** のみ。`σ_z_i(k) = 1 - 2·b_i(k)` の degree-1 Walsh
+多項式構造を使い **doubling / butterfly で O(2^N) 全体構築** (各 bit i の
+追加で長さを倍化しつつ low half に `+g_z[i]`, high half に `-g_z[i]` を加算;
+償却 O(1) per 基底, naive な `Σ_i` nested loop の N·2^N より N 倍高速)。
+実装: `src/matvec.rs::compute_gz_eff_diag` (PR #143, Phase C C1 part 1)。
+
+`g_z_stage` が全 0 の場合は `gz_eff_diag` 自体を計算 skip し `Option::None` を
+下位に伝播 (旧 API shim 経路 / 新 API XY only での hot path 追加 work 厳密に 0)。
+N=20 で ~1 ms / stage, 6 stage Richardson で ~6 ms / step。既存 Chebyshev
+per-step wall ~480 ms (N=20) の **<2%** で実用上無視可 (PR #144 の Linux
+AMD EPYC 7713P 計測で `cfm4_step_chebyshev_with_richardson_estimate` full
+mode が main 比 +0.05% の実質不変を確認, `h_p_diag` が L2 cache resident
+なので per-stage Gershgorin walk overhead が観測されない)。
+
+per-stage Gershgorin (Chebyshev variant 専用 path):
+
+```text
+R_off_stage     = Σ_i √(g_x_stage[i]² + g_y_stage[i]²)    -- O(N), 無視可
+diag_min_stage  = min_k (c_b_stage · h_p_diag[k] + gz_eff_diag[k])
+diag_max_stage  = max_k (c_b_stage · h_p_diag[k] + gz_eff_diag[k])
+```
+
+- Lanczos variant では Gershgorin は不要 (Lanczos 内部の Hessenberg matrix
+  から spectral radius は自動的に決まる) ため `cfm4_step` の Lanczos 経路は
+  per-stage Gershgorin walk を回避する。実装上は `build_stage_arrays` (Lanczos
+  + Chebyshev 共通) と `compute_stage_gershgorin` (Chebyshev 専用) を分離
+  (PR #145 で `build_stage_desc` から split)。
+- Chebyshev variant では `compute_stage_gershgorin` を per-stage に呼んで
+  `(R_off_stage, diag_min_stage, diag_max_stage)` を取り直す。`g_z = 0` の
+  ときは `cB_stage · {h_p_min, h_p_max}` 閉形式に縮退して従来の O(1) cached
+  `gershgorin_bounds_cached` と一致 (`gz_eff_diag` doubling 構築と同 walk で
+  fuse して O(2^N) → 単一 pass にできる)。
+- 旧 X-only 経路向け O(1) 変換 helper `gershgorin_per_stage_x_only(
+  h_x_abs_sum, h_p_min, h_p_max, a_t, b_t)` を `src/chebyshev.rs` に追加
+  (PR #144)。旧 API shim 経路はこれを呼んで O(N + 2^N) walk を回避する。
+
+driver plumbing (`evolve_schedule_*`) は **`Schedule._eval_stage(t)`** 共通
+evaluator (`(g_x_arr, g_y_arr_opt, g_z_arr_opt, b_scalar)` を返す) 経由で
+旧 / 新両 API を per-axis 形に正規化してから per-stage 線形結合
+(`g_x_s1 = a_high · g_x@t1 + a_low · g_x@t2` 等) を Python 側で組み立て,
+Rust XYZ wrap (`cfm4_step_xyz_py` / `cfm4_step_chebyshev_xyz_py` 等) に dispatch
+する。旧 API は新 API の特化 (g_y=g_z=None かつ g_x = -a_t · h_x) として
+実装され, Python ref (`_python_*_xyz`) も同じく per-axis 形に refactor 済 (C2)。
+
 #### CFM4:2 + step-doubling Richardson — `cfm4_step_with_richardson_estimate`
 
 CFM4:2 を full-step (dt) と half-step×2 (dt/2 + dt/2) で **同一入口 ψ**
@@ -97,13 +161,25 @@ A_half1_1 = α_half1_1 · H_drv + β_half1_1 · H_p_diag      (中点 t + c1·dt
   bit-flip pass を 1 chunk closure 内で完走) は維持し, 本 primitive は
   Richardson 入口で 1 step 1 回だけ呼ばれる。
 - `src/cfm4.rs::cfm4_step` のシグネチャに `iter0_cache: Option<(&[Complex64],
-  &[Complex64])>` 引数を追加 (crate-internal API)。Lanczos に渡す matvec
+  &[Complex64], f64, f64)>` 引数を追加 (crate-internal API)。Lanczos に渡す matvec
   closure 内で `first_call` フラグを持たせ, iter 0 のときだけ cache を線形結合:
   ```
-  y = (c_drv_1 · cache_drv + c_diag_1 · cache_diag) / ‖ψ‖
+  y = (c_drv_1 · cache_drv + c_b_stage · cache_diag) / ‖ψ‖
+    where c_drv_1 = a_high · a_s1_scalar + a_low · a_s2_scalar
   ```
-  iter 1 以降は v_k が分岐するので従来通り `apply_h` 経路。
+  iter 1 以降は v_k が分岐するので従来通り `apply_h_general` 経路。
   Lanczos 内部 API は不変 (matvec closure を 1 個受けるだけ)。
+  - Phase C / issue #142 C1 part 2-B で `cfm4_step` を per-site, per-axis 時間
+    依存場対応の signature に拡張した際, cache tuple は `(cache_drv, cache_diag,
+    a_s1_scalar, a_s2_scalar)` の **4 要素** に拡張。caller は X-only path
+    (`g_y_s* / g_z_s*` 全 None かつ `g_x_s* = -a_s*_scalar · basis_h_x` 線形性)
+    を契約として cache を渡す。XYZ 一般化された driver 経路 (将来) では None を
+    渡せば従来の `apply_h_general` を iter 0 でも呼ぶ経路に縮退する。
+  - `cfm4_step_with_richardson_estimate` の入口側は `iter0_cache_x_only:
+    Option<(&[f64], f64, f64, f64, f64)>` (= `(basis_h_x, a_s1_full, a_s2_full,
+    a_s1_h1, a_s2_h1)`) を取り, full_step / half_1 へ渡す cfm4_step cache tuple を
+    関数内で 2 種類組み立てる (basis_h_x + (a_s1_full, a_s2_full) /
+    basis_h_x + (a_s1_h1, a_s2_h1))。
 - full_step stage 1 / half_1 stage 1 に `iter0_cache = Some(...)` を渡し,
   half_2 (入口は `psi_mid` で異なる) と stage 2 (入口は各 stage 1 出口で異なる)
   には `None`。
@@ -504,16 +580,26 @@ CFM4:2 を使う。
 #### PI controller / adaptive ドライバ
 
 両 estimator を共通仕様の PI controller (Python 側ループ) が駆動する。
-RK45 / Dormand-Prince 系の embedded estimator と同型の式・既定値を採用:
+RK45 / Dormand-Prince 系の embedded estimator + Gustafsson / Hairer-Wanner II
+§IV.2 の predictive PI 比例項と同型の式・既定値を採用:
 
 ```
-dt_next = dt · safety · (tol_step / err)^(1/(p+1))
+dt_next = dt · safety · (tol_step / err)^(pi_alpha/(p+1)) · (err_prev / err)^(pi_beta/(p+1))
 ```
 
-| 推定子 | p | 指数 `1/(p+1)` | 該当 estimator |
+- 第 1 因子 = **積分 (I) 項** (`pi_alpha`, 既定 `0.7`)。
+- 第 2 因子 = **比例 (P) 項** (`pi_beta`, 既定 `0.4`)。`err_prev` は直前に
+  **accept** した step の駆動量 (M2 = `err`, Richardson / Chebyshev =
+  `err_magnus`)。誤差の増加傾向 (Magnus 4 次係数 C₄ の上昇) を `err_prev / err`
+  で先読みして dt 拡大を抑制する (issue #151, 下記ノート参照)。最初の accept や
+  `err` / `err_prev` が 0 近傍 (`<= 1e-30`) のときは比例項を `1.0` に落とす。
+- `pi_alpha=1.0, pi_beta=0.0` で従来の純 I (積分) 制御
+  `dt · safety · (tol_step / err)^(1/(p+1))` をビット一致再現する (回帰アンカー)。
+
+| 推定子 | p | 指数分母 `p+1` | 該当 estimator |
 |---|---|---|---|
-| M2 embedded | 2 | 1/3 | `cfm4_step_with_m2_estimate` |
-| Richardson  | 4 | 1/5 | `cfm4_step_with_richardson_estimate` |
+| M2 embedded | 2 | 3 | `cfm4_step_with_m2_estimate` |
+| Richardson  | 4 | 5 | `cfm4_step_with_richardson_estimate` |
 
 既定パラメータ (`evolve_schedule_adaptive_*` の `*` パラメータ):
 
@@ -524,10 +610,28 @@ tol_step     = 1e-8          # accept 判定の局所誤差閾値
 dt0          = 0.5           # 初期 dt
 dt_min       = 1e-4          # 最小 dt (ここまで縮めると err 無視で accept)
 dt_max       = 10 · dt0      # 既定値 (None 渡し時に解決)
-safety       = 0.9           # PI 安全係数
-growth_max   = 4.0           # 1 step での dt 拡大率上限
+safety       = 0.9           # PI 安全係数 (accept / reject 共通)
+growth_max   = 4.0           # 1 step での dt 拡大率上限 (accept のみ)
 max_rejects  = 50            # 同一 step での連続 reject 上限 (超過で RuntimeError)
+reject_shrink_min = 0.2      # reject factor の下限 (= fac_min, issue #149)
+reject_shrink_max = 0.9      # reject factor の上限 (= fac_reject_max < 1, issue #149)
+freeze_growth_after_reject = True  # reject 直後の dt 拡大を凍結 (issue #150)
+growth_freeze_steps = 1      # 凍結解除までの連続 accept 数 (issue #150)
+pi_alpha     = 0.7           # PI 積分 (I) 項の指数係数 (issue #151)
+pi_beta      = 0.4           # PI 比例 (P) 項の指数係数 (issue #151, Gustafsson 標準)
 ```
+
+> **`ControllerConfig` (issue #149 / #150 / #151 / umbrella #148 方針 B)**: 上記 controller
+> knob (`safety` / `growth_max` / `max_rejects` / `dt_min` /
+> `reject_shrink_min` / `reject_shrink_max` / `freeze_growth_after_reject` /
+> `growth_freeze_steps` / `pi_alpha` / `pi_beta`) は `maqina.ControllerConfig`
+> (frozen dataclass) に集約され、facade
+> (`QuantumAnnealer.run(controller=...)` / `create_simulator(controller=...)`
+> / `AnnealingSimulator(controller=...)`) から指定できる。`atol` / `dt_init`
+> / `dt_max` / `m_max` は精度要求・auto-resolve ロジックを持つため
+> `ControllerConfig` には入れず facade kwarg のまま据置 (純粋な数値挙動 knob
+> のみ集約)。固定 dt 経路への明示 `controller` は `AnnealingSimulator` のみ
+> `ValueError` で弾く (run は `atol` 等と同じく寛容)。
 
 > **`tol_step = 1e-8` の選定根拠 (保守寄り)**: 1 step あたりの局所誤差
 > ``1e-8`` を区間 ``[0, T]`` で蓄積すると, worst case (Lady Windermere's
@@ -545,6 +649,7 @@ max_rejects  = 50            # 同一 step での連続 reject 上限 (超過で
 ループ本体 (擬似コード):
 
 ```python
+freeze_remaining = 0                           # issue #150: 残り凍結 accept 数
 while t < t1:
     dt_try = min(dt, t1 - t, next_save - t)   # 終端 / 観測時刻にクランプ
     psi_new, err = step_with_estimate(psi, dt_try, ...)
@@ -552,11 +657,17 @@ while t < t1:
     if accept:
         psi = psi_new
         t += dt_try
+        # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
+        if freeze_growth_after_reject and freeze_remaining > 0:
+            eff_growth_max = 1.0
+            freeze_remaining -= 1
+        else:
+            eff_growth_max = growth_max
         if err <= 1e-30:                       # 0 近傍ガード
-            dt_next = dt_try * growth_max
+            dt_next = dt_try * eff_growth_max
         else:
             dt_next = dt_try * safety * (tol_step / err) ** (1/(p+1))
-        dt_next = min(dt_next, dt_try * growth_max, dt_max)
+        dt_next = min(dt_next, dt_try * eff_growth_max, dt_max)
         dt_next = max(dt_next, dt_min)
         dt = dt_next
         n_consecutive_rejects = 0
@@ -564,8 +675,68 @@ while t < t1:
         n_consecutive_rejects += 1
         if n_consecutive_rejects > max_rejects:
             raise RuntimeError(...)
-        dt = max(dt_try * 0.5, dt_min)         # reject 時は半減
+        # issue #149: reject 時も accept と同じ予測式 + reject 用クランプ.
+        # err_for_pi は accept 経路と整合 (M2 = err, Richardson/Chebyshev =
+        # err_magnus; 0 近傍は tol_step·1e-3 フォールバック).
+        factor = safety * (tol_step / err_for_pi) ** (1/(p+1))
+        factor = min(max(factor, reject_shrink_min), reject_shrink_max)  # [0.2, 0.9]
+        dt = max(dt_try * factor, dt_min)
+        freeze_remaining = growth_freeze_steps  # issue #150: 凍結を再武装
 ```
+
+> **reject 予測式 + クランプの動機 (issue #149)**: 旧実装は reject 時に
+> **固定 0.5 倍** (= order-5 推定子で誤差を 32× 削減) していた。``err`` が
+> ``tol_step`` をわずかに超えただけでも半減するため、直後の step が楽々
+> accept → 制御器が ``(tol/err)^{1/(p+1)}`` で dt を再上昇 → 再 reject という
+> **ノコギリ波** (dt 振動 / 受理率 ≈ 50%) の主因になっていた。reject 時も
+> accept と同じ予測式を使い reject 用クランプ ``[reject_shrink_min,
+> reject_shrink_max]`` (``reject_shrink_max < 1`` で必ず縮小) を掛けることで、
+> ``err`` が tol をわずかに超えただけなら ``factor ≈ reject_shrink_max`` 程度で
+> 済み過剰縮小が消える。大きく超えたときだけ ``reject_shrink_min`` まで落ちる。
+> ``growth_max`` / ``dt_max`` は reject 経路では適用不要 (定義上拡大しない)、
+> ``dt_min`` 床は維持。``reject_shrink_min = reject_shrink_max = 0.5`` で旧挙動
+> (固定半減) を厳密再現できる (回帰アンカー)。これら controller knob は
+> ``ControllerConfig`` (umbrella #148 方針 B) に集約され facade
+> (``QuantumAnnealer.run(controller=...)`` 等) から指定できる。
+
+> **reject 後の dt 成長凍結 (issue #150, Gustafsson ヒステリシス)**: reject 直後の
+> accept では ``eff_growth_max = 1.0`` として **dt 拡大のみ禁止** (縮小は許可) し、
+> ``growth_freeze_steps`` 回 (既定 1 = DOPRI/Hairer-Wanner 標準) 連続 accept したら
+> 凍結を解除する (reject のたびに再武装)。狙いは「reject → 過剰縮小 → 楽々 accept
+> → I 制御が大きく再拡大 → 再オーバーシュート」という limit cycle の **再拡大側**
+> を断つこと。臨界領域を抜けるまで dt を不用意に伸ばさないことでノコギリ波を
+> 平坦化する。``n_consecutive_rejects`` (RuntimeError 用の連続 reject カウント) とは
+> 別概念で、本機構は「直前 step が reject だったか」だけを見る。
+> なお #149 の予測式 reject (既定 ``[0.2, 0.9]``) は reject 縮小量を「次 accept が
+> ``err ≈ tol`` に着地し PI 成長率 ≈ 1.0」になるよう自己整合的に選ぶため、**既定
+> クランプ下では over-shrink 起因の再拡大がそもそも起きず成長凍結は発火しない**
+> (合成ハーネスで ``freeze`` on/off がビット一致)。成長凍結は user が
+> ``reject_shrink`` を攻めた値にしたり、誤差が 1 step で ``tol`` を桁違いに超えて
+> 縮小 factor が ``reject_shrink_min`` 床にクランプ → 過剰縮小する場面での **二重の
+> 安全網** として効く。既定有効 (破壊的変更)。``freeze_growth_after_reject=False``
+> で #149 完了時点の挙動とビット一致する (回帰アンカー)。
+
+> **真の PI 比例項 (issue #151, I 制御 → PI 制御化)**: #150 までの ``_pi_dt_next`` は
+> 比例項を持たない純粋な **I (積分) 制御** ``dt · safety · (tol_step / err)^{1/(p+1)}``
+> であり、本節および docstring の "PI controller" 表記と実体が **不整合** だった。
+> #151 で Gustafsson / Hairer-Wanner II §IV.2 の predictive PI 比例項
+> ``(err_prev / err)^{pi_beta/(p+1)}`` を加え、名称と実体を一致させる。比例項は
+> 誤差の増加傾向 (臨界領域で C₄ が急上昇する物理) を ``err_prev / err`` で先読み
+> し、誤差が増えている局面 (``err_prev < err``) では dt 拡大を I 制御より抑える。
+> これにより「I 制御が楽観的に dt を拡大 → オーバーシュート → reject」の **再
+> オーバーシュートを reject に至る前に** 抑え、ノコギリ波を平坦化する (#150 の
+> 成長凍結が reject **後** の再拡大を断つのと相補的)。``err_prev`` は直前に
+> **accept** した step の駆動量 (M2 = ``err``、Richardson / Chebyshev =
+> ``err_for_pi = err_magnus``; accept 判定に使う量と一致させる)。最初の accept は
+> ``err_prev = None`` で純 I に縮退し、reject を挟んでも「最後に accept した step」
+> の値を使う (Hairer の ``errold`` 規約)。0 近傍 (``err`` / ``err_prev`` ``<= 1e-30``)
+> や ``pi_beta = 0`` では比例項を ``1.0`` に落として発散回避。既定
+> ``pi_alpha = 0.7`` / ``pi_beta = 0.4`` は Gustafsson predictive PI controller
+> 標準で、合成誤差ハーネス (#152) のノコギリ波シナリオで sweet spot を確認した
+> (``pi_beta = 0.4`` で reject 削減 + lag-1 自己相関改善、``pi_beta = 0.6`` は
+> 過補正で振動再発)。既定挙動が I → PI に変わるため破壊的変更。純 I 制御 (旧挙動)
+> は ``ControllerConfig(pi_alpha=1.0, pi_beta=0.0)`` でビット一致再現できる
+> (回帰アンカー)。
 
 Reject 時に schedule node `t + c_i · dt` は新しい dt で再評価する
 (dt 依存ノードのため)。`save_tlist` が指定された場合は次の観測時刻
@@ -583,6 +754,9 @@ def evolve_schedule_adaptive_m2(
     m=24, krylov_tol=1e-12, tol_step=1e-8,
     dt0=0.5, dt_min=1e-4, dt_max=None,
     safety=0.9, growth_max=4.0, max_rejects=50,
+    reject_shrink_min=0.2, reject_shrink_max=0.9,   # issue #149
+    freeze_growth_after_reject=True, growth_freeze_steps=1,  # issue #150
+    pi_alpha=0.7, pi_beta=0.4,                       # issue #151
     save_tlist=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, list[np.ndarray]]:
     """(psi_final, t_history, dt_history, n_rejects, states_at_save)"""
@@ -592,10 +766,18 @@ def evolve_schedule_adaptive_richardson(
     m=24, krylov_tol=1e-12, tol_step=1e-8,
     dt0=0.5, dt_min=1e-4, dt_max=None,
     safety=0.9, growth_max=4.0, max_rejects=50,
+    reject_shrink_min=0.2, reject_shrink_max=0.9,   # issue #149
+    freeze_growth_after_reject=True, growth_freeze_steps=1,  # issue #150
+    pi_alpha=0.7, pi_beta=0.4,                       # issue #151
     richardson_extrapolate=False,
     save_tlist=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, list[np.ndarray]]: ...
 ```
+
+`reject_shrink_min` / `reject_shrink_max` は reject 時の dt 縮小 factor を
+クランプする範囲 (issue #149)。`cfm4_adaptive_richardson_chebyshev` 経路の
+`evolve_schedule_adaptive_richardson_chebyshev` も同じ 2 引数を持つ。facade
+からは `ControllerConfig` 経由で渡す (上記 PI controller defaults 表のノート)。
 
 `QuantumAnnealer.run(method="cfm4_adaptive_richardson_krylov", ...)` はこれを
 内部で呼ぶ薄いラッパ。

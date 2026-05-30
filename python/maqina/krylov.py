@@ -481,37 +481,38 @@ def _python_m2_step(
     m: int,
     krylov_tol: float,
 ) -> np.ndarray:
-    """M2 中点則 1 step の Python リファレンス実装.
+    """M2 中点則 1 step の Python リファレンス実装 (旧 API X-only thin shim).
 
-    ``psi_new = exp(-i dt · H(a_mid, b_mid)) · psi`` を
-    ``_python_lanczos_propagate`` 経由で計算する. ``a_mid`` / ``b_mid`` は
-    呼出側で ``schedule.coeffs_at(t + dt/2)`` を評価して渡す前提.
-
-    Parameters
-    ----------
-    psi
-        shape ``(2**n,)`` complex128 の入力状態.
-    h_x
-        shape ``(n,)`` float64 のサイト依存横磁場振幅.
-    h_p_diag
-        shape ``(2**n,)`` float64 の Z 基底 problem 対角.
-    a_mid, b_mid
-        中点でフリーズ済の ``A(s(t+dt/2))``, ``B(s(t+dt/2))``.
-    dt
-        時刻刻み幅.
-    m
-        Krylov 部分空間次元.
-    krylov_tol
-        Lanczos の β 打切り閾値.
-
-    Returns
-    -------
-    np.ndarray
-        shape ``(2**n,)`` complex128 の新状態.
+    Phase C / issue #142: per-axis form (``_python_m2_step_xyz``) の X-only
+    shim に薄くなった. ``g_x = -a_mid · h_x``, ``g_y = g_z = None`` で per-axis
+    版を呼ぶ. 旧テストが (a_mid, b_mid) signature に依存しているため shim を残す.
     """
-    matvec = _make_python_matvec(h_x, h_p_diag, a_mid, b_mid)
-    # issue #93 (Phase 7): _python_lanczos_propagate は (psi, m_eff, β_m, |c_m|).
-    # M2 経路は固定 dt で m_eff / β_m / |c_m| 露出不要のため discard.
+    g_x = (-a_mid * np.asarray(h_x, dtype=np.float64)).astype(np.float64, copy=False)
+    return _python_m2_step_xyz(psi, h_p_diag, g_x, None, None, b_mid, dt, m, krylov_tol)
+
+
+def _python_m2_step_xyz(
+    psi: np.ndarray,
+    h_p_diag: np.ndarray,
+    g_x_mid: np.ndarray,
+    g_y_mid: np.ndarray | None,
+    g_z_mid: np.ndarray | None,
+    b_mid: float,
+    dt: float,
+    m: int,
+    krylov_tol: float,
+) -> np.ndarray:
+    """M2 中点則 1 step の per-axis Python リファレンス (Phase C / issue #142).
+
+    ``psi_new = exp(-i dt · H_mid) · psi`` を per-axis 形 H_mid で
+    ``_python_lanczos_propagate`` 経由で計算する. Rust 側
+    ``m2_midpoint_step_xyz`` (``src/cfm4.rs``) と ``rel < 1e-13`` で一致する
+    のが契約.
+    """
+    gz_eff = _python_compute_gz_eff_diag(g_z_mid) if g_z_mid is not None else None
+    matvec = _make_python_matvec_xyz(
+        g_x_mid, g_y_mid, h_p_diag, b_mid, gz_eff_diag=gz_eff
+    )
     psi_new, _m_eff, _beta_m, _c_m_abs = _python_lanczos_propagate(
         matvec, psi, dt, m, krylov_tol
     )
@@ -524,38 +525,112 @@ def _make_python_matvec(
     a_t: float,
     b_t: float,
 ) -> Callable[[np.ndarray], np.ndarray]:
-    """``v -> H(a_t, b_t) · v`` の純 NumPy matvec closure を作る.
+    """``v -> H(a_t, b_t) · v`` の純 NumPy matvec closure を作る (旧 API 経由 helper).
 
     ``H(a_t, b_t) = a_t · H_driver + b_t · diag(h_p_diag)`` (``H_driver =
     -Σ_i h_x_i X_i``). bit-flip 部分は ``i`` 軸ごとに ``np.bitwise_xor`` で
     インデックス並び替えを行うのが最も簡素. dim が大きい場合は cache
     不利だが Phase 1 の参照実装としては許容範囲.
+
+    Phase C / issue #142: ``_make_python_matvec_xyz`` の X-only thin shim と
+    して残す (新コードは ``_make_python_matvec_xyz`` を呼ぶ).
     """
-    n = int(h_x.shape[0])
+    g_x = (-a_t * np.asarray(h_x, dtype=np.float64)).astype(np.float64, copy=False)
+    return _make_python_matvec_xyz(g_x, None, h_p_diag, b_t, gz_eff_diag=None)
+
+
+def _python_compute_gz_eff_diag(g_z: np.ndarray) -> np.ndarray:
+    """``gz_eff_diag[k] = Σ_i g_z[i] · σ_z_i(k)`` を Walsh doubling で構築する.
+
+    Rust 側 ``src/matvec.rs::compute_gz_eff_diag`` (PR #143) と完全に同一
+    アルゴリズム (``rel < 1e-13`` 一致). bit 規約は LSB-first
+    (CLAUDE.md "物理的取り決め" 節): ``σ_z_i(k) = +1`` if bit ``i`` of ``k`` is 0,
+    ``-1`` if 1. 各 ``i`` ごとに 「low half (bit i = 0) に ``+g_z[i]``,
+    high half (bit i = 1) に ``-g_z[i]``」を加算しながら 2 倍化する.
+
+    全体 O(2^N) (償却 O(1) per 基底, ``N`` に陽に依存しない). ``g_z = 0``
+    のとき呼出側が None で skip するため本関数は呼ばれない.
+    """
+    n = int(g_z.shape[0])
+    cur = np.array([0.0], dtype=np.float64)
+    for i in range(n):
+        cur = np.concatenate([cur + float(g_z[i]), cur - float(g_z[i])])
+    return cur
+
+
+def _make_python_matvec_xyz(
+    g_x: np.ndarray,
+    g_y: np.ndarray | None,
+    h_p_diag: np.ndarray,
+    c_b: float,
+    *,
+    gz_eff_diag: np.ndarray | None,
+) -> Callable[[np.ndarray], np.ndarray]:
+    """``v -> H · v`` の per-axis 純 NumPy matvec closure (Phase C / issue #142).
+
+    .. code-block:: text
+
+        H = Σ_i [g_x_i · X_i + g_y_i · Y_i] + c_b · diag(h_p_diag) + diag(gz_eff_diag)
+
+    の matvec. Rust 側 ``src/matvec.rs::apply_h_general`` (PR #143) と
+    同等の演算経路を pure NumPy で実装する (``rel < 1e-13`` 契約).
+
+    - ``g_y = None``: real-only X-only path. axis loop で
+      ``y[k] += g_x[i] · v[k ^ mask]`` のみ. 旧 API path / 新 API path で
+      ``g_y = None`` を渡したときと byte-identical.
+    - ``g_y != None`` (per-site): per-axis 分岐. ``g_y[i] == 0.0`` のとき axis
+      ``i`` は real path に落とす. ``g_y[i] != 0.0`` のとき complex coeff
+      ``c_i = g_x[i] + i · g_y[i]`` を用い pair (k_lo, k_hi) (bit i = 0 / 1) に対し
+      ``y[k_lo] += conj(c_i) · v[k_hi]``, ``y[k_hi] += c_i · v[k_lo]``.
+    - ``gz_eff_diag != None``: 対角に加算 (Z 軸時間依存場の寄与;
+      ``compute_gz_eff_diag`` で precompute 済).
+    """
+    n = int(g_x.shape[0])
     dim = 1 << n
     if h_p_diag.shape != (dim,):
         raise ValueError(
             f"h_p_diag shape mismatch: expected ({dim},), got {h_p_diag.shape}"
         )
+    if gz_eff_diag is not None and gz_eff_diag.shape != (dim,):
+        raise ValueError(
+            f"gz_eff_diag shape mismatch: expected ({dim},), got {gz_eff_diag.shape}"
+        )
 
-    diag = (b_t * h_p_diag).astype(np.float64, copy=False)
-    coeffs = (-a_t * h_x).astype(np.float64, copy=False)
+    diag = (c_b * np.asarray(h_p_diag, dtype=np.float64)).astype(np.float64, copy=False)
+    if gz_eff_diag is not None:
+        diag = (diag + gz_eff_diag).astype(np.float64, copy=False)
+    g_x_arr = np.asarray(g_x, dtype=np.float64)
+    g_y_arr = np.asarray(g_y, dtype=np.float64) if g_y is not None else None
     masks = np.array([1 << i for i in range(n)], dtype=np.int64)
     idx = np.arange(dim, dtype=np.int64)
 
     def matvec(v: np.ndarray) -> np.ndarray:
-        y = diag * v
+        y = (diag * v).astype(np.complex128, copy=True)
         for i in range(n):
-            if coeffs[i] == 0.0:
-                continue
-            y = y + coeffs[i] * v[idx ^ int(masks[i])]
+            mask = int(masks[i])
+            gx_i = float(g_x_arr[i])
+            gy_i = float(g_y_arr[i]) if g_y_arr is not None else 0.0
+            if gy_i == 0.0:
+                # Real-only fast path: y[k] += g_x[i] · v[k ^ mask].
+                if gx_i == 0.0:
+                    continue
+                y = y + gx_i * v[idx ^ mask]
+            else:
+                # Complex coeff c_i = g_x[i] + i · g_y[i]. pair (k_lo, k_hi).
+                bit_zero = (idx & mask) == 0
+                k_lo = idx[bit_zero]
+                k_hi = k_lo ^ mask
+                v_hi = v[k_hi]
+                v_lo = v[k_lo]
+                # conj(c_i) = g_x - i · g_y; c_i = g_x + i · g_y.
+                y[k_lo] = y[k_lo] + (gx_i - 1j * gy_i) * v_hi
+                y[k_hi] = y[k_hi] + (gx_i + 1j * gy_i) * v_lo
         return y
 
     return matvec
 
 
 def evolve_schedule_m2(
-    h_x: np.ndarray,
     h_p_diag: np.ndarray,
     schedule: Schedule,
     psi0: np.ndarray,
@@ -642,7 +717,6 @@ def evolve_schedule_m2(
     # (issue #86; 旧 ``np.ascontiguousarray`` は psi0 が既に C-contiguous
     # complex128 なら同一参照を返すため in-place 化で psi0 が破壊される).
     psi = np.array(psi0, dtype=np.complex128, order="C")
-    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     dim = int(psi.shape[0])
 
@@ -670,26 +744,29 @@ def evolve_schedule_m2(
         t_right = float(boundaries[k + 1])
         dt_k = t_right - t_left
         t_mid = 0.5 * (t_left + t_right)
-        a_mid, b_mid = schedule.coeffs_at(t_mid)
+        # Phase C / issue #142: schedule から per-axis 形を取得.
+        g_x_mid, g_y_mid, g_z_mid, b_mid = schedule._eval_stage(t_mid)
         if rust_mod is not None:
             # in-place 入口: ``psi`` を直接更新, 戻り値 None. Python 境界での
             # ``dim · 16 B`` alloc / copy が step 数だけ消える (issue #86).
-            rust_mod.m2_midpoint_step_inplace_py(
+            rust_mod.m2_midpoint_step_xyz_inplace_py(
                 psi,
-                h_x_arr,
                 h_p_diag_arr,
-                a_mid,
+                g_x_mid,
+                g_y_mid,
+                g_z_mid,
                 b_mid,
                 dt_k,
                 m,
                 krylov_tol,
             )
         else:
-            psi = _python_m2_step(
+            psi = _python_m2_step_xyz(
                 psi,
-                h_x_arr,
                 h_p_diag_arr,
-                a_mid,
+                g_x_mid,
+                g_y_mid,
+                g_z_mid,
                 b_mid,
                 dt_k,
                 m,
@@ -794,7 +871,6 @@ def _python_trotter_step(
 
 
 def evolve_schedule_trotter(
-    h_x: np.ndarray,
     h_p_diag: np.ndarray,
     schedule: Schedule,
     psi0: np.ndarray,
@@ -854,11 +930,19 @@ def evolve_schedule_trotter(
         raise ValueError(f"n_steps must be >= 1, got {n_steps!r}")
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
+    # Phase C / issue #142: Trotter 経路は X-only API のみサポート.
+    if schedule.is_xyz_api:
+        raise ValueError(
+            "method='trotter' is not supported for Schedule.from_xyz (new API). "
+            "Trotter kernels are real-coeff SIMD-optimized and XYZ generalization "
+            "is out of scope for issue #142. Use 'cfm4_adaptive_richardson_krylov' "
+            "or 'cfm4_adaptive_richardson_chebyshev' instead."
+        )
 
     # 入力 ``psi0`` を破壊しないように defensive copy (issue #86; in-place
     # API 採用後は ``np.ascontiguousarray`` の no-copy 経路が危険).
     psi = np.array(psi0, dtype=np.complex128, order="C")
-    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
+    h_x_arr = np.ascontiguousarray(schedule.h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     n = int(h_x_arr.shape[0])
     dim = int(psi.shape[0])
@@ -986,7 +1070,6 @@ def _python_trotter_suzuki4_step(
 
 
 def evolve_schedule_trotter_suzuki4(
-    h_x: np.ndarray,
     h_p_diag: np.ndarray,
     schedule: Schedule,
     psi0: np.ndarray,
@@ -1045,10 +1128,16 @@ def evolve_schedule_trotter_suzuki4(
         raise ValueError(f"n_steps must be >= 1, got {n_steps!r}")
     if not (t1 > t0):
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
+    # Phase C / issue #142: Trotter 系経路は X-only API のみサポート.
+    if schedule.is_xyz_api:
+        raise ValueError(
+            "method='trotter_suzuki4' is not supported for Schedule.from_xyz "
+            "(new API). See evolve_schedule_trotter docstring."
+        )
 
     # 入力 ``psi0`` を破壊しないように defensive copy (issue #86).
     psi = np.array(psi0, dtype=np.complex128, order="C")
-    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
+    h_x_arr = np.ascontiguousarray(schedule.h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     n = int(h_x_arr.shape[0])
     dim = int(psi.shape[0])
@@ -1176,29 +1265,103 @@ def _python_cfm4_step(
         adaptive Richardson driver で Magnus 誤差と分離するために使う
         (issue #93 Phase 7). ``m_eff_i == 0`` の退化 stage は 0 contribution.
     """
-    # stage 1: B_1 = a_high · H_1 + a_low · H_2 を (c_drv_1, c_diag_1) に
-    # 畳み込んで Lanczos 1 回.
-    # issue #93 (Phase 7): _python_lanczos_propagate は (psi, m_eff, β_m, |c_m|).
-    # β_m / |c_m| を triangle inequality で集約して err_lanczos_sum を作る.
-    # ‖ψ_in_2‖ ≈ ‖ψ_in_1‖ (Lanczos は unitary 近似) を使い 1 回だけ psi_norm を計算.
+    # Phase C / issue #142: per-axis 形 _python_cfm4_step_xyz の X-only shim
+    # に薄くなった. ``g_x_s* = -a_s* · h_x``, ``g_y = g_z = None`` で per-axis 版
+    # を呼ぶ. 旧テストが (a_s1, b_s1, a_s2, b_s2) signature に依存しているため shim.
+    g_x_s1 = (-a_s1 * np.asarray(h_x, dtype=np.float64)).astype(np.float64, copy=False)
+    g_x_s2 = (-a_s2 * np.asarray(h_x, dtype=np.float64)).astype(np.float64, copy=False)
+    return _python_cfm4_step_xyz(
+        psi,
+        h_p_diag,
+        g_x_s1,
+        None,
+        None,
+        b_s1,
+        g_x_s2,
+        None,
+        None,
+        b_s2,
+        dt,
+        m,
+        krylov_tol,
+    )
+
+
+def _python_cfm4_step_xyz(
+    psi: np.ndarray,
+    h_p_diag: np.ndarray,
+    g_x_s1: np.ndarray,
+    g_y_s1: np.ndarray | None,
+    g_z_s1: np.ndarray | None,
+    b_s1: float,
+    g_x_s2: np.ndarray,
+    g_y_s2: np.ndarray | None,
+    g_z_s2: np.ndarray | None,
+    b_s2: float,
+    dt: float,
+    m: int,
+    krylov_tol: float,
+) -> tuple[np.ndarray, int, float]:
+    """CFM4:2 1 step の per-axis Python リファレンス (Phase C / issue #142).
+
+    Rust 側 ``cfm4_step`` (per-axis form, PR #145) と ``rel < 1e-13`` で一致.
+    stage 1 = ``a_high · stage1_pair + a_low · stage2_pair``,
+    stage 2 = ``a_low · stage1_pair + a_high · stage2_pair`` で per-axis 配列を
+    線形結合してから ``_make_python_matvec_xyz`` で matvec closure を組む.
+
+    ``g_y_s* = None`` のとき結合後も None に縮退 (real-only path).
+    ``g_z_s* = None`` のとき gz_eff_diag = None.
+    """
     psi_norm = float(np.linalg.norm(psi))
-    c_drv_1 = _CFM4_A_HIGH * a_s1 + _CFM4_A_LOW * a_s2
-    c_diag_1 = _CFM4_A_HIGH * b_s1 + _CFM4_A_LOW * b_s2
-    matvec_1 = _make_python_matvec(h_x, h_p_diag, c_drv_1, c_diag_1)
+
+    def _combine(
+        w_s1: float, w_s2: float, arr_s1: np.ndarray | None, arr_s2: np.ndarray | None
+    ) -> np.ndarray | None:
+        """``w_s1 · arr_s1 + w_s2 · arr_s2`` を組む. 両方 None なら None."""
+        if arr_s1 is None and arr_s2 is None:
+            return None
+        if arr_s1 is None:
+            assert arr_s2 is not None
+            return (w_s2 * np.asarray(arr_s2, dtype=np.float64)).astype(
+                np.float64, copy=False
+            )
+        if arr_s2 is None:
+            return (w_s1 * np.asarray(arr_s1, dtype=np.float64)).astype(
+                np.float64, copy=False
+            )
+        return (
+            w_s1 * np.asarray(arr_s1, dtype=np.float64)
+            + w_s2 * np.asarray(arr_s2, dtype=np.float64)
+        ).astype(np.float64, copy=False)
+
+    # stage 1: w = (a_high, a_low).
+    gx_stage1 = _combine(_CFM4_A_HIGH, _CFM4_A_LOW, g_x_s1, g_x_s2)
+    gy_stage1 = _combine(_CFM4_A_HIGH, _CFM4_A_LOW, g_y_s1, g_y_s2)
+    gz_stage1 = _combine(_CFM4_A_HIGH, _CFM4_A_LOW, g_z_s1, g_z_s2)
+    b_stage1 = _CFM4_A_HIGH * b_s1 + _CFM4_A_LOW * b_s2
+    gz_eff_1 = _python_compute_gz_eff_diag(gz_stage1) if gz_stage1 is not None else None
+    assert gx_stage1 is not None  # g_x は常に Some
+    matvec_1 = _make_python_matvec_xyz(
+        gx_stage1, gy_stage1, h_p_diag, b_stage1, gz_eff_diag=gz_eff_1
+    )
     psi_mid, m_eff_stage1, beta_m_1, c_m_abs_1 = _python_lanczos_propagate(
         matvec_1, psi, dt, m, krylov_tol
     )
 
-    # stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に
-    # 畳み込んで Lanczos もう 1 回.
-    c_drv_2 = _CFM4_A_LOW * a_s1 + _CFM4_A_HIGH * a_s2
-    c_diag_2 = _CFM4_A_LOW * b_s1 + _CFM4_A_HIGH * b_s2
-    matvec_2 = _make_python_matvec(h_x, h_p_diag, c_drv_2, c_diag_2)
+    # stage 2: w = (a_low, a_high).
+    gx_stage2 = _combine(_CFM4_A_LOW, _CFM4_A_HIGH, g_x_s1, g_x_s2)
+    gy_stage2 = _combine(_CFM4_A_LOW, _CFM4_A_HIGH, g_y_s1, g_y_s2)
+    gz_stage2 = _combine(_CFM4_A_LOW, _CFM4_A_HIGH, g_z_s1, g_z_s2)
+    b_stage2 = _CFM4_A_LOW * b_s1 + _CFM4_A_HIGH * b_s2
+    gz_eff_2 = _python_compute_gz_eff_diag(gz_stage2) if gz_stage2 is not None else None
+    assert gx_stage2 is not None
+    matvec_2 = _make_python_matvec_xyz(
+        gx_stage2, gy_stage2, h_p_diag, b_stage2, gz_eff_diag=gz_eff_2
+    )
     psi_new, m_eff_stage2, beta_m_2, c_m_abs_2 = _python_lanczos_propagate(
         matvec_2, psi_mid, dt, m, krylov_tol
     )
 
-    # triangle inequality で集約. 退化 stage (m_eff == 0) は 0 contribution.
     err_lanczos_1 = (
         beta_m_1 * c_m_abs_1 * psi_norm * dt / m_eff_stage1 if m_eff_stage1 > 0 else 0.0
     )
@@ -1210,7 +1373,6 @@ def _python_cfm4_step(
 
 
 def evolve_schedule_cfm4(
-    h_x: np.ndarray,
     h_p_diag: np.ndarray,
     schedule: Schedule,
     psi0: np.ndarray,
@@ -1276,7 +1438,6 @@ def evolve_schedule_cfm4(
         raise ValueError(f"t1 must be > t0, got t0={t0!r}, t1={t1!r}")
 
     psi = np.ascontiguousarray(psi0, dtype=np.complex128)
-    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     dim = int(psi.shape[0])
 
@@ -1302,35 +1463,39 @@ def evolve_schedule_cfm4(
         dt_k = t_right - t_left
         t_s1 = t_left + _CFM4_C1 * dt_k
         t_s2 = t_left + _CFM4_C2 * dt_k
-        a_s1, b_s1 = schedule.coeffs_at(t_s1)
-        a_s2, b_s2 = schedule.coeffs_at(t_s2)
+        # Phase C / issue #142: schedule から per-axis 形を取得.
+        g_x_s1, g_y_s1, g_z_s1, b_s1 = schedule._eval_stage(t_s1)
+        g_x_s2, g_y_s2, g_z_s2, b_s2 = schedule._eval_stage(t_s2)
         if rust_mod is not None:
-            # issue #93 (Phase 7): cfm4_step_py は (psi, m_eff_sum, err_lanczos_sum).
+            # issue #93 (Phase 7): cfm4_step_xyz_py は (psi, m_eff_sum, err_lanczos_sum).
             # 固定 dt cfm4 経路 (adaptive ではない) では m_eff / err_lanczos の
             # 露出が不要なので discard.
-            psi, _m_eff_sum, _err_lanczos_sum = rust_mod.cfm4_step_py(
+            psi, _m_eff_sum, _err_lanczos_sum = rust_mod.cfm4_step_xyz_py(
                 psi,
-                h_x_arr,
                 h_p_diag_arr,
-                a_s1,
+                g_x_s1,
+                g_y_s1,
+                g_z_s1,
                 b_s1,
-                a_s2,
+                g_x_s2,
+                g_y_s2,
+                g_z_s2,
                 b_s2,
                 dt_k,
                 m,
                 krylov_tol,
             )
         else:
-            # issue #93 (Phase 7): _python_cfm4_step は
-            # (psi, m_eff_sum, err_lanczos_sum). 固定 dt 経路 (evolve_schedule_cfm4)
-            # は adaptive ではないので err_lanczos / m_eff は discard.
-            psi, _m_eff_sum, _err_lanczos_sum = _python_cfm4_step(
+            psi, _m_eff_sum, _err_lanczos_sum = _python_cfm4_step_xyz(
                 psi,
-                h_x_arr,
                 h_p_diag_arr,
-                a_s1,
+                g_x_s1,
+                g_y_s1,
+                g_z_s1,
                 b_s1,
-                a_s2,
+                g_x_s2,
+                g_y_s2,
+                g_z_s2,
                 b_s2,
                 dt_k,
                 m,
@@ -1522,48 +1687,125 @@ def _python_cfm4_step_with_richardson_estimate(
         ``err_magnus = max(0, err - err_lanczos_total)`` として PI controller
         の Magnus 起因駆動量を取り出すために使う.
     """
+
+    # Phase C / issue #142: per-axis 形 _python_cfm4_step_with_richardson_estimate_xyz
+    # の X-only shim. 各 stage の (a_s*, b_s*) を per-axis 形に展開して per-axis 版を呼ぶ.
+    def _mk_gx(a_s: float) -> np.ndarray:
+        return (-a_s * np.asarray(h_x, dtype=np.float64)).astype(np.float64, copy=False)
+
+    return _python_cfm4_step_with_richardson_estimate_xyz(
+        psi,
+        h_p_diag,
+        _mk_gx(a_s1_full),
+        None,
+        None,
+        b_s1_full,
+        _mk_gx(a_s2_full),
+        None,
+        None,
+        b_s2_full,
+        _mk_gx(a_s1_h1),
+        None,
+        None,
+        b_s1_h1,
+        _mk_gx(a_s2_h1),
+        None,
+        None,
+        b_s2_h1,
+        _mk_gx(a_s1_h2),
+        None,
+        None,
+        b_s1_h2,
+        _mk_gx(a_s2_h2),
+        None,
+        None,
+        b_s2_h2,
+        dt,
+        m,
+        krylov_tol,
+        extrapolate,
+    )
+
+
+def _python_cfm4_step_with_richardson_estimate_xyz(
+    psi: np.ndarray,
+    h_p_diag: np.ndarray,
+    g_x_s1_full: np.ndarray,
+    g_y_s1_full: np.ndarray | None,
+    g_z_s1_full: np.ndarray | None,
+    b_s1_full: float,
+    g_x_s2_full: np.ndarray,
+    g_y_s2_full: np.ndarray | None,
+    g_z_s2_full: np.ndarray | None,
+    b_s2_full: float,
+    g_x_s1_h1: np.ndarray,
+    g_y_s1_h1: np.ndarray | None,
+    g_z_s1_h1: np.ndarray | None,
+    b_s1_h1: float,
+    g_x_s2_h1: np.ndarray,
+    g_y_s2_h1: np.ndarray | None,
+    g_z_s2_h1: np.ndarray | None,
+    b_s2_h1: float,
+    g_x_s1_h2: np.ndarray,
+    g_y_s1_h2: np.ndarray | None,
+    g_z_s1_h2: np.ndarray | None,
+    b_s1_h2: float,
+    g_x_s2_h2: np.ndarray,
+    g_y_s2_h2: np.ndarray | None,
+    g_z_s2_h2: np.ndarray | None,
+    b_s2_h2: float,
+    dt: float,
+    m: int,
+    krylov_tol: float,
+    extrapolate: bool,
+) -> tuple[np.ndarray, float, int, float]:
+    """CFM4:2 + step-doubling Richardson Python ref (per-axis form, Phase C).
+
+    Rust 側 ``cfm4_step_with_richardson_estimate`` (per-axis form, PR #145) と
+    ``rel < 1e-13`` で一致するのが契約.
+    """
     half_dt = 0.5 * float(dt)
 
-    # issue #93 (Phase 7): cfm4_step は (psi, m_eff_sum, err_lanczos_sum) を返す.
-    # 3 stage の err_lanczos_sum を triangle inequality で集約して
-    # err_lanczos_total を作る.
-
-    # 1) full-step CFM4:2 (dt).
-    psi_full, m_eff_full, err_lanczos_full = _python_cfm4_step(
+    psi_full, m_eff_full, err_lanczos_full = _python_cfm4_step_xyz(
         psi,
-        h_x,
         h_p_diag,
-        a_s1_full,
+        g_x_s1_full,
+        g_y_s1_full,
+        g_z_s1_full,
         b_s1_full,
-        a_s2_full,
+        g_x_s2_full,
+        g_y_s2_full,
+        g_z_s2_full,
         b_s2_full,
         float(dt),
         m,
         krylov_tol,
     )
-
-    # 2) 前半 half-step CFM4:2 (dt/2)
-    psi_mid, m_eff_h1, err_lanczos_h1 = _python_cfm4_step(
+    psi_mid, m_eff_h1, err_lanczos_h1 = _python_cfm4_step_xyz(
         psi,
-        h_x,
         h_p_diag,
-        a_s1_h1,
+        g_x_s1_h1,
+        g_y_s1_h1,
+        g_z_s1_h1,
         b_s1_h1,
-        a_s2_h1,
+        g_x_s2_h1,
+        g_y_s2_h1,
+        g_z_s2_h1,
         b_s2_h1,
         half_dt,
         m,
         krylov_tol,
     )
-
-    # 3) 後半 half-step CFM4:2 (dt/2), 前半の出口状態を入口に取る.
-    psi_h2, m_eff_h2, err_lanczos_h2 = _python_cfm4_step(
+    psi_h2, m_eff_h2, err_lanczos_h2 = _python_cfm4_step_xyz(
         psi_mid,
-        h_x,
         h_p_diag,
-        a_s1_h2,
+        g_x_s1_h2,
+        g_y_s1_h2,
+        g_z_s1_h2,
         b_s1_h2,
-        a_s2_h2,
+        g_x_s2_h2,
+        g_y_s2_h2,
+        g_z_s2_h2,
         b_s2_h2,
         half_dt,
         m,
@@ -1574,7 +1816,6 @@ def _python_cfm4_step_with_richardson_estimate(
     err_lanczos_total = err_lanczos_full + err_lanczos_h1 + err_lanczos_h2
 
     if extrapolate:
-        # ψ_acc = (16 · ψ_h2 - ψ_full) / 15. Rust 側と同一順序で書き戻す.
         psi_new = (16.0 * psi_h2 - psi_full) / 15.0
     else:
         psi_new = psi_h2
@@ -1611,56 +1852,73 @@ def _adaptive_dispatch_m2_estimate(
     )
 
 
-def _adaptive_dispatch_richardson_estimate(
+def _adaptive_dispatch_richardson_estimate_xyz(
     rust_mod: ModuleType | None,
     psi: np.ndarray,
-    h_x: np.ndarray,
     h_p_diag: np.ndarray,
-    a_s1_full: float,
+    g_x_s1_full: np.ndarray,
+    g_y_s1_full: np.ndarray | None,
+    g_z_s1_full: np.ndarray | None,
     b_s1_full: float,
-    a_s2_full: float,
+    g_x_s2_full: np.ndarray,
+    g_y_s2_full: np.ndarray | None,
+    g_z_s2_full: np.ndarray | None,
     b_s2_full: float,
-    a_s1_h1: float,
+    g_x_s1_h1: np.ndarray,
+    g_y_s1_h1: np.ndarray | None,
+    g_z_s1_h1: np.ndarray | None,
     b_s1_h1: float,
-    a_s2_h1: float,
+    g_x_s2_h1: np.ndarray,
+    g_y_s2_h1: np.ndarray | None,
+    g_z_s2_h1: np.ndarray | None,
     b_s2_h1: float,
-    a_s1_h2: float,
+    g_x_s1_h2: np.ndarray,
+    g_y_s1_h2: np.ndarray | None,
+    g_z_s1_h2: np.ndarray | None,
     b_s1_h2: float,
-    a_s2_h2: float,
+    g_x_s2_h2: np.ndarray,
+    g_y_s2_h2: np.ndarray | None,
+    g_z_s2_h2: np.ndarray | None,
     b_s2_h2: float,
     dt: float,
     m: int,
     krylov_tol: float,
     extrapolate: bool,
 ) -> tuple[np.ndarray, float, int, float]:
-    """``rust_mod`` 可否に応じて Rust / Python の Richardson 推定子を呼ぶ.
+    """``rust_mod`` 可否に応じて Rust / Python の Richardson 推定子 (per-axis) を呼ぶ.
 
-    issue #93 (Phase 7): Rust / Python ref 双方が
-    ``(psi_new, err, m_eff_sum, err_lanczos_total)`` を返すよう拡張.
-    末尾の ``err_lanczos_total`` は 3 × cfm4_step (= 6 Lanczos call) の
-    Lanczos a posteriori 誤差上界の triangle inequality 和.
-    adaptive Richardson driver
-    (``evolve_schedule_adaptive_richardson``) が
-    ``err_magnus = max(0, err - err_lanczos_total)`` で Magnus 起因駆動量を
-    取り出して PI controller に使う.
+    Phase C / issue #142: 旧 ``_adaptive_dispatch_richardson_estimate`` (X-only
+    scalar 形) を per-axis 配列形に refactor. 新 API (``Schedule.from_xyz``)
+    経由の driver はこちらを呼ぶ.
     """
     if rust_mod is not None:
         psi_new, err, m_eff_sum, err_lanczos_total = (
-            rust_mod.cfm4_step_with_richardson_estimate_py(
+            rust_mod.cfm4_step_with_richardson_estimate_xyz_py(
                 psi,
-                h_x,
                 h_p_diag,
-                a_s1_full,
+                g_x_s1_full,
+                g_y_s1_full,
+                g_z_s1_full,
                 b_s1_full,
-                a_s2_full,
+                g_x_s2_full,
+                g_y_s2_full,
+                g_z_s2_full,
                 b_s2_full,
-                a_s1_h1,
+                g_x_s1_h1,
+                g_y_s1_h1,
+                g_z_s1_h1,
                 b_s1_h1,
-                a_s2_h1,
+                g_x_s2_h1,
+                g_y_s2_h1,
+                g_z_s2_h1,
                 b_s2_h1,
-                a_s1_h2,
+                g_x_s1_h2,
+                g_y_s1_h2,
+                g_z_s1_h2,
                 b_s1_h2,
-                a_s2_h2,
+                g_x_s2_h2,
+                g_y_s2_h2,
+                g_z_s2_h2,
                 b_s2_h2,
                 dt,
                 m,
@@ -1669,21 +1927,32 @@ def _adaptive_dispatch_richardson_estimate(
             )
         )
         return psi_new, float(err), int(m_eff_sum), float(err_lanczos_total)
-    return _python_cfm4_step_with_richardson_estimate(
+    return _python_cfm4_step_with_richardson_estimate_xyz(
         psi,
-        h_x,
         h_p_diag,
-        a_s1_full,
+        g_x_s1_full,
+        g_y_s1_full,
+        g_z_s1_full,
         b_s1_full,
-        a_s2_full,
+        g_x_s2_full,
+        g_y_s2_full,
+        g_z_s2_full,
         b_s2_full,
-        a_s1_h1,
+        g_x_s1_h1,
+        g_y_s1_h1,
+        g_z_s1_h1,
         b_s1_h1,
-        a_s2_h1,
+        g_x_s2_h1,
+        g_y_s2_h1,
+        g_z_s2_h1,
         b_s2_h1,
-        a_s1_h2,
+        g_x_s1_h2,
+        g_y_s1_h2,
+        g_z_s1_h2,
         b_s1_h2,
-        a_s2_h2,
+        g_x_s2_h2,
+        g_y_s2_h2,
+        g_z_s2_h2,
         b_s2_h2,
         dt,
         m,
@@ -1702,31 +1971,100 @@ def _pi_dt_next(
     dt_max: float,
     dt_min: float,
     p: int,
+    err_prev: float | None = None,
+    pi_alpha: float = 1.0,
+    pi_beta: float = 0.0,
 ) -> float:
-    """PI controller の accept 時 ``dt_next`` を計算する.
+    """PI controller の accept 時 ``dt_next`` を計算する (issue #151).
 
     .. code-block:: text
 
-        dt_next = dt · safety · (tol_step / err)^{1/(p+1)}
+        i_term  = (tol_step / err)^{pi_alpha/(p+1)}      # 積分 (I) 項
+        p_term  = (err_prev / err)^{pi_beta/(p+1)}       # 比例 (P) 項
+        dt_next = dt · safety · i_term · p_term
         dt_next = min(dt_next, dt_try · growth_max, dt_max)
         dt_next = max(dt_next, dt_min)
 
-    ``err <= 1e-30`` のときは PI 式が発散するので
-    ``dt_next = dt_try · growth_max`` に折り返す (0 近傍ガード).
-    ``p`` は推定子の order (M2 embedded = 2, Richardson = 4).
-    詳細は ``docs/design/05-3-propagator.md`` §5.3 PI controller サブセクション.
+    Gustafsson / Hairer-Wanner II §IV.2 の predictive PI controller。比例項
+    ``(err_prev / err)^{pi_beta/(p+1)}`` が誤差の増加傾向 (Magnus 4 次係数 C₄ の
+    上昇) を先読みして dt 拡大を抑制し、臨界領域でのノコギリ波を平坦化する。
+    ``pi_alpha = 1.0, pi_beta = 0.0`` で従来の純 I (積分) 制御
+    ``dt · safety · (tol_step / err)^{1/(p+1)}`` を **ビット一致** で再現する
+    (回帰アンカー)。
+
+    ``err_prev`` は直前に **accept** した step の駆動量 (M2 = ``err``,
+    Richardson / Chebyshev = ``err_magnus`` ベース)。最初の accept では
+    ``err_prev = None``、reject を挟んでも「最後に accept した step」の値を使う
+    (Hairer の ``errold`` 規約)。
+
+    0 近傍ガード:
+
+    * ``err <= 1e-30`` のときは I 項 / P 項とも発散するので
+      ``dt_next = dt_try · growth_max`` に折り返す。
+    * ``err_prev`` が ``None`` または ``<= 1e-30``、もしくは ``pi_beta == 0`` の
+      ときは比例項 ``p_term = 1.0`` に落とす (純 I 制御に縮退)。
+
+    ``p`` は推定子の order (M2 embedded = 2, Richardson = 4)。詳細は
+    ``docs/design/05-3-propagator.md`` "PI controller / adaptive ドライバ" 節。
     """
     if err <= 1.0e-30:
         dt_next = dt_try * growth_max
     else:
-        dt_next = dt_try * safety * (tol_step / err) ** (1.0 / (p + 1))
+        i_term = (tol_step / err) ** (pi_alpha / (p + 1))
+        if pi_beta != 0.0 and err_prev is not None and err_prev > 1.0e-30:
+            p_term = (err_prev / err) ** (pi_beta / (p + 1))
+        else:
+            p_term = 1.0
+        dt_next = dt_try * safety * i_term * p_term
     dt_next = min(dt_next, dt_try * growth_max, dt_max)
     dt_next = max(dt_next, dt_min)
     return float(dt_next)
 
 
+def _pi_dt_reject(
+    dt_try: float,
+    err_for_pi: float,
+    *,
+    tol_step: float,
+    safety: float,
+    reject_shrink_min: float,
+    reject_shrink_max: float,
+    dt_min: float,
+    p: int,
+) -> float:
+    """PI controller の reject 時 ``dt`` を計算する (issue #149).
+
+    .. code-block:: text
+
+        factor = safety · (tol_step / err_for_pi)^{1/(p+1)}
+        factor = clamp(factor, reject_shrink_min, reject_shrink_max)
+        dt     = max(dt_try · factor, dt_min)
+
+    accept 時 (:func:`_pi_dt_next`) と **同じ予測式** を使い、reject 用クランプ
+    ``[reject_shrink_min, reject_shrink_max]`` (``reject_shrink_max < 1`` で
+    必ず縮小) を掛ける。これにより ``err`` が ``tol_step`` をわずかに超えた
+    だけなら ``factor ≈ reject_shrink_max`` 程度で済み、固定 0.5 倍が招いていた
+    order-5 推定子での過剰縮小 (誤差 32× 削減 → 楽々 accept → 再上昇 → 再 reject
+    のノコギリ波) を断つ。大きく超えたときだけ ``reject_shrink_min`` まで落ちる。
+
+    ``growth_max`` / ``dt_max`` は reject 経路では適用不要 (``reject_shrink_max
+    < 1`` で定義上拡大しないため)。``dt_min`` 床は維持する。
+
+    ``err_for_pi <= 1e-30`` (0 近傍) のときは予測式が発散するので ``factor =
+    reject_shrink_max`` に折り返す (reject 経路では ``err`` が tol を超えて
+    いるため通常この分岐には入らないが defensive guard)。``p`` は推定子の order
+    (M2 embedded = 2, Richardson / Chebyshev = 4)。詳細は
+    ``docs/design/05-3-propagator.md`` "PI controller / adaptive ドライバ" 節。
+    """
+    if err_for_pi <= 1.0e-30:
+        factor = reject_shrink_max
+    else:
+        factor = safety * (tol_step / err_for_pi) ** (1.0 / (p + 1))
+    factor = min(max(factor, reject_shrink_min), reject_shrink_max)
+    return float(max(dt_try * factor, dt_min))
+
+
 def evolve_schedule_adaptive_m2(
-    h_x: np.ndarray,
     h_p_diag: np.ndarray,
     schedule: Schedule,
     psi0: np.ndarray,
@@ -1742,6 +2080,12 @@ def evolve_schedule_adaptive_m2(
     safety: float = 0.9,
     growth_max: float = 4.0,
     max_rejects: int = 50,
+    reject_shrink_min: float = 0.2,
+    reject_shrink_max: float = 0.9,
+    freeze_growth_after_reject: bool = True,
+    growth_freeze_steps: int = 1,
+    pi_alpha: float = 0.7,
+    pi_beta: float = 0.4,
     save_tlist: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """CFM4:2 + M2 embedded 推定子による adaptive dt ドライバ (Phase 4 C3).
@@ -1790,6 +2134,29 @@ def evolve_schedule_adaptive_m2(
     max_rejects
         同一 step での連続 reject 上限. 超過で ``RuntimeError``
         (既定 ``50``).
+    reject_shrink_min, reject_shrink_max
+        reject 時の dt 縮小 factor のクランプ範囲 ``[reject_shrink_min,
+        reject_shrink_max]`` (issue #149, 既定 ``[0.2, 0.9]``). reject 時も
+        accept と同じ予測式 ``safety · (tol_step / err)^{1/(p+1)}`` で factor を
+        出し, この範囲にクランプして ``dt = max(dt_try · factor, dt_min)``
+        とする. ``reject_shrink_min = reject_shrink_max = 0.5`` で旧挙動
+        (固定半減) を厳密再現. M2 経路は誤差源分離がないため ``err`` を
+        そのまま PI 駆動量に使う (p=2).
+    freeze_growth_after_reject, growth_freeze_steps
+        reject 後の dt 成長凍結 (issue #150, Gustafsson ヒステリシス). ``True``
+        (既定) のとき reject 直後から ``growth_freeze_steps`` 回 (既定 ``1``)
+        連続 accept するまで, accept 経路の dt 拡大を ``eff_growth_max = 1.0``
+        に凍結する (拡大のみ禁止, 縮小は許可). 過剰縮小 → 楽々 accept → 即
+        dt 再上昇 → 再 reject のノコギリ波の「再上昇」側を断つ. ``False`` で
+        #149 のみ適用した挙動 (reject 直後でも ``growth_max`` まで拡大可) と
+        ビット一致. ``growth_freeze_steps >= 1``.
+    pi_alpha, pi_beta
+        accept 時 dt 予測式の積分項 / 比例項の指数係数 (issue #151, 真の PI 化).
+        ``dt_next = dt · safety · (tol_step / err)^{pi_alpha/(p+1)} ·
+        (err_prev / err)^{pi_beta/(p+1)}`` (p=2). 既定 ``pi_alpha=0.7`` /
+        ``pi_beta=0.4`` (Gustafsson predictive PI 標準). ``pi_alpha=1.0,
+        pi_beta=0.0`` で旧 I 制御をビット一致再現 (回帰アンカー). M2 経路は
+        誤差源分離がないため ``err_prev`` は直前に accept した step の ``err``.
     save_tlist
         Phase 5 拡張対象外 (issue #47 では adaptive Richardson のみ有効化).
         adaptive M2 driver は ``annealer.py`` の facade からは呼ばれない
@@ -1833,6 +2200,14 @@ def evolve_schedule_adaptive_m2(
         raise ValueError(f"growth_max must be > 1, got {growth_max!r}")
     if max_rejects < 1:
         raise ValueError(f"max_rejects must be >= 1, got {max_rejects!r}")
+    if not (isinstance(growth_freeze_steps, int) and growth_freeze_steps >= 1):
+        raise ValueError(
+            f"growth_freeze_steps must be an int >= 1, got {growth_freeze_steps!r}"
+        )
+    if not (pi_alpha > 0.0):
+        raise ValueError(f"pi_alpha must be > 0, got {pi_alpha!r}")
+    if not (pi_beta >= 0.0):
+        raise ValueError(f"pi_beta must be >= 0, got {pi_beta!r}")
 
     dt_max_eff = float(dt_max) if dt_max is not None else 10.0 * float(dt0)
     if not (dt_max_eff >= dt0):
@@ -1840,8 +2215,17 @@ def evolve_schedule_adaptive_m2(
             f"dt_max must be >= dt0; got dt_max={dt_max_eff!r}, dt0={dt0!r}"
         )
 
+    # adaptive_m2 driver は新 API (XYZ Schedule) で動かない: 内部で M2
+    # estimator (X-only) を呼ぶため. legacy Schedule のみサポート.
+    if schedule.is_xyz_api:
+        raise ValueError(
+            "evolve_schedule_adaptive_m2 is not supported for Schedule.from_xyz "
+            "(legacy X-only API only). Use evolve_schedule_adaptive_richardson "
+            "or evolve_schedule_adaptive_richardson_chebyshev instead."
+        )
+
     psi = np.ascontiguousarray(psi0, dtype=np.complex128)
-    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
+    h_x_arr = np.ascontiguousarray(schedule.h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
 
     rust_mod = _rust_mod
@@ -1850,6 +2234,14 @@ def evolve_schedule_adaptive_m2(
     dt = float(dt0)
     n_rejects = 0
     n_consecutive_rejects = 0
+    # issue #150: reject 後の成長凍結 (Gustafsson ヒステリシス) の残り凍結
+    # accept 回数. reject で ``growth_freeze_steps`` に再武装し, 凍結中の
+    # accept は dt 拡大のみ禁止 (eff_growth_max=1.0). 0 で非凍結.
+    freeze_remaining = 0
+    # issue #151: 真の PI 比例項用の「直前に accept した step の駆動量」.
+    # 最初の accept では None (純 I). reject を挟んでも最後に accept した値を
+    # 保持する (Hairer の errold 規約). M2 経路は err をそのまま駆動量に使う.
+    err_prev_pi: float | None = None
     t_hist: list[float] = [t]
     dt_hist: list[float] = []
     while t < t_end:
@@ -1886,16 +2278,27 @@ def evolve_schedule_adaptive_m2(
             t_hist.append(t)
             dt_hist.append(dt_try)
             n_consecutive_rejects = 0
+            # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
+            if freeze_growth_after_reject and freeze_remaining > 0:
+                eff_growth_max = 1.0
+                freeze_remaining -= 1
+            else:
+                eff_growth_max = growth_max
             dt = _pi_dt_next(
                 dt_try,
                 err,
                 tol_step=tol_step,
                 safety=safety,
-                growth_max=growth_max,
+                growth_max=eff_growth_max,
                 dt_max=dt_max_eff,
                 dt_min=dt_min,
                 p=2,
+                err_prev=err_prev_pi,
+                pi_alpha=pi_alpha,
+                pi_beta=pi_beta,
             )
+            # issue #151: 次 accept の比例項用に駆動量 (M2 = err) を保持.
+            err_prev_pi = float(err)
         else:
             n_rejects += 1
             n_consecutive_rejects += 1
@@ -1905,7 +2308,22 @@ def evolve_schedule_adaptive_m2(
                     f"consecutive rejects at t={t}, dt={dt_try}, err={err}; "
                     f"consider relaxing tol_step or shrinking dt0."
                 )
-            dt = max(dt_try * 0.5, dt_min)
+            # issue #149: reject 時も accept と同じ予測式 + reject 用クランプ.
+            # M2 経路は誤差源分離なし (``err`` をそのまま PI 駆動量に使う, p=2).
+            # issue #150: reject のたびに成長凍結を再武装 (連続 reject でも
+            # 各回でカウンタを戻す). freeze_growth_after_reject=False のときは
+            # accept 経路で読まれないため no-op.
+            freeze_remaining = growth_freeze_steps
+            dt = _pi_dt_reject(
+                dt_try,
+                err,
+                tol_step=tol_step,
+                safety=safety,
+                reject_shrink_min=reject_shrink_min,
+                reject_shrink_max=reject_shrink_max,
+                dt_min=dt_min,
+                p=2,
+            )
 
     return (
         psi,
@@ -1916,7 +2334,6 @@ def evolve_schedule_adaptive_m2(
 
 
 def evolve_schedule_adaptive_richardson(
-    h_x: np.ndarray,
     h_p_diag: np.ndarray,
     schedule: Schedule,
     psi0: np.ndarray,
@@ -1932,6 +2349,12 @@ def evolve_schedule_adaptive_richardson(
     safety: float = 0.9,
     growth_max: float = 4.0,
     max_rejects: int = 50,
+    reject_shrink_min: float = 0.2,
+    reject_shrink_max: float = 0.9,
+    freeze_growth_after_reject: bool = True,
+    growth_freeze_steps: int = 1,
+    pi_alpha: float = 0.7,
+    pi_beta: float = 0.4,
     richardson_extrapolate: bool = False,
     observables: "dict[str, Observable] | None" = None,
     save_tlist: np.ndarray | None = None,
@@ -1973,6 +2396,29 @@ def evolve_schedule_adaptive_richardson(
         ``evolve_schedule_adaptive_m2`` と同じ.
     m, krylov_tol, tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects
         PI controller の既定パラメータ (``docs/design/05-3-propagator.md`` §5.3).
+    reject_shrink_min, reject_shrink_max
+        reject 時の dt 縮小 factor のクランプ範囲 (issue #149, 既定
+        ``[0.2, 0.9]``). reject 時も accept と同じ予測式で factor を出し
+        ``[reject_shrink_min, reject_shrink_max]`` にクランプする. 駆動量は
+        accept 経路と整合し ``err_magnus = max(0, err - err_{lanczos/cheb}_total)``
+        (p=4). ``reject_shrink_min = reject_shrink_max = 0.5`` で旧挙動
+        (固定半減) を厳密再現.
+    freeze_growth_after_reject, growth_freeze_steps
+        reject 後の dt 成長凍結 (issue #150, Gustafsson ヒステリシス). ``True``
+        (既定) のとき reject 直後から ``growth_freeze_steps`` 回 (既定 ``1``)
+        連続 accept するまで, accept 経路の dt 拡大を ``eff_growth_max = 1.0``
+        に凍結する (拡大のみ禁止, 縮小は許可). 過剰縮小 → 楽々 accept → 即
+        dt 再上昇 → 再 reject のノコギリ波の「再上昇」側を断つ. ``False`` で
+        #149 のみ適用した挙動とビット一致. ``growth_freeze_steps >= 1``.
+    pi_alpha, pi_beta
+        accept 時 dt 予測式の積分項 / 比例項の指数係数 (issue #151, 真の PI 化).
+        ``dt_next = dt · safety · (tol_step / err)^{pi_alpha/(p+1)} ·
+        (err_prev / err)^{pi_beta/(p+1)}`` (p=4). 既定 ``pi_alpha=0.7`` /
+        ``pi_beta=0.4`` (Gustafsson predictive PI 標準). ``pi_alpha=1.0,
+        pi_beta=0.0`` で旧 I 制御をビット一致再現 (回帰アンカー). ``err_prev`` は
+        直前に accept した step の駆動量 ``err_for_pi`` (= ``err_magnus`` ベース)
+        で, accept 判定に使う量と一致させる. reject を挟んでも最後に accept した
+        値を保持する (Hairer の errold 規約).
     richardson_extrapolate
         ``True`` で外挿後の ``ψ_acc`` を accept 時の状態とする
         (実効 6 次精度; 既定 ``False``).
@@ -2049,6 +2495,14 @@ def evolve_schedule_adaptive_richardson(
         raise ValueError(f"growth_max must be > 1, got {growth_max!r}")
     if max_rejects < 1:
         raise ValueError(f"max_rejects must be >= 1, got {max_rejects!r}")
+    if not (isinstance(growth_freeze_steps, int) and growth_freeze_steps >= 1):
+        raise ValueError(
+            f"growth_freeze_steps must be an int >= 1, got {growth_freeze_steps!r}"
+        )
+    if not (pi_alpha > 0.0):
+        raise ValueError(f"pi_alpha must be > 0, got {pi_alpha!r}")
+    if not (pi_beta >= 0.0):
+        raise ValueError(f"pi_beta must be >= 0, got {pi_beta!r}")
 
     dt_max_eff = float(dt_max) if dt_max is not None else 10.0 * float(dt0)
     if not (dt_max_eff >= dt0):
@@ -2057,7 +2511,6 @@ def evolve_schedule_adaptive_richardson(
         )
 
     psi = np.ascontiguousarray(psi0, dtype=np.complex128)
-    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     dim = int(psi.shape[0])
 
@@ -2083,6 +2536,15 @@ def evolve_schedule_adaptive_richardson(
     dt = float(dt0)
     n_rejects = 0
     n_consecutive_rejects = 0
+    # issue #150: reject 後の成長凍結 (Gustafsson ヒステリシス) の残り凍結
+    # accept 回数. reject で ``growth_freeze_steps`` に再武装し, 凍結中の
+    # accept は dt 拡大のみ禁止 (eff_growth_max=1.0). 0 で非凍結.
+    freeze_remaining = 0
+    # issue #151: 真の PI 比例項用の「直前に accept した step の駆動量」
+    # (= err_for_pi, err_magnus ベース; accept 判定に使う量と一致). 最初の
+    # accept では None (純 I). reject を挟んでも最後に accept した値を保持する
+    # (Hairer の errold 規約).
+    err_prev_pi: float | None = None
     t_hist: list[float] = [t]
     dt_hist: list[float] = []
     # C3 (issue #52 A): accept された step の m_eff_sum を積み上げる.
@@ -2127,12 +2589,17 @@ def evolve_schedule_adaptive_richardson(
         t_s2_h1 = t + _CFM4_C2 * half_dt
         t_s1_h2 = t + half_dt + _CFM4_C1 * half_dt
         t_s2_h2 = t + half_dt + _CFM4_C2 * half_dt
-        a_s1_full, b_s1_full = schedule.coeffs_at(t_s1_full)
-        a_s2_full, b_s2_full = schedule.coeffs_at(t_s2_full)
-        a_s1_h1, b_s1_h1 = schedule.coeffs_at(t_s1_h1)
-        a_s2_h1, b_s2_h1 = schedule.coeffs_at(t_s2_h1)
-        a_s1_h2, b_s1_h2 = schedule.coeffs_at(t_s1_h2)
-        a_s2_h2, b_s2_h2 = schedule.coeffs_at(t_s2_h2)
+        # Phase C / issue #142: schedule から per-axis 形を取得 (6 stage).
+        g_x_s1_full, g_y_s1_full, g_z_s1_full, b_s1_full = schedule._eval_stage(
+            t_s1_full
+        )
+        g_x_s2_full, g_y_s2_full, g_z_s2_full, b_s2_full = schedule._eval_stage(
+            t_s2_full
+        )
+        g_x_s1_h1, g_y_s1_h1, g_z_s1_h1, b_s1_h1 = schedule._eval_stage(t_s1_h1)
+        g_x_s2_h1, g_y_s2_h1, g_z_s2_h1, b_s2_h1 = schedule._eval_stage(t_s2_h1)
+        g_x_s1_h2, g_y_s1_h2, g_z_s1_h2, b_s1_h2 = schedule._eval_stage(t_s1_h2)
+        g_x_s2_h2, g_y_s2_h2, g_z_s2_h2, b_s2_h2 = schedule._eval_stage(t_s2_h2)
 
         # issue #93 (Phase 7): dispatcher は
         # (psi_new, err, m_eff_sum, err_lanczos_total) を返す. err_lanczos_total
@@ -2142,22 +2609,33 @@ def evolve_schedule_adaptive_richardson(
         # 分離する. err_lanczos_total > tol_step は Krylov 不足の診断信号
         # (m_max を増やすべきサイン; m_max 自動 escalation は #93 Step 4).
         psi_new, err, m_eff_sum, err_lanczos_total = (
-            _adaptive_dispatch_richardson_estimate(
+            _adaptive_dispatch_richardson_estimate_xyz(
                 rust_mod,
                 psi,
-                h_x_arr,
                 h_p_diag_arr,
-                a_s1_full,
+                g_x_s1_full,
+                g_y_s1_full,
+                g_z_s1_full,
                 b_s1_full,
-                a_s2_full,
+                g_x_s2_full,
+                g_y_s2_full,
+                g_z_s2_full,
                 b_s2_full,
-                a_s1_h1,
+                g_x_s1_h1,
+                g_y_s1_h1,
+                g_z_s1_h1,
                 b_s1_h1,
-                a_s2_h1,
+                g_x_s2_h1,
+                g_y_s2_h1,
+                g_z_s2_h1,
                 b_s2_h1,
-                a_s1_h2,
+                g_x_s1_h2,
+                g_y_s1_h2,
+                g_z_s1_h2,
                 b_s1_h2,
-                a_s2_h2,
+                g_x_s2_h2,
+                g_y_s2_h2,
+                g_z_s2_h2,
                 b_s2_h2,
                 dt_try,
                 m,
@@ -2207,16 +2685,27 @@ def evolve_schedule_adaptive_richardson(
             # 部分は dt 縮小では改善しないので除外して safe.
             # err_magnus = 0 の場合は最大成長 (Krylov 充分 + Magnus 誤差なし).
             err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+            # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
+            if freeze_growth_after_reject and freeze_remaining > 0:
+                eff_growth_max = 1.0
+                freeze_remaining -= 1
+            else:
+                eff_growth_max = growth_max
             dt = _pi_dt_next(
                 dt_try,
                 err_for_pi,
                 tol_step=tol_step,
                 safety=safety,
-                growth_max=growth_max,
+                growth_max=eff_growth_max,
                 dt_max=dt_max_eff,
                 dt_min=dt_min,
                 p=4,
+                err_prev=err_prev_pi,
+                pi_alpha=pi_alpha,
+                pi_beta=pi_beta,
             )
+            # issue #151: 次 accept の比例項用に駆動量 (= err_for_pi) を保持.
+            err_prev_pi = float(err_for_pi)
         else:
             n_rejects += 1
             n_consecutive_rejects += 1
@@ -2228,7 +2717,26 @@ def evolve_schedule_adaptive_richardson(
                     f"err_lanczos={err_lanczos_total}; "
                     f"consider relaxing tol_step or increasing m."
                 )
-            dt = max(dt_try * 0.5, dt_min)
+            # issue #149: reject 時も accept 経路と整合させ, err_magnus
+            # (= max(0, err - err_lanczos_total)) を PI 駆動量に使う (p=4).
+            # err_magnus が 0 近傍のときは accept 経路と同じ tol_step·1e-3
+            # フォールバック (reject では err_magnus > tol_step なので通常
+            # 発火しないが accept 経路と式を揃える).
+            err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+            # issue #150: reject のたびに成長凍結を再武装 (連続 reject でも
+            # 各回でカウンタを戻す). freeze_growth_after_reject=False のときは
+            # accept 経路で読まれないため no-op.
+            freeze_remaining = growth_freeze_steps
+            dt = _pi_dt_reject(
+                dt_try,
+                err_for_pi,
+                tol_step=tol_step,
+                safety=safety,
+                reject_shrink_min=reject_shrink_min,
+                reject_shrink_max=reject_shrink_max,
+                dt_min=dt_min,
+                p=4,
+            )
 
     snapshot = recorder.finalize() if recorder is not None else None
     return (
@@ -2245,42 +2753,49 @@ def evolve_schedule_adaptive_richardson(
     )
 
 
-def _adaptive_dispatch_richardson_estimate_chebyshev(
+def _adaptive_dispatch_richardson_estimate_chebyshev_xyz(
     rust_mod: ModuleType | None,
     psi: np.ndarray,
-    h_x: np.ndarray,
     h_p_diag: np.ndarray,
-    a_s1_full: float,
+    g_x_s1_full: np.ndarray,
+    g_y_s1_full: np.ndarray | None,
+    g_z_s1_full: np.ndarray | None,
     b_s1_full: float,
-    a_s2_full: float,
+    g_x_s2_full: np.ndarray,
+    g_y_s2_full: np.ndarray | None,
+    g_z_s2_full: np.ndarray | None,
     b_s2_full: float,
-    a_s1_h1: float,
+    g_x_s1_h1: np.ndarray,
+    g_y_s1_h1: np.ndarray | None,
+    g_z_s1_h1: np.ndarray | None,
     b_s1_h1: float,
-    a_s2_h1: float,
+    g_x_s2_h1: np.ndarray,
+    g_y_s2_h1: np.ndarray | None,
+    g_z_s2_h1: np.ndarray | None,
     b_s2_h1: float,
-    a_s1_h2: float,
+    g_x_s1_h2: np.ndarray,
+    g_y_s1_h2: np.ndarray | None,
+    g_z_s1_h2: np.ndarray | None,
     b_s1_h2: float,
-    a_s2_h2: float,
+    g_x_s2_h2: np.ndarray,
+    g_y_s2_h2: np.ndarray | None,
+    g_z_s2_h2: np.ndarray | None,
     b_s2_h2: float,
     dt: float,
     chebyshev_tol: float,
     extrapolate: bool,
-    h_x_abs_sum: float,
     h_p_min: float,
     h_p_max: float,
 ) -> tuple[np.ndarray, float, int, float]:
-    """Chebyshev 経路 Richardson 推定子のディスパッチ.
+    """Chebyshev 経路 Richardson 推定子のディスパッチ (per-axis form).
 
-    issue #122 (Phase B). Chebyshev 経路は Python リファレンス実装を
-    持たない (chebyshev_propagate は Rust 側のみ). ``rust_mod`` が ``None``
-    なら ``NotImplementedError`` を上げる. これは "Rust 拡張 (BLAS / rayon /
-    SIMD 経路) が必須" を意味し, Lanczos 経路のような silent fallback は
-    提供しない (Chebyshev の数値挙動 + 性能特性の評価が Rust 側を前提と
-    しているため; Python ref 化は scope 外).
+    Phase C / issue #142: 旧 X-only scalar 形を per-axis 配列形に refactor.
+    Chebyshev 経路は Python リファレンス実装を持たない (Rust 側のみ).
+    ``rust_mod`` が ``None`` なら ``NotImplementedError``.
 
-    末尾 3 引数 (``h_x_abs_sum`` / ``h_p_min`` / ``h_p_max``) は Gershgorin
-    上下界の precompute 値. ``IsingProblem`` 構築時に 1 度だけ計算して
-    上位 driver から渡す (per-step の O(2^N + N) を O(1) に縮める).
+    ``h_p_min`` / ``h_p_max`` は ``IsingProblem`` 構築時 precompute 済の対角
+    下界 / 上界. Rust 側 per-stage Gershgorin (`compute_stage_gershgorin`) で
+    gz_eff_diag = None 経路の O(1) 計算に渡す (issue #142 PR #146 follow-up).
     """
     if rust_mod is None:
         raise NotImplementedError(
@@ -2289,26 +2804,36 @@ def _adaptive_dispatch_richardson_estimate_chebyshev(
             "--uv' or fall back to method='cfm4_adaptive_richardson_krylov' (Lanczos)."
         )
     psi_new, err, k_used_total, err_cheb_total = (
-        rust_mod.cfm4_step_chebyshev_with_richardson_estimate_py(
+        rust_mod.cfm4_step_chebyshev_with_richardson_estimate_xyz_py(
             psi,
-            h_x,
             h_p_diag,
-            a_s1_full,
+            g_x_s1_full,
+            g_y_s1_full,
+            g_z_s1_full,
             b_s1_full,
-            a_s2_full,
+            g_x_s2_full,
+            g_y_s2_full,
+            g_z_s2_full,
             b_s2_full,
-            a_s1_h1,
+            g_x_s1_h1,
+            g_y_s1_h1,
+            g_z_s1_h1,
             b_s1_h1,
-            a_s2_h1,
+            g_x_s2_h1,
+            g_y_s2_h1,
+            g_z_s2_h1,
             b_s2_h1,
-            a_s1_h2,
+            g_x_s1_h2,
+            g_y_s1_h2,
+            g_z_s1_h2,
             b_s1_h2,
-            a_s2_h2,
+            g_x_s2_h2,
+            g_y_s2_h2,
+            g_z_s2_h2,
             b_s2_h2,
             dt,
             chebyshev_tol,
             extrapolate,
-            h_x_abs_sum,
             h_p_min,
             h_p_max,
         )
@@ -2317,13 +2842,14 @@ def _adaptive_dispatch_richardson_estimate_chebyshev(
 
 
 def evolve_schedule_adaptive_richardson_chebyshev(
-    h_x: np.ndarray,
     h_p_diag: np.ndarray,
     schedule: Schedule,
     psi0: np.ndarray,
     t0: float,
     t1: float,
     *,
+    h_p_min: float,
+    h_p_max: float,
     chebyshev_tol: float = 1e-12,
     tol_step: float = 1e-8,
     dt0: float = 0.5,
@@ -2332,6 +2858,12 @@ def evolve_schedule_adaptive_richardson_chebyshev(
     safety: float = 0.9,
     growth_max: float = 4.0,
     max_rejects: int = 50,
+    reject_shrink_min: float = 0.2,
+    reject_shrink_max: float = 0.9,
+    freeze_growth_after_reject: bool = True,
+    growth_freeze_steps: int = 1,
+    pi_alpha: float = 0.7,
+    pi_beta: float = 0.4,
     richardson_extrapolate: bool = False,
     observables: "dict[str, Observable] | None" = None,
     save_tlist: np.ndarray | None = None,
@@ -2381,6 +2913,8 @@ def evolve_schedule_adaptive_richardson_chebyshev(
         新パラメータは導入せず本 driver 内では ``chebyshev_tol`` 命名のみ
         使う. 既定 ``1e-12``.
     tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects,
+    reject_shrink_min, reject_shrink_max, freeze_growth_after_reject,
+    growth_freeze_steps, pi_alpha, pi_beta,
     richardson_extrapolate, observables, save_tlist, store_states
         :func:`evolve_schedule_adaptive_richardson` と同じ.
 
@@ -2430,6 +2964,14 @@ def evolve_schedule_adaptive_richardson_chebyshev(
         raise ValueError(f"growth_max must be > 1, got {growth_max!r}")
     if max_rejects < 1:
         raise ValueError(f"max_rejects must be >= 1, got {max_rejects!r}")
+    if not (isinstance(growth_freeze_steps, int) and growth_freeze_steps >= 1):
+        raise ValueError(
+            f"growth_freeze_steps must be an int >= 1, got {growth_freeze_steps!r}"
+        )
+    if not (pi_alpha > 0.0):
+        raise ValueError(f"pi_alpha must be > 0, got {pi_alpha!r}")
+    if not (pi_beta >= 0.0):
+        raise ValueError(f"pi_beta must be >= 0, got {pi_beta!r}")
 
     dt_max_eff = float(dt_max) if dt_max is not None else 10.0 * float(dt0)
     if not (dt_max_eff >= dt0):
@@ -2438,17 +2980,15 @@ def evolve_schedule_adaptive_richardson_chebyshev(
         )
 
     psi = np.ascontiguousarray(psi0, dtype=np.complex128)
-    h_x_arr = np.ascontiguousarray(h_x, dtype=np.float64)
     h_p_diag_arr = np.ascontiguousarray(h_p_diag, dtype=np.float64)
     dim = int(psi.shape[0])
 
-    # Gershgorin 上下界の precompute (Chebyshev propagator が per-step で
-    # ``gershgorin_bounds_cached`` 経由 O(1) で `(E_c, R)` を計算するための
-    # 入力値). ``h_x`` / ``h_p_diag`` は driver 入口時点で固定なので 1 度だけ
-    # 計算して全 step に使い回す.
-    h_x_abs_sum = float(np.abs(h_x_arr).sum())
-    h_p_min = float(h_p_diag_arr.min())
-    h_p_max = float(h_p_diag_arr.max())
+    # Phase C / issue #142 PR #146 follow-up: Chebyshev XYZ wrap は per-stage
+    # Gershgorin を Rust 側で再計算するが, ``gz_eff_diag = None`` 経路で
+    # ``h_p_diag`` を full walk すると per Richardson step で 6×O(2^N) の
+    # overhead が発生する (時間依存 Z 磁場なしの旧 X-only path 含む). caller
+    # から ``h_p_min`` / ``h_p_max`` (= IsingProblem 構築時 precompute 値) を
+    # 受け取って per-stage Gershgorin を O(1) で済ませる契約.
 
     recorder = (
         _SnapshotRecorder(save_tlist, observables, store_states, dim)
@@ -2477,6 +3017,15 @@ def evolve_schedule_adaptive_richardson_chebyshev(
     dt = float(dt0)
     n_rejects = 0
     n_consecutive_rejects = 0
+    # issue #150: reject 後の成長凍結 (Gustafsson ヒステリシス) の残り凍結
+    # accept 回数. reject で ``growth_freeze_steps`` に再武装し, 凍結中の
+    # accept は dt 拡大のみ禁止 (eff_growth_max=1.0). 0 で非凍結.
+    freeze_remaining = 0
+    # issue #151: 真の PI 比例項用の「直前に accept した step の駆動量」
+    # (= err_for_pi, err_magnus ベース; accept 判定に使う量と一致). 最初の
+    # accept では None (純 I). reject を挟んでも最後に accept した値を保持する
+    # (Hairer の errold 規約).
+    err_prev_pi: float | None = None
     t_hist: list[float] = [t]
     dt_hist: list[float] = []
     k_used_hist: list[int] = []
@@ -2507,35 +3056,50 @@ def evolve_schedule_adaptive_richardson_chebyshev(
         t_s2_h1 = t + _CFM4_C2 * half_dt
         t_s1_h2 = t + half_dt + _CFM4_C1 * half_dt
         t_s2_h2 = t + half_dt + _CFM4_C2 * half_dt
-        a_s1_full, b_s1_full = schedule.coeffs_at(t_s1_full)
-        a_s2_full, b_s2_full = schedule.coeffs_at(t_s2_full)
-        a_s1_h1, b_s1_h1 = schedule.coeffs_at(t_s1_h1)
-        a_s2_h1, b_s2_h1 = schedule.coeffs_at(t_s2_h1)
-        a_s1_h2, b_s1_h2 = schedule.coeffs_at(t_s1_h2)
-        a_s2_h2, b_s2_h2 = schedule.coeffs_at(t_s2_h2)
+        # Phase C / issue #142: schedule から per-axis 形を取得.
+        g_x_s1_full, g_y_s1_full, g_z_s1_full, b_s1_full = schedule._eval_stage(
+            t_s1_full
+        )
+        g_x_s2_full, g_y_s2_full, g_z_s2_full, b_s2_full = schedule._eval_stage(
+            t_s2_full
+        )
+        g_x_s1_h1, g_y_s1_h1, g_z_s1_h1, b_s1_h1 = schedule._eval_stage(t_s1_h1)
+        g_x_s2_h1, g_y_s2_h1, g_z_s2_h1, b_s2_h1 = schedule._eval_stage(t_s2_h1)
+        g_x_s1_h2, g_y_s1_h2, g_z_s1_h2, b_s1_h2 = schedule._eval_stage(t_s1_h2)
+        g_x_s2_h2, g_y_s2_h2, g_z_s2_h2, b_s2_h2 = schedule._eval_stage(t_s2_h2)
 
         psi_new, err, k_used_total, err_chebyshev_total = (
-            _adaptive_dispatch_richardson_estimate_chebyshev(
+            _adaptive_dispatch_richardson_estimate_chebyshev_xyz(
                 rust_mod,
                 psi,
-                h_x_arr,
                 h_p_diag_arr,
-                a_s1_full,
+                g_x_s1_full,
+                g_y_s1_full,
+                g_z_s1_full,
                 b_s1_full,
-                a_s2_full,
+                g_x_s2_full,
+                g_y_s2_full,
+                g_z_s2_full,
                 b_s2_full,
-                a_s1_h1,
+                g_x_s1_h1,
+                g_y_s1_h1,
+                g_z_s1_h1,
                 b_s1_h1,
-                a_s2_h1,
+                g_x_s2_h1,
+                g_y_s2_h1,
+                g_z_s2_h1,
                 b_s2_h1,
-                a_s1_h2,
+                g_x_s1_h2,
+                g_y_s1_h2,
+                g_z_s1_h2,
                 b_s1_h2,
-                a_s2_h2,
+                g_x_s2_h2,
+                g_y_s2_h2,
+                g_z_s2_h2,
                 b_s2_h2,
                 dt_try,
                 chebyshev_tol,
                 richardson_extrapolate,
-                h_x_abs_sum,
                 h_p_min,
                 h_p_max,
             )
@@ -2565,16 +3129,27 @@ def evolve_schedule_adaptive_richardson_chebyshev(
                     ):
                         next_save_idx += 1
             err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+            # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
+            if freeze_growth_after_reject and freeze_remaining > 0:
+                eff_growth_max = 1.0
+                freeze_remaining -= 1
+            else:
+                eff_growth_max = growth_max
             dt = _pi_dt_next(
                 dt_try,
                 err_for_pi,
                 tol_step=tol_step,
                 safety=safety,
-                growth_max=growth_max,
+                growth_max=eff_growth_max,
                 dt_max=dt_max_eff,
                 dt_min=dt_min,
                 p=4,
+                err_prev=err_prev_pi,
+                pi_alpha=pi_alpha,
+                pi_beta=pi_beta,
             )
+            # issue #151: 次 accept の比例項用に駆動量 (= err_for_pi) を保持.
+            err_prev_pi = float(err_for_pi)
         else:
             n_rejects += 1
             n_consecutive_rejects += 1
@@ -2586,7 +3161,25 @@ def evolve_schedule_adaptive_richardson_chebyshev(
                     f"err_chebyshev={err_chebyshev_total}; "
                     f"consider relaxing tol_step or tightening chebyshev_tol."
                 )
-            dt = max(dt_try * 0.5, dt_min)
+            # issue #149: reject 時も accept 経路と整合させ, err_magnus
+            # (= max(0, err - err_chebyshev_total)) を PI 駆動量に使う (p=4).
+            # err_magnus が 0 近傍のときは accept 経路と同じ tol_step·1e-3
+            # フォールバック.
+            err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+            # issue #150: reject のたびに成長凍結を再武装 (連続 reject でも
+            # 各回でカウンタを戻す). freeze_growth_after_reject=False のときは
+            # accept 経路で読まれないため no-op.
+            freeze_remaining = growth_freeze_steps
+            dt = _pi_dt_reject(
+                dt_try,
+                err_for_pi,
+                tol_step=tol_step,
+                safety=safety,
+                reject_shrink_min=reject_shrink_min,
+                reject_shrink_max=reject_shrink_max,
+                dt_min=dt_min,
+                p=4,
+            )
 
     snapshot = recorder.finalize() if recorder is not None else None
     return (

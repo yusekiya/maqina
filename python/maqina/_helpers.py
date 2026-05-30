@@ -38,6 +38,7 @@ from __future__ import annotations
 import numpy as np
 
 from maqina.problem import IsingProblem
+from maqina.schedule import Schedule
 
 
 _PSI_NORM_TOL: float = 1e-10
@@ -141,20 +142,39 @@ def _validate_psi0(problem: IsingProblem, psi0: np.ndarray) -> np.ndarray:
     return psi0
 
 
-def _gershgorin_norm_upper_bound(problem: IsingProblem) -> float:
-    """``‖H(t)‖`` の Gershgorin 上界 (closed form, t 非依存).
+def _gershgorin_norm_upper_bound(schedule: Schedule, problem: IsingProblem) -> float:
+    """``‖H(t)‖`` の Gershgorin 上界 (closed form, t 非依存; XYZ では端点 sample).
 
-    ``H(t) = A(s) · H_driver + B(s) · H_problem``, ``|A|, |B| ≤ 1`` の前提下で
-    ``‖H(t)‖ ≤ Σ_i |h_x_i| + max_k |H_p_diag[k]|`` が成立する
-    (Gershgorin による行和上界 + ``H_problem`` の対角成分絶対最大).
-    schedule の coefficient norm `≤ 1` を仮定するため, 一般 schedule で
-    係数が大きい場合は別途倍率を掛ける必要があるが, ``Schedule.linear``
-    既定では係数は ``[0, 1]`` に収まり安全側.
+    Phase C / issue #142 で signature を ``(schedule, problem)`` に変更
+    (h_x が schedule に移動)。
+
+    - 旧 API (`schedule.is_xyz_api == False`): ``Σ_i |h_x_i| + max_k |H_p_diag[k]|``
+      (係数 ``|A|, |B| ≤ 1`` 仮定で安全側. ``Schedule.linear`` 既定で成立).
+    - 新 API (`schedule.is_xyz_api == True`): callable は時間依存なので静的上界
+      は構築不能. driver 入口の t=0 / 適当な端点で sample した off-diagonal の
+      最大値 + ``max_k |H_p_diag[k]|`` を返す保守値. PI controller の
+      Richardson breakdown 検出 fail-safe が dt を縮めるので, 多少楽観的でも
+      driver 動作自体は安全 (issue #43 B の motivation).
+
+    対角項は ``IsingProblem`` 構築時 precompute 済の
+    ``h_p_diag_min`` / ``h_p_diag_max`` から ``max(|min|, |max|)`` で
+    closed-form に算出する (O(1)). issue #142 PR #146 follow-up で
+    ``np.max(np.abs(...))`` の O(2^N) walk を削除.
     """
-    return float(np.sum(np.abs(problem.h_x))) + float(np.max(np.abs(problem.H_p_diag)))
+    h_p_max_abs = max(abs(problem.h_p_diag_min), abs(problem.h_p_diag_max))
+    if schedule.is_xyz_api:
+        # 新 API: t=0 と t=T で sample. callable は短時間で大きく振れる前提では
+        # 無いので 2 点で大半のケースをカバーできる. より tight な見積もりが
+        # 必要なら user が ``dt_max`` を明示して bypass する.
+        off_0 = schedule._norm_upper_bound_factor_at(0.0)
+        off_T = schedule._norm_upper_bound_factor_at(float(schedule.T))
+        return float(max(off_0, off_T)) + h_p_max_abs
+    return schedule.h_x_abs_sum + h_p_max_abs
 
 
-def _resolve_dt_max_auto(problem: IsingProblem, m: int, dt0: float) -> float:
+def _resolve_dt_max_auto(
+    schedule: Schedule, problem: IsingProblem, m: int, dt0: float
+) -> float:
     """``dt_max=None`` (issue #54 で旧 ``"auto"`` リテラル相当) の解決値.
     Lanczos capacity と default の min, dt0 で floor.
 
@@ -169,7 +189,7 @@ def _resolve_dt_max_auto(problem: IsingProblem, m: int, dt0: float) -> float:
     ``Richardson estimator は Lanczos breakdown も embedded error として
     検出されるので m 自動化 / dt_max 自動化が fail-safe で成立する``).
     """
-    norm_h = _gershgorin_norm_upper_bound(problem)
+    norm_h = _gershgorin_norm_upper_bound(schedule, problem)
     default_dt_max = 10.0 * dt0
     if norm_h <= 0.0:
         # 完全 0 Hamiltonian (h_x=0 かつ H_p_diag=0). Lanczos cap は無限

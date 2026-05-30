@@ -11,6 +11,258 @@
   (`0.N.0` → `0.N+1.0`) で破壊的変更を吸収する (`docs/conventions.md`
   §2 参照).
 
+## 0.14.0 - 2026-05-30 — Phase C follow-up: adaptive step-size controller 追従性改善 (真の PI 化 / reject 過剰縮小解消 / `ControllerConfig` 公開, umbrella #148)
+
+### Breaking
+
+- **adaptive reject 時の dt 縮小を固定 0.5 から予測式 + クランプに変更**
+  (issue #149, umbrella #148): 3 つの adaptive ドライバ
+  (`evolve_schedule_adaptive_{m2,richardson,richardson_chebyshev}`) の reject
+  時の dt 更新を **固定 0.5 倍** から **accept と同じ予測式
+  `safety · (tol_step / err)^{1/(p+1)}` + reject 用クランプ
+  `[reject_shrink_min, reject_shrink_max]` (既定 `[0.2, 0.9]`)** に変更。
+  order-5 推定子で `err` が tol をわずかに超えただけでも誤差を 32× 削る過剰
+  縮小がノコギリ波 (dt 振動 / 受理率 ≈ 50%) の主因だったのを断つ。既定挙動が
+  変わるため破壊的変更。旧挙動 (固定半減) は
+  `ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)` で厳密再現
+  可能 (回帰アンカー)。誤差源分離は accept 経路と整合させ Richardson /
+  Chebyshev は `err_magnus = max(0, err - err_propagator_total)`、M2 は `err`
+  を駆動量に使う。
+
+- **reject 後の dt 成長凍結 (Gustafsson ヒステリシス)** (issue #150,
+  umbrella #148): 3 つの adaptive ドライバの accept 経路で、reject 直後から
+  `growth_freeze_steps` 回 (既定 1 = DOPRI/Hairer-Wanner 標準) 連続 accept する
+  まで dt 拡大を `eff_growth_max = 1.0` に凍結する (拡大のみ禁止、縮小は許可)。
+  「reject → 過剰縮小 → 楽々 accept → I 制御が大きく再拡大 → 再オーバーシュート」
+  という limit cycle の **再拡大側** を断つ。`ControllerConfig` に
+  `freeze_growth_after_reject` (既定 `True`) / `growth_freeze_steps` (既定 1) を
+  追加。既定有効のため破壊的変更。#149 完了時点の挙動は
+  `ControllerConfig(freeze_growth_after_reject=False)` でビット一致再現可能
+  (回帰アンカー)。なお #149 の予測式 reject は既定クランプ `[0.2, 0.9]` 下では
+  reject 直後の accept を PI 成長率 ≈ 1.0 に着地させるため成長凍結は発火せず、
+  本機構は user が `reject_shrink` を攻めた値にした場合や縮小 factor が
+  `reject_shrink_min` 床にクランプ → 過剰縮小する場面での二重の安全網として効く。
+
+- **真の PI 比例項を導入し I 制御 → PI 制御化** (issue #151, umbrella #148):
+  3 つの adaptive ドライバの accept 時 dt 予測式に Gustafsson / Hairer-Wanner
+  II §IV.2 の predictive PI 比例項を追加し、
+  `dt_next = dt · safety · (tol_step / err)^{pi_alpha/(p+1)} · (err_prev / err)^{pi_beta/(p+1)}`
+  とした。比例項が誤差の増加傾向 (Magnus 4 次係数 C₄ の上昇) を `err_prev / err`
+  で先読みして dt 拡大を抑制し、臨界領域のノコギリ波を「再オーバーシュート前に」
+  平坦化する (#150 の reject 後成長凍結と相補的)。`err_prev` は直前に **accept**
+  した step の駆動量 (M2 = `err`, Richardson / Chebyshev = `err_magnus`; Hairer の
+  `errold` 規約で reject を挟んでも最後に accept した値を保持)。これまでの実装は
+  比例項の無い純 I (積分) 制御で docstring / 設計書の "PI controller" 表記と実体が
+  不整合だったのを解消する。`ControllerConfig` に `pi_alpha` (既定 `0.7`) /
+  `pi_beta` (既定 `0.4`, Gustafsson 標準) を追加し、`__post_init__` で
+  `pi_alpha > 0` / `pi_beta >= 0` を検証。既定挙動が I → PI に変わるため破壊的
+  変更。純 I 制御 (旧挙動) は `ControllerConfig(pi_alpha=1.0, pi_beta=0.0)` で
+  ビット一致再現可能 (回帰アンカー)。既定値は合成誤差ハーネス (#152) のノコギリ波
+  シナリオで確認 (`pi_beta=0.4` が reject 削減と autocorr 改善の sweet spot、
+  `pi_beta=0.6` は過補正で振動再発)。
+
+### Added
+
+- **`ControllerConfig` (frozen dataclass) 新設 + facade 配線** (issue #149,
+  umbrella #148 方針 B): adaptive PI controller の純粋な数値挙動 knob
+  (`safety` / `growth_max` / `max_rejects` / `dt_min` / `reject_shrink_min` /
+  `reject_shrink_max`) を 1 つの dataclass に集約し `maqina` から export。
+  `QuantumAnnealer.run(controller=...)` / `create_simulator(controller=...)` /
+  `AnnealingSimulator(controller=...)` に配線し、**これまで facade から指定
+  できなかった** `safety` / `growth_max` (= facmax) / `max_rejects` / `dt_min`
+  をまとめて公開 (取りこぼし解消)。`None` 既定で全 default。`atol` / `dt_init`
+  / `dt_max` / `m_max` は精度要求・auto-resolve ロジックを持つため
+  `ControllerConfig` には入れず既存 kwarg 維持。固定 dt 経路への明示
+  `controller` は `AnnealingSimulator` のみ `ValueError` (run は寛容)。
+  後続 #151 (真の PI 化) はこの dataclass に field を追加していく。
+  `tests/test_controller_reject_clamp.py` に層 A 合成比較 / 回帰アンカー /
+  入力検証 / facade 配線テストを追加。
+  issue #150 で `freeze_growth_after_reject` / `growth_freeze_steps` の 2 field を
+  追加 (上記 Breaking 参照)。`tests/test_controller_growth_freeze.py` に層 A
+  (over-shrink ノコギリ波緩和) / 非劣化 (既定クランプ) / 解除基準 (凍結ステップ数
+  単調性) / 回帰アンカー / 入力検証 / facade 全 8 field 配線テストを追加。
+
+- **`Schedule.reverse(..., pause_duration=0.0)`** (PR #147): `s_target` に到達
+  後一定時間 `s = s_target` を保ってから `s_init` に戻る reverse + pause
+  schedule (Marshall-Venturelli-Rieffel 2019 / Chen-Lidar 2020 流) を表現可能
+  に。ramp 区間は前後対称で `(T - pause_duration) / 2` ずつ。`pause_duration < 0`
+  または `>= T` で `ValueError`。`pause_duration = 0` で従来の純 V 字形に縮退
+  するため既存ユーザー影響なし。Crosson-Harrow 2016 流の純 V 字専用 builder を
+  別途追加するのではなく既存 `Schedule.reverse` のオプション引数として統合し,
+  D-Wave 文献の実験プロトコル (warm-start + pause) を 1 builder で表現する設計
+  に統一。`tests/test_schedule.py` に 3 テスト追加 (pause 区間定数性 /
+  `pause_duration=0` の従来 V 字一致 / validation)。
+
+## 0.13.0 - 2026-05-28 — Phase C: per-site/per-axis 時間依存場 (XYZ driver) 拡張 + `Schedule` に `h_x` 統合 (issue #142)
+
+旧 API の **driver = X 単体 + global scalar envelope** という制約
+(`h_x_i` 静的 / time dep は global `A(s(t))` のみ; Y / Z 軸の時間依存場や
+per-site で異なる時間関数は表現不可) を解消し, per-site / per-axis に独立な
+時間依存場に対応する Hamiltonian 形 `H(t) = Σ_i [g_x_i(t)·X_i + g_y_i(t)·Y_i
++ g_z_i(t)·Z_i] + b(t)·H_p_diag` に拡張する Phase C 完了。責任分担も同時に
+再整理し **`Schedule` に `h_x` を統合**, **`IsingProblem` は問題側静的構造
+(`H_p_diag`) のみ** の pure data container に slim 化。
+
+### Breaking
+
+- **`IsingProblem(n, H_p_diag, h_x)` → `IsingProblem(n, H_p_diag)`**: 横磁場
+  振幅 `h_x` を `IsingProblem` から削除し `Schedule` に移管。`h_x` 引数を
+  渡すと `TypeError`。`IsingProblem.h_x` / `IsingProblem._h_x_abs_sum` 属性も
+  削除。問題側の static structure と時間発展係数の責任分担を明確化する変更。
+- **`Schedule(T, A, B)` → `Schedule(T, A, B, h_x, s=None)`**: `h_x` を必須
+  引数化。preset (`Schedule.linear` / `Schedule.from_callable` /
+  `Schedule.reverse` / `Schedule.pause`) も `h_x` 必須化。`Schedule.h_x` /
+  `Schedule.h_x_abs_sum` は旧 API only (新 API で呼ぶと `RuntimeError`)。
+- **`Schedule.from_xyz(T, g_x, b, *, g_y=None, g_z=None)` 新 constructor**:
+  per-site/per-axis 時間依存場の新 API。callable list ベース (`Sequence[
+  Callable[[float], float]]`)。`g_y` / `g_z` は `None` で当該軸 skip (Rust
+  側で real-only SIMD kernel に dispatch する fast path)。callable に振幅は
+  既に組み込み済の前提 (例: 旧 API `g_x_i(t) := -A(s(t))·h_x_i` 相当を新
+  API で書くなら `g_x = [lambda t, hi=hi: -(1 - t/T)*hi for hi in h_x]`)。
+- **`method="trotter"` / `"trotter_suzuki4"` は新 API で `ValueError`**:
+  Trotter 経路の `apply_single_mode_axis_i` は実数係数前提の SIMD で組まれて
+  いるため XYZ 一般化は scope 外。必要時に別 issue 起票。Magnus 経路
+  (`cfm4_adaptive_richardson_chebyshev` / `_krylov` / `cfm4` / `m2`) は新 API
+  でも問題なく動作する。
+- **driver function (`evolve_schedule_*`) から `h_x` 引数を撤廃**:
+  `schedule._eval_stage(t)` 共通 evaluator 経由で per-axis arrays を取得して
+  XYZ Rust wraps に dispatch する形に refactor。internal API なのでユーザー
+  への影響は限定的だが, driver を直接呼んでいた場合は移行が必要。
+
+### Added
+
+- **Rust 側 XYZ 一般 matvec primitive `apply_h_general`** (`src/matvec.rs`,
+  PR #143): per-site/per-axis (`g_x`, `g_y: Option`, `g_z` (per-stage 事前
+  畳込み `gz_eff_diag: Option`)) を受け取る合成 matvec。X+Y は複素係数
+  `c_i = g_x_i + i·g_y_i` に畳んで 1 bit-flip pass で完了, `g_y=None` /
+  `gz_eff_diag=None` のとき既存 real-only SIMD/scalar kernel に dispatch
+  する Option-based skip 経路。詳細は `docs/design/05-1-matvec.md` §5.1.1.y。
+- **SIMD complex-coeff bit-flip kernels** (`src/matvec.rs::simd_kernels::
+  bitflip_iN_complex`, i ∈ {0,1,2}, PR #143): `wide::f64x4` で complex coeff
+  を broadcast + swizzle 経由で乗せる (Phase 6 C2.5 single_mode_iN と同方針)。
+- **per-stage Gershgorin (Chebyshev variant)** (`src/cfm4.rs::compute_stage_
+  gershgorin`, PR #144 / #145): `(R_off_stage, diag_min_stage, diag_max_stage)`
+  を per-stage に計算 (gz_eff_diag doubling 構築と fuse して O(2^N) → 単一
+  pass)。Lanczos variant は per-stage Gershgorin 不要 (`build_stage_arrays`
+  と分離)。X-only 旧 API 向け O(1) 変換 helper `gershgorin_per_stage_x_only`
+  も追加。
+- **`compute_gz_eff_diag` doubling builder** (`src/matvec.rs`, PR #143):
+  `Σ_i g_z[i]·σ_z_i(k)` (length 2^N) を degree-1 Walsh 多項式の doubling /
+  butterfly で O(2^N) 構築 (償却 O(1) per 基底)。
+- **`reference_qutip.build_qutip_hamiltonian_xyz(...)`**: per-axis 時間依存場の
+  QuTiP `H(t)` を sparse 構築する helper。`tests/test_xyz_schedule.py` で XY
+  rotating field / Z-only field 等の QuTiP fidelity 一致テストに使う。
+- **新規テスト `tests/test_xyz_schedule.py`** (9 ケース): 旧 API smoke / 新
+  API == 旧 API equivalence (m2 / cfm4 / adaptive Richardson) / XY rotating
+  field QuTiP fidelity / Z-only field QuTiP fidelity / Trotter ValueError /
+  IsingProblem h_x なし smoke。
+
+### Changed (signature shuffle / 数値挙動は不変)
+
+- **`cfm4_step` / `cfm4_step_with_richardson_estimate` (Lanczos variant)**
+  (PR #145): 旧 scalar 4 個 `(a_s1, b_s1, a_s2, b_s2)` → per-axis array +
+  scalar `(g_x_s1, g_y_s1, g_z_s1, b_s1, g_x_s2, g_y_s2, g_z_s2, b_s2)`。
+  `build_stage_desc` を `build_stage_arrays` + `compute_stage_gershgorin`
+  に split し Lanczos 経路で O(2^N) Gershgorin walk を回避。`iter0_cache`
+  を 4-tuple `(cache_drv, cache_diag, a_s1_scalar, a_s2_scalar)` に拡張。
+  perf_cfm4_richardson full mode で main 比 **-5.81% cycles** (per-matvec
+  の g_x_buf alloc 消失の副次効果)。
+- **`chebyshev_propagate` / `cfm4_step_chebyshev*` (Chebyshev variant)** (PR
+  #144): 同じく per-axis 配列形に切替, `gershgorin_bounds_cached` を
+  per-stage form (`r_off_stage`, `diag_min_stage`, `diag_max_stage`) に変更,
+  `apply_h_general` 直呼出に切替。perf_cfm4_richardson_chebyshev full mode で
+  main 比 +0.05% (実質不変, h_p_diag が L2 cache resident)。
+- **`apply_h_kinema` → `apply_h`** (commit `845e4e3`): `apply_h_general` の
+  X-only 特化 wrap として内部実装を統一。Rust 単体テスト互換 + perf 回帰
+  測定 baseline のため shim を残置。
+- **Lanczos / CFM4:2 系の Rust hot path は `apply_h_general` 経由に切替**
+  (PR #144 / #145): per-matvec の引数 plumbing のみ変更, Lanczos / Chebyshev
+  両 driver の数値挙動は不変。
+
+### Documentation
+
+- `docs/design/02-physics.md` §2.1.1 旧 API / §2.1.2 新 API (per-site/per-axis
+  時間依存場) を分け, §2.2 ユーザー入力の `h_x` 所在 (旧 API: Schedule, 新
+  API: callable 組込み) を反映。
+- `docs/design/05-1-matvec.md` primitive table + §5.1.1.y `apply_h_general`
+  節を追加 (per-axis bit-flip complex-coeff 拡張 + Option-based skip 経路 +
+  SIMD per-axis 分岐の設計)。
+- `docs/design/05-3-propagator.md` CFM4:2 節直後に per-stage 配列 /
+  Gershgorin / `gz_eff_diag` doubling 構築の節を追加。
+- `docs/design/12-release-plan.md` Phase C 節を新規追加 (動機 / Out of scope
+  / Definition of Done / phasing 実績 / Out of scope follow-up)。
+- `docs/design/INDEX.md` バージョン v0.11 → v0.13, Phase C エントリ + 横断
+  トピック XYZ driver 行を追加。
+- `CLAUDE.md` 物理的取り決め節を旧 / 新両 Hamiltonian 形 + 責任分担 (Schedule
+  に h_x 統合) に更新。
+- `docs/quickstart.md` 既存 5 例の `IsingProblem(... h_x=)` を
+  `Schedule.linear(... h_x=)` に bind し直し, 新 §6 で `Schedule.from_xyz` の
+  XY rotating field 例 + Trotter ValueError 注を追加 (旧 §6 thread-count は
+  §7 に番号繰下げ)。
+
+### Internal
+
+- `tools/gen_api_stubs.py`: class メソッドの単一 underscore prefix
+  (`_eval_stage` 等) も stub に含めるよう調整 (cross-module 型チェックの
+  ため; 公開境界の制御は `__all__` / docstring に委ねる)。
+- `_helpers.py::_gershgorin_norm_upper_bound(schedule, problem)` /
+  `_resolve_dt_max_auto(schedule, problem, m, dt0)`: signature 変更
+  (schedule から h_x_abs_sum (旧 API) または time-sampled
+  `_norm_upper_bound_factor_at` (新 API) を取得)。`np.max(np.abs(H_p_diag))`
+  の O(2^N) walk を `problem.h_p_diag_min/max` precompute 経由の O(1)
+  closed-form に置換 (PR #146 follow-up と統合)。
+
+### Fixed (PR #146 follow-up — Linux 本番 perf bench で発覚)
+
+- **Chebyshev per-stage Gershgorin の O(2^N) walk regression**: PR #144 で
+  `gershgorin_bounds_cached` (O(1)) を per-stage form (`compute_stage_gershgorin`)
+  に再設計した際, `gz_eff_diag = None` (= 時間依存 Z 磁場なし; legacy API
+  および新 API の XY-only 経路) でも `h_p_diag` の full walk が走っていた。
+  per Richardson step で 6 stage × O(2^N) のオーバヘッドが発生し N=18 で
+  per-step wall に数 ms / N=20 で十数 ms の regression として観測される。
+  - 修正: `compute_stage_gershgorin(arrays, h_p_diag, h_p_min, h_p_max)`
+    シグネチャに `IsingProblem` 構築時 precompute 値 (`h_p_diag_min` /
+    `h_p_diag_max`) を渡し, `gz = None` 経路では closed-form
+    `(c_b · h_p_min, c_b · h_p_max)` (c_b 負なら swap) で O(1) 計算する。
+    `gz = Some(...)` 経路は構造的に O(2^N) walk 必要 (合成
+    `c_b · h_p_diag[k] + gz[k]` の min/max).
+  - 影響範囲 (内部 Rust API): `cfm4_step_chebyshev` /
+    `cfm4_step_chebyshev_with_richardson_estimate` に `h_p_min: f64,
+    h_p_max: f64` 引数追加。Python wrap (`cfm4_step_chebyshev_xyz_py` /
+    `cfm4_step_chebyshev_with_richardson_estimate_xyz_py`) にも追加。
+  - 影響範囲 (内部 Python API):
+    `evolve_schedule_adaptive_richardson_chebyshev` driver に
+    `h_p_min, h_p_max` キーワード引数追加 (必須)。`QuantumAnnealer` /
+    `AnnealingSimulator` からは `problem.h_p_diag_min/max` を渡す形に更新。
+  - 旧 X-only Python wrap (`cfm4_step_chebyshev_py` /
+    `cfm4_step_chebyshev_with_richardson_estimate_py`) は既に
+    `h_p_min, h_p_max` を末尾引数で受け取っており shim 内で ignore して
+    いたが, 修正で内部 `cfm4_step_chebyshev*` に propagate する形に。
+  - Lanczos 経路 (`cfm4_step` / `cfm4_step_with_richardson_estimate`) は
+    per-stage Gershgorin を呼ばないため影響なし (`build_stage_arrays` のみ
+    使用; PR #145 で分離した設計通り)。
+  - **acceptance テスト追加**: `src/cfm4.rs` 単体に
+    `compute_stage_gershgorin_no_z_matches_full_walk` (gz=None 経路で
+    precompute 値 ↔ full walk の bit-identical 一致, 4 通りの c_b 符号で)
+    と `compute_stage_gershgorin_with_z_walks_correctly` (gz=Some 経路で
+    precompute 引数が誤って使われないことの保証)。Python 側に
+    `test_chebyshev_h_p_bounds_match_h_p_diag_min_max` (tight bound と
+    意図的に緩めた bound で終端 ψ が `chebyshev_tol` 程度に一致することの
+    確認 — Gershgorin の意味的役割 (K_used を決める E_c/R 推定) が壊れて
+    いないことの契約)。
+
+### Verification (本セッション再開時の test-runner subagent 並列実行)
+
+- ✅ `cargo test` (BLAS + rayon ON): 101 passed
+- ✅ `cargo test --no-default-features`: 87 passed (BLAS / rayon 両 OFF, scalar
+  単スレッド経路, `rel < 1e-13` で BLAS on と一致)
+- ✅ `uv run maturin develop --uv` + `uv run pytest` (slow 含む): 362 passed
+  (test_xyz_schedule.py 9 cases / test_schedule.py 18 / test_problem.py 8 /
+  QuTiP 中規模 fidelity 含む)
+- ⏸️ 旧 API 経路 `bench_per_step.py` regression ±1% 以内 (X-only path): Linux
+  サーバー本番 bench で pre-merge cycle 中に確認 (`.claude/solve-overrides.md`
+  「Bench を伴う issue の運用」節)。
+
 ## 0.12.0 - 2026-05-26 — `krylov_tol` → `propagator_tol` rename + Chebyshev default 仕様変更 (issue #135) + パッケージ rename `kinema → maqina`
 
 `cfm4_adaptive_richardson_chebyshev` method の精度パラメータを 2 軸で整理:

@@ -3,15 +3,69 @@
 
 """QuTiP ``sesolve`` を参照実装としたバリデーション用エントリポイント.
 
-``maqina`` の Krylov / CFM4:2 / M2 propagator の数値結果を QuTiP の
+``maqina`` の Krylov / CFM4:2 / M2 / Chebyshev propagator の数値結果を QuTiP の
 高精度 ODE ソルバ (``sesolve``) と比較するための薄いラッパ. テスト
-(``tests/test_reference_qutip.py``) と ad-hoc な手動検証で利用する.
+(``tests/test_reference_qutip.py``, ``tests/test_xyz_schedule.py`` 等) と
+ad-hoc な手動検証で利用する.
 
 QuTiP 自体は dev 依存に入っているが, 本番 (wheel) では import を必須に
 しない. import 失敗時はテスト側を skip する (``pytest.importorskip``).
 
-Phase 1 で実装予定 (現状は API スケルトン).
+提供する builder
+----------------
+
+* :func:`build_qutip_hamiltonian_xyz`: per-site/per-axis 時間依存場
+  (issue #142 Phase C) の Hamiltonian を QuTiP の time-dependent format
+  ``[[H, coeff], ...]`` で組む.
+
+ビット規約変換ノート (sparse 経路):
+
+* maqina: bit 0 = LSB, ``x = Σ_i b_i · 2^i``. X_i / Y_i / Z_i は bit i を
+  flip / 位相回転.
+* QuTiP: ``qutip.tensor([A_0, A_1, ..., A_{n-1}])`` は ``np.kron`` 順に積み,
+  最初の引数 ``A_0`` が **MSB 側** (最も "遅い" qubit) に対応する.
+* したがって maqina の bit i に X / Y / Z を作用させるには
+  ``qutip.tensor([I, ..., σ, ..., I])`` の **位置 ``n-1-i``** に σ を入れる.
 """
 from __future__ import annotations as annotations
-from typing import Any
-__all__: list[str] = []
+from collections.abc import Callable as Callable, Sequence as Sequence
+from typing import Any as Any
+import numpy as np
+__all__ = ['build_qutip_hamiltonian_xyz']
+
+def build_qutip_hamiltonian_xyz(g_x_cbs: Sequence[Callable[[float], float]], h_p_diag: np.ndarray, b_cb: Callable[[float], float], *, g_y_cbs: Sequence[Callable[[float], float]] | None=None, g_z_cbs: Sequence[Callable[[float], float]] | None=None, qutip_module: Any=None) -> list[list[Any]]:
+    """per-site/per-axis 時間依存場の QuTiP ``H(t)`` リストを組む (issue #142).
+
+    Hamiltonian の形:
+
+    .. code-block:: text
+
+        H(t) = Σ_i [g_x_i(t)·X_i + g_y_i(t)·Y_i + g_z_i(t)·Z_i] + b(t)·H_p_diag
+
+    QuTiP の ``sesolve`` が要求する time-dependent format ``[[H_k, coeff_k], ...]``
+    形式で返す. ``coeff_k`` は Python callable (string coefficient ではなく
+    callable; pytest 環境で eval 機構の警告を避ける).
+
+    Parameters
+    ----------
+    g_x_cbs : Sequence[Callable[[float], float]]
+        per-site の X 軸時間依存係数 (length n).
+    h_p_diag : np.ndarray
+        shape ``(2**n,)`` float64 の Z 基底 problem 対角.
+    b_cb : Callable[[float], float]
+        problem Hamiltonian の global envelope ``b(t)``.
+    g_y_cbs, g_z_cbs : Sequence[Callable] | None
+        per-site の Y / Z 軸時間依存係数. ``None`` で当該軸 skip.
+    qutip_module : module
+        ``import qutip`` の結果. 呼び出し側で
+        ``qutip = pytest.importorskip("qutip")`` した上で渡す. dev 依存に
+        固定しないため module を明示的に注入する.
+
+    Returns
+    -------
+    list[list]
+        QuTiP ``sesolve`` 互換の ``H(t)`` 表現
+        ``[[H_drv_x_i, g_x_i(t)], ..., [H_p, b(t)]]``. n が大きい場合
+        各 ``H_drv_*`` は CSR sparse 構築 (``qutip.tensor``).
+    """
+    ...

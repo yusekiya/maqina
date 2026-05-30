@@ -186,14 +186,55 @@ fn main() {
     let elapsed_secs: f64;
     let extra_summary: Option<String>;
 
+    // Phase C / issue #142 C1 part 2-B: cfm4_step_with_richardson_estimate は
+    // per-axis array form の signature を取る. perf binary は X-only path を
+    // 測定するため `g_x_s* = -a_s* · h_x` を事前構築し, iter-0 cache は X-only
+    // 4-tuple form (basis_h_x + 4 個の a_s* scalar) で渡す.
+    let mk_gx = |a_s: f64| -> Vec<f64> { h_x.iter().map(|h| -a_s * h).collect() };
+    let g_x_s1_full = mk_gx(a_s1_full);
+    let g_x_s2_full = mk_gx(a_s2_full);
+    let g_x_s1_h1 = mk_gx(a_s1_h1);
+    let g_x_s2_h1 = mk_gx(a_s2_h1);
+    let g_x_s1_h2 = mk_gx(a_s1_h2);
+    let g_x_s2_h2 = mk_gx(a_s2_h2);
+
     match mode {
         Mode::Full => {
             // warmup: 3 回程度 (per-iter cost が大きいので少なめ).
             for _ in 0..3 {
                 let _ = cfm4_step_with_richardson_estimate(
-                    &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
-                    b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, dt, m_max,
-                    krylov_tol, n, true,
+                    &mut psi,
+                    &h_p_diag,
+                    &g_x_s1_full,
+                    None,
+                    None,
+                    b_s1_full,
+                    &g_x_s2_full,
+                    None,
+                    None,
+                    b_s2_full,
+                    &g_x_s1_h1,
+                    None,
+                    None,
+                    b_s1_h1,
+                    &g_x_s2_h1,
+                    None,
+                    None,
+                    b_s2_h1,
+                    &g_x_s1_h2,
+                    None,
+                    None,
+                    b_s1_h2,
+                    &g_x_s2_h2,
+                    None,
+                    None,
+                    b_s2_h2,
+                    dt,
+                    m_max,
+                    krylov_tol,
+                    n,
+                    true,
+                    Some((&h_x[..], a_s1_full, a_s2_full, a_s1_h1, a_s2_h1)),
                 )
                 .expect("Richardson step (warmup) failed");
             }
@@ -202,9 +243,38 @@ fn main() {
             let mut m_eff_total: usize = 0;
             for _ in 0..n_steps {
                 let (_err, m_eff, _err_lanczos) = cfm4_step_with_richardson_estimate(
-                    &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
-                    b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, dt, m_max,
-                    krylov_tol, n, true,
+                    &mut psi,
+                    &h_p_diag,
+                    &g_x_s1_full,
+                    None,
+                    None,
+                    b_s1_full,
+                    &g_x_s2_full,
+                    None,
+                    None,
+                    b_s2_full,
+                    &g_x_s1_h1,
+                    None,
+                    None,
+                    b_s1_h1,
+                    &g_x_s2_h1,
+                    None,
+                    None,
+                    b_s2_h1,
+                    &g_x_s1_h2,
+                    None,
+                    None,
+                    b_s1_h2,
+                    &g_x_s2_h2,
+                    None,
+                    None,
+                    b_s2_h2,
+                    dt,
+                    m_max,
+                    krylov_tol,
+                    n,
+                    true,
+                    Some((&h_x[..], a_s1_full, a_s2_full, a_s1_h1, a_s2_h1)),
                 )
                 .expect("Richardson step failed");
                 m_eff_total += m_eff;

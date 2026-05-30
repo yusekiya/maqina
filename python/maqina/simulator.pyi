@@ -37,6 +37,7 @@ from __future__ import annotations as annotations
 from typing import Literal as Literal
 import numpy as np
 from maqina._helpers import _KRYLOV_TOL_ATOL_RATIO as _KRYLOV_TOL_ATOL_RATIO, _KRYLOV_TOL_FIXED_DEFAULT as _KRYLOV_TOL_FIXED_DEFAULT, _resolve_dt_init_auto as _resolve_dt_init_auto, _resolve_dt_max_auto as _resolve_dt_max_auto, _validate_psi0 as _validate_psi0
+from maqina.controller import ControllerConfig as ControllerConfig
 from maqina.krylov import evolve_schedule_adaptive_richardson as evolve_schedule_adaptive_richardson, evolve_schedule_adaptive_richardson_chebyshev as evolve_schedule_adaptive_richardson_chebyshev, evolve_schedule_cfm4 as evolve_schedule_cfm4, evolve_schedule_m2 as evolve_schedule_m2, evolve_schedule_trotter as evolve_schedule_trotter, evolve_schedule_trotter_suzuki4 as evolve_schedule_trotter_suzuki4
 from maqina.observable import Observable as Observable
 from maqina.problem import IsingProblem as IsingProblem
@@ -119,6 +120,23 @@ class AnnealingSimulator:
         する. ``None`` (default) で ``m`` をそのまま使う. 固定 dt method
         で指定すると ``ValueError``. ``QuantumAnnealer.run`` の ``m_max``
         と同義.
+    controller
+        adaptive 経路専用. PI controller の数値挙動 knob を集約した
+        :class:`~maqina.ControllerConfig` (issue #149). ``None`` (default)
+        で全 default. ``safety`` / ``growth_max`` / ``max_rejects`` /
+        ``dt_min`` / ``reject_shrink_min`` / ``reject_shrink_max`` /
+        ``freeze_growth_after_reject`` / ``growth_freeze_steps`` / ``pi_alpha`` /
+        ``pi_beta`` を driver に渡す. 固定 dt method で指定すると ``ValueError``
+        (``QuantumAnnealer.run`` と違い Simulator は strict). reject 時の dt 縮小が
+        固定 0.5 倍から予測式 + クランプに変わり (issue #149), reject 直後の accept
+        で dt 拡大を凍結し (issue #150, Gustafsson ヒステリシス, 既定有効), さらに
+        accept 時の dt 予測式に真の PI 比例項が入る (issue #151, 既定
+        ``pi_alpha=0.7`` / ``pi_beta=0.4``) ため既定挙動が変わる (破壊的変更).
+        #149 のみ適用は
+        ``ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)``,
+        成長凍結のみ無効化は
+        ``ControllerConfig(freeze_growth_after_reject=False)``, 純 I 制御は
+        ``ControllerConfig(pi_alpha=1.0, pi_beta=0.0)``.
 
     Raises
     ------
@@ -127,7 +145,8 @@ class AnnealingSimulator:
     ValueError
         ``m`` / ``propagator_tol`` / ``atol`` / ``dt_init`` / ``dt_max`` /
         ``m_max`` が範囲外, ``psi0`` の shape / dtype / 非正規化,
-        固定 dt method に adaptive 専用パラメータを渡した場合.
+        固定 dt method に adaptive 専用パラメータ (``controller`` 含む) を
+        渡した場合.
 
     Examples
     --------
@@ -163,11 +182,12 @@ class AnnealingSimulator:
     _dt_init: Any
     _dt_max: Any
     _m_max: Any
+    _controller: Any
     _t: Any
     _psi: Any
     _n_matvec: Any
 
-    def __init__(self, problem: IsingProblem, schedule: Schedule, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', m: int=24, propagator_tol: float | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> None:
+    def __init__(self, problem: IsingProblem, schedule: Schedule, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', m: int=24, propagator_tol: float | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None, controller: ControllerConfig | None=None) -> None:
         ...
 
     @property
@@ -273,5 +293,53 @@ class AnnealingSimulator:
             ``observable`` が ``Observable`` インスタンスでない場合.
         ValueError
             ``observable.diag`` と ψ の shape 不一致 (Observable 側で raise).
+        """
+        ...
+
+    def _resolved_propagator_tol_fixed(self) -> float:
+        ...
+
+    def _resolved_propagator_tol_adaptive(self, tol_step: float) -> float:
+        """adaptive Richardson (Lanczos) 経路の propagator_tol 自動解決.
+
+        Lanczos a posteriori 早期打切は atol scaling で連動するのが望ましい
+        ため auto-coupling (``tol_step · _KRYLOV_TOL_ATOL_RATIO``) を採る.
+        """
+        ...
+
+    def _resolved_propagator_tol_chebyshev_adaptive(self) -> float:
+        """adaptive Richardson (Chebyshev variant) 経路の propagator_tol 自動解決.
+
+        issue #135 で auto-coupling (``tol_step · _KRYLOV_TOL_ATOL_RATIO``)
+        から **固定値 ``_KRYLOV_TOL_FIXED_DEFAULT`` (= 1e-12)** に変更.
+        Chebyshev は ``K_used ~ R·dt + log(1/propagator_tol)`` の対数依存で
+        propagator_tol を atol に連動させる動機が弱く, auto-coupling だと
+        atol↓ で machine precision 到達後に round-off accumulation で精度が
+        悪化する非単調性が発生する.
+        """
+        ...
+
+    def _run_fixed_dt(self, t_next: float, *, n_steps: int) -> None:
+        """固定 dt driver を ``[_t, t_next]`` 区間で呼んで状態更新する.
+
+        ``observables`` / ``save_tlist`` / ``store_states`` は Simulator
+        の用途外なので常に default (None / False) を渡す. ``run`` と同じ
+        driver を同じ引数で呼ぶため, 同じ schedule 評価点で bit-identical
+        な数値が出る.
+        """
+        ...
+
+    def _run_adaptive(self, t_next: float, *, dt_init_override: float | None=None, dt_max_override: float | None=None) -> None:
+        """adaptive Richardson driver を ``[_t, t_next]`` 区間で呼ぶ.
+
+        ``dt_init_override`` / ``dt_max_override`` を渡すと
+        ``__init__`` の ``dt_init`` / ``dt_max`` を無視してこちらを使う
+        (``step(dt)`` 経路用; 呼出側 ``dt`` を proposal にする).
+        override が None なら ``__init__`` の値を使い, それも None なら
+        ``QuantumAnnealer.run`` と同じ auto resolution を行う.
+
+        ``n_matvec`` は driver の ``m_eff_history`` 合計で正確に加算する
+        (早期打切で ``6m`` upper bound より小さくなる可能性があるため,
+        累積コストを正確に追う).
         """
         ...

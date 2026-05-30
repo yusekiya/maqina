@@ -123,11 +123,7 @@ def _normalize_knob(value: float) -> str:
 
 
 def _run_maqina_cfm4_fixed_dt(
-    prob: IsingProblem,
-    sched: Schedule,
-    psi0: np.ndarray,
-    T: float,
-    dt: float,
+    prob: IsingProblem, sched: Schedule, psi0: np.ndarray, T: float, dt: float
 ) -> tuple[float, np.ndarray, int]:
     """``cfm4`` (固定 dt CFM4:2) を ``dt`` 指定で 1 回走らせ wall_sec / ψ_final / n_steps.
 
@@ -138,33 +134,19 @@ def _run_maqina_cfm4_fixed_dt(
     n_steps = max(1, int(round(T / dt)))
     ann = QuantumAnnealer(prob, sched)
     t_start = time.perf_counter()
-    res = ann.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4",
-        n_steps=n_steps,
-    )
+    res = ann.run(psi0, 0.0, T, method="cfm4", n_steps=n_steps)
     elapsed = time.perf_counter() - t_start
     return elapsed, np.ascontiguousarray(res.psi_final), n_steps
 
 
 def _run_maqina_adaptive_krylov(
-    prob: IsingProblem,
-    sched: Schedule,
-    psi0: np.ndarray,
-    T: float,
-    atol: float,
+    prob: IsingProblem, sched: Schedule, psi0: np.ndarray, T: float, atol: float
 ) -> tuple[float, np.ndarray, int]:
     """``cfm4_adaptive_richardson_krylov`` を ``atol`` で 1 回走らせ wall_sec / ψ_final / n_steps_actual."""
     ann = QuantumAnnealer(prob, sched)
     t_start = time.perf_counter()
     res = ann.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=float(atol),
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=float(atol)
     )
     elapsed = time.perf_counter() - t_start
     n_steps_actual = res.n_steps_actual if res.n_steps_actual is not None else -1
@@ -193,11 +175,7 @@ def _run_maqina_adaptive_chebyshev(
     ann = QuantumAnnealer(prob, sched, propagator_tol=propagator_tol)
     t_start = time.perf_counter()
     res = ann.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_chebyshev",
-        atol=float(atol),
+        psi0, 0.0, T, method="cfm4_adaptive_richardson_chebyshev", atol=float(atol)
     )
     elapsed = time.perf_counter() - t_start
     n_steps_actual = res.n_steps_actual if res.n_steps_actual is not None else -1
@@ -291,7 +269,7 @@ def run_bench(
             f"  problem:   ({scenario}, {n}, {seed})\n"
             f"  reference: ({ref_scenario}, {ref_n}, {ref_seed})"
         )
-    if psi_ref.shape != (1 << n,):
+    if psi_ref.shape != (1 << n):
         raise ValueError(
             f"psi_ref shape {psi_ref.shape} does not match n={n} (expected {1 << n})"
         )
@@ -311,8 +289,8 @@ def run_bench(
         )
 
     # 問題セットアップ
-    prob = IsingProblem(n=n, H_p_diag=h_p_diag, h_x=h_x)
-    sched = Schedule.linear(T=T)
+    prob = IsingProblem(n=n, H_p_diag=h_p_diag)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
     h_t = build_qutip_hamiltonian(h_x, h_p_diag, T)
 
@@ -367,12 +345,7 @@ def run_bench(
                 atol: float,
             ) -> tuple[float, np.ndarray, int]:
                 return _run_maqina_adaptive_chebyshev(
-                    prob,
-                    sched,
-                    psi0,
-                    T,
-                    atol,
-                    propagator_tol=chebyshev_propagator_tol,
+                    prob, sched, psi0, T, atol, propagator_tol=chebyshev_propagator_tol
                 )
         else:
             raise ValueError(f"unknown method: {method!r}")
@@ -414,10 +387,7 @@ def run_bench(
             )
             done_cells.add(knob_key)
             _save_csv_atomic(csv_path, rows)
-            print(
-                f"[saved] {csv_path} ({len(rows)} cells total)",
-                flush=True,
-            )
+            print(f"[saved] {csv_path} ({len(rows)} cells total)", flush=True)
 
     # ---- QuTiP cells ----
     if solver in ("both", "qutip"):
@@ -453,10 +423,7 @@ def run_bench(
             )
             done_cells.add(knob_key)
             _save_csv_atomic(csv_path, rows)
-            print(
-                f"[saved] {csv_path} ({len(rows)} cells total)",
-                flush=True,
-            )
+            print(f"[saved] {csv_path} ({len(rows)} cells total)", flush=True)
 
     print(f"\n[done] {csv_path} (solver={solver}, {len(rows)} cells)", flush=True)
     return csv_path

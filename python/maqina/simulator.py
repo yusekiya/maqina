@@ -44,6 +44,7 @@ from maqina._helpers import (
     _resolve_dt_max_auto,
     _validate_psi0,
 )
+from maqina.controller import ControllerConfig
 from maqina.krylov import (
     evolve_schedule_adaptive_richardson,
     evolve_schedule_adaptive_richardson_chebyshev,
@@ -146,6 +147,23 @@ class AnnealingSimulator:
         する. ``None`` (default) で ``m`` をそのまま使う. 固定 dt method
         で指定すると ``ValueError``. ``QuantumAnnealer.run`` の ``m_max``
         と同義.
+    controller
+        adaptive 経路専用. PI controller の数値挙動 knob を集約した
+        :class:`~maqina.ControllerConfig` (issue #149). ``None`` (default)
+        で全 default. ``safety`` / ``growth_max`` / ``max_rejects`` /
+        ``dt_min`` / ``reject_shrink_min`` / ``reject_shrink_max`` /
+        ``freeze_growth_after_reject`` / ``growth_freeze_steps`` / ``pi_alpha`` /
+        ``pi_beta`` を driver に渡す. 固定 dt method で指定すると ``ValueError``
+        (``QuantumAnnealer.run`` と違い Simulator は strict). reject 時の dt 縮小が
+        固定 0.5 倍から予測式 + クランプに変わり (issue #149), reject 直後の accept
+        で dt 拡大を凍結し (issue #150, Gustafsson ヒステリシス, 既定有効), さらに
+        accept 時の dt 予測式に真の PI 比例項が入る (issue #151, 既定
+        ``pi_alpha=0.7`` / ``pi_beta=0.4``) ため既定挙動が変わる (破壊的変更).
+        #149 のみ適用は
+        ``ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)``,
+        成長凍結のみ無効化は
+        ``ControllerConfig(freeze_growth_after_reject=False)``, 純 I 制御は
+        ``ControllerConfig(pi_alpha=1.0, pi_beta=0.0)``.
 
     Raises
     ------
@@ -154,7 +172,8 @@ class AnnealingSimulator:
     ValueError
         ``m`` / ``propagator_tol`` / ``atol`` / ``dt_init`` / ``dt_max`` /
         ``m_max`` が範囲外, ``psi0`` の shape / dtype / 非正規化,
-        固定 dt method に adaptive 専用パラメータを渡した場合.
+        固定 dt method に adaptive 専用パラメータ (``controller`` 含む) を
+        渡した場合.
 
     Examples
     --------
@@ -203,6 +222,7 @@ class AnnealingSimulator:
         dt_init: float | None = None,
         dt_max: float | None = None,
         m_max: int | None = None,
+        controller: ControllerConfig | None = None,
     ) -> None:
         if method not in _VALID_METHODS:
             raise NotImplementedError(
@@ -225,6 +245,7 @@ class AnnealingSimulator:
                 ("dt_init", dt_init),
                 ("dt_max", dt_max),
                 ("m_max", m_max),
+                ("controller", controller),
             ):
                 if val is not None:
                     raise ValueError(
@@ -267,6 +288,11 @@ class AnnealingSimulator:
         self._dt_init: float | None = float(dt_init) if dt_init is not None else None
         self._dt_max: float | None = float(dt_max) if dt_max is not None else None
         self._m_max: int | None = int(m_max) if m_max is not None else None
+        # issue #149: controller knob を ControllerConfig に集約. None なら
+        # 全 default. adaptive driver 呼出 (_run_adaptive) で field を展開する.
+        self._controller: ControllerConfig = (
+            controller if controller is not None else ControllerConfig()
+        )
 
         # _psi は呼出側 psi0 の後続 mutation から内部状態を守るため copy.
         # _validate_psi0 は C-contiguous な配列を返すが, 既存 buffer を返す
@@ -469,7 +495,6 @@ class AnnealingSimulator:
         propagator_tol = self._resolved_propagator_tol_fixed()
         if self._method == "m2":
             psi_new, n_matvec, _ = evolve_schedule_m2(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=self._psi,
@@ -481,7 +506,6 @@ class AnnealingSimulator:
             )
         elif self._method == "trotter":
             psi_new, n_matvec, _ = evolve_schedule_trotter(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=self._psi,
@@ -491,7 +515,6 @@ class AnnealingSimulator:
             )
         elif self._method == "trotter_suzuki4":
             psi_new, n_matvec, _ = evolve_schedule_trotter_suzuki4(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=self._psi,
@@ -501,7 +524,6 @@ class AnnealingSimulator:
             )
         else:  # cfm4
             psi_new, n_matvec, _ = evolve_schedule_cfm4(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=self._psi,
@@ -553,7 +575,9 @@ class AnnealingSimulator:
         elif self._dt_max is not None:
             dt_max_resolved = self._dt_max
         else:
-            dt_max_resolved = _resolve_dt_max_auto(self.problem, m_eff_param, dt0)
+            dt_max_resolved = _resolve_dt_max_auto(
+                self.schedule, self.problem, m_eff_param, dt0
+            )
         # driver 入力検証 ``dt_max >= dt0`` を満たすため floor.
         # step(dt) では dt0=dt_max=dt なので一致, advance_to では auto
         # 解決 (_resolve_dt_max_auto) が内部で floor 済み.
@@ -579,16 +603,27 @@ class AnnealingSimulator:
                 _n_krylov_insufficient,
                 _snapshot,
             ) = evolve_schedule_adaptive_richardson_chebyshev(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=self._psi,
                 t0=self._t,
                 t1=t_next,
+                h_p_min=self.problem.h_p_diag_min,
+                h_p_max=self.problem.h_p_diag_max,
                 chebyshev_tol=propagator_tol,
                 tol_step=tol_step,
                 dt0=dt0,
+                dt_min=self._controller.dt_min,
                 dt_max=dt_max_resolved,
+                safety=self._controller.safety,
+                growth_max=self._controller.growth_max,
+                max_rejects=self._controller.max_rejects,
+                reject_shrink_min=self._controller.reject_shrink_min,
+                reject_shrink_max=self._controller.reject_shrink_max,
+                freeze_growth_after_reject=self._controller.freeze_growth_after_reject,
+                growth_freeze_steps=self._controller.growth_freeze_steps,
+                pi_alpha=self._controller.pi_alpha,
+                pi_beta=self._controller.pi_beta,
             )
         else:
             (
@@ -603,7 +638,6 @@ class AnnealingSimulator:
                 _n_krylov_insufficient,
                 _snapshot,
             ) = evolve_schedule_adaptive_richardson(
-                h_x=self.problem.h_x,
                 h_p_diag=self.problem.H_p_diag,
                 schedule=self.schedule,
                 psi0=self._psi,
@@ -613,7 +647,17 @@ class AnnealingSimulator:
                 krylov_tol=propagator_tol,
                 tol_step=tol_step,
                 dt0=dt0,
+                dt_min=self._controller.dt_min,
                 dt_max=dt_max_resolved,
+                safety=self._controller.safety,
+                growth_max=self._controller.growth_max,
+                max_rejects=self._controller.max_rejects,
+                reject_shrink_min=self._controller.reject_shrink_min,
+                reject_shrink_max=self._controller.reject_shrink_max,
+                freeze_growth_after_reject=self._controller.freeze_growth_after_reject,
+                growth_freeze_steps=self._controller.growth_freeze_steps,
+                pi_alpha=self._controller.pi_alpha,
+                pi_beta=self._controller.pi_beta,
             )
         self._psi = psi_new
         self._t = t_next

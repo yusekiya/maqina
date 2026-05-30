@@ -112,8 +112,8 @@ def _build_sample(n: int, seed: int) -> tuple[IsingProblem, Schedule, np.ndarray
     rng = np.random.default_rng(seed)
     h_x = rng.uniform(0.5, 1.5, size=n).astype(np.float64)
     h_p_diag = rng.uniform(-1.0, 1.0, size=1 << n).astype(np.float64)
-    prob = IsingProblem(n=n, H_p_diag=h_p_diag, h_x=h_x)
-    sched = Schedule.linear(T=_T_END)
+    prob = IsingProblem(n=n, H_p_diag=h_p_diag)
+    sched = Schedule.linear(T=_T_END, h_x=h_x)
     psi0 = uniform_superposition(n)
     return prob, sched, psi0
 

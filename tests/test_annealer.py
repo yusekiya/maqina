@@ -63,9 +63,8 @@ def test_run_returns_quantum_result_with_phase1_fields() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=1.0)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     res = ann.run(psi0, 0.0, 1.0, method="m2", n_steps=20)
@@ -98,9 +97,8 @@ def test_run_reaches_ground_state_for_long_anneal() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=10.0)
+    sched = Schedule.linear(T=10.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     res = ann.run(psi0, 0.0, sched.T, method="m2", n_steps=200)
@@ -124,9 +122,8 @@ def test_run_trotter_smoke_and_ground_state() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=10.0)
+    sched = Schedule.linear(T=10.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     res = ann.run(psi0, 0.0, sched.T, method="trotter", n_steps=200)
@@ -159,9 +156,8 @@ def test_run_trotter_suzuki4_smoke_and_ground_state() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=10.0)
+    sched = Schedule.linear(T=10.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     res = ann.run(psi0, 0.0, sched.T, method="trotter_suzuki4", n_steps=200)
@@ -193,9 +189,8 @@ def test_run_cfm4_smoke_and_ground_state() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=10.0)
+    sched = Schedule.linear(T=10.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     res = ann.run(psi0, 0.0, sched.T, method="cfm4", n_steps=200)
@@ -230,9 +225,8 @@ def test_run_cfm4_adaptive_richardson_smoke_and_ground_state() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=10.0)
+    sched = Schedule.linear(T=10.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     res = ann.run(
@@ -278,9 +272,8 @@ def test_run_rejects_unsupported_method() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=1.0)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     with pytest.raises(NotImplementedError):
@@ -300,9 +293,8 @@ def test_run_save_tlist_snapshot_smoke() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=1.0)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     save_tlist = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=np.float64)
@@ -342,9 +334,8 @@ def test_run_observables_without_save_tlist_raises() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=1.0)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     with pytest.raises(ValueError, match="save_tlist"):
@@ -366,9 +357,8 @@ def test_run_store_states_without_save_tlist_raises() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=1.0)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
     with pytest.raises(ValueError, match="save_tlist"):
@@ -388,9 +378,8 @@ def test_run_validates_psi0_normalization() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=1.0)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n, dtype=np.float64))
     ann = QuantumAnnealer(prob, sched)
     psi0 = uniform_superposition(n) * 2.0  # ‖psi0‖ = 2
     with pytest.raises(ValueError, match="L2-normalized"):
@@ -403,9 +392,8 @@ def test_run_validates_psi0_shape() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=1.0)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n, dtype=np.float64))
     ann = QuantumAnnealer(prob, sched)
     psi0_wrong = np.ones(7, dtype=np.complex128) / np.sqrt(7)
     with pytest.raises(ValueError, match="shape"):
@@ -418,9 +406,8 @@ def test_constructor_validates_m_and_tol() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=1.0)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n, dtype=np.float64))
     with pytest.raises(ValueError, match="m must"):
         QuantumAnnealer(prob, sched, m=0)
     with pytest.raises(ValueError, match="propagator_tol"):
@@ -442,9 +429,8 @@ def test_create_simulator_returns_simulator_with_initial_state() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=1.0)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
@@ -462,9 +448,8 @@ def test_create_simulator_supports_same_methods_as_run() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=1.0)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched)
 
@@ -492,9 +477,8 @@ def test_create_simulator_inherits_m_and_propagator_tol_from_annealer() -> None:
     prob = IsingProblem(
         n=n,
         H_p_diag=_ferromagnetic_chain_h_p_diag(n),
-        h_x=np.ones(n, dtype=np.float64),
     )
-    sched = Schedule.linear(T=1.0)
+    sched = Schedule.linear(T=1.0, h_x=np.ones(n, dtype=np.float64))
     psi0 = uniform_superposition(n)
     ann = QuantumAnnealer(prob, sched, m=16, propagator_tol=1e-10)
 

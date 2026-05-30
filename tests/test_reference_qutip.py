@@ -153,8 +153,8 @@ def test_quantum_annealer_matches_qutip_sesolve() -> None:
     h_x = rng.uniform(0.5, 1.5, size=n).astype(np.float64)
     h_p_diag = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
 
-    prob = IsingProblem(n=n, H_p_diag=h_p_diag, h_x=h_x)
-    sched = Schedule.linear(T=T)
+    prob = IsingProblem(n=n, H_p_diag=h_p_diag)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann = QuantumAnnealer(prob, sched)
@@ -182,8 +182,8 @@ def test_quantum_annealer_trotter_matches_qutip_sesolve() -> None:
     h_x = rng.uniform(0.5, 1.5, size=n).astype(np.float64)
     h_p_diag = rng.uniform(-1.0, 1.0, size=dim).astype(np.float64)
 
-    prob = IsingProblem(n=n, H_p_diag=h_p_diag, h_x=h_x)
-    sched = Schedule.linear(T=T)
+    prob = IsingProblem(n=n, H_p_diag=h_p_diag)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
 
     ann = QuantumAnnealer(prob, sched)
@@ -214,8 +214,8 @@ def _make_random_problem(
     rng = np.random.default_rng(seed)
     h_x = rng.uniform(0.5, 1.5, size=n).astype(np.float64)
     h_p_diag = rng.uniform(-1.0, 1.0, size=1 << n).astype(np.float64)
-    prob = IsingProblem(n=n, H_p_diag=h_p_diag, h_x=h_x)
-    sched = Schedule.linear(T=T)
+    prob = IsingProblem(n=n, H_p_diag=h_p_diag)
+    sched = Schedule.linear(T=T, h_x=h_x)
     psi0 = uniform_superposition(n)
     return prob, sched, psi0, T
 
@@ -296,7 +296,7 @@ def test_quantum_annealer_large_n_matches_qutip_fixed_dt(n: int, method: str) ->
         n_steps=_LARGE_FIXED_N_STEPS,
     )
 
-    h_t = _build_qutip_hamiltonian(prob.h_x, prob.H_p_diag, T)
+    h_t = _build_qutip_hamiltonian(sched.h_x, prob.H_p_diag, T)
     psi_qutip = _qutip_sesolve_final(h_t, psi0, T, n)
 
     fid = _fidelity(res.psi_final, psi_qutip)
@@ -328,7 +328,7 @@ def test_quantum_annealer_large_n_matches_qutip_trotter(n: int) -> None:
     ann = QuantumAnnealer(prob, sched)
     res = ann.run(psi0, 0.0, T, method="trotter", n_steps=_LARGE_FIXED_N_STEPS)
 
-    h_t = _build_qutip_hamiltonian(prob.h_x, prob.H_p_diag, T)
+    h_t = _build_qutip_hamiltonian(sched.h_x, prob.H_p_diag, T)
     psi_qutip = _qutip_sesolve_final(h_t, psi0, T, n)
 
     fid = _fidelity(res.psi_final, psi_qutip)
@@ -362,15 +362,9 @@ def test_quantum_annealer_large_n_matches_qutip_adaptive(n: int) -> None:
     prob, sched, psi0, T = _make_random_problem(n, seed=20260517 + n)
 
     ann = QuantumAnnealer(prob, sched)
-    res = ann.run(
-        psi0,
-        0.0,
-        T,
-        method="cfm4_adaptive_richardson_krylov",
-        atol=1e-8,
-    )
+    res = ann.run(psi0, 0.0, T, method="cfm4_adaptive_richardson_krylov", atol=1e-8)
 
-    h_t = _build_qutip_hamiltonian(prob.h_x, prob.H_p_diag, T)
+    h_t = _build_qutip_hamiltonian(sched.h_x, prob.H_p_diag, T)
     psi_qutip = _qutip_sesolve_final(h_t, psi0, T, n)
 
     fid = _fidelity(res.psi_final, psi_qutip)

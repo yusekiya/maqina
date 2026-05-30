@@ -66,8 +66,8 @@ bits = ((x[:, None] >> np.arange(n)) & 1).astype(np.int64)
 sigma = 1 - 2 * bits                                    # shape (2^n, n)
 H_p_diag = -np.einsum("ij,xi,xj->x", J, sigma, sigma) / 2
 
-prob = IsingProblem(n=n, H_p_diag=H_p_diag, h_x=np.ones(n))
-sched = Schedule.linear(T=20.0)
+prob = IsingProblem(n=n, H_p_diag=H_p_diag)
+sched = Schedule.linear(T=20.0, h_x=np.ones(n))
 psi0 = uniform_superposition(n)
 
 ann = QuantumAnnealer(prob, sched)
@@ -114,12 +114,8 @@ from maqina import IsingProblem, Schedule, QuantumAnnealer, Observable
 from maqina.initial_states import uniform_superposition
 
 n = 6
-prob = IsingProblem(
-    n=n,
-    H_p_diag=np.arange(1 << n, dtype=np.float64),
-    h_x=np.ones(n),
-)
-sched = Schedule.linear(T=10.0)
+prob = IsingProblem(n=n, H_p_diag=np.arange(1 << n, dtype=np.float64))
+sched = Schedule.linear(T=10.0, h_x=np.ones(n))
 psi0 = uniform_superposition(n)
 
 ann = QuantumAnnealer(prob, sched)
@@ -159,12 +155,8 @@ from maqina import IsingProblem, Schedule, QuantumAnnealer, Observable
 from maqina.initial_states import uniform_superposition
 
 n = 6
-prob = IsingProblem(
-    n=n,
-    H_p_diag=np.arange(1 << n, dtype=np.float64),
-    h_x=np.ones(n),
-)
-sched = Schedule.linear(T=10.0)
+prob = IsingProblem(n=n, H_p_diag=np.arange(1 << n, dtype=np.float64))
+sched = Schedule.linear(T=10.0, h_x=np.ones(n))
 psi0 = uniform_superposition(n)
 m_z = Observable.magnetization(n)
 
@@ -198,12 +190,8 @@ from maqina import IsingProblem, Schedule
 from maqina.eigenstates import instantaneous_eigenstates
 
 n = 6
-prob = IsingProblem(
-    n=n,
-    H_p_diag=np.arange(1 << n, dtype=np.float64),
-    h_x=np.ones(n),
-)
-sched = Schedule.linear(T=10.0)
+prob = IsingProblem(n=n, H_p_diag=np.arange(1 << n, dtype=np.float64))
+sched = Schedule.linear(T=10.0, h_x=np.ones(n))
 
 # The lowest 2 eigenvalues / eigenvectors at t = T/2.
 eigvals, eigvecs = instantaneous_eigenstates(
@@ -260,12 +248,13 @@ bits = ((x[:, None] >> np.arange(n)) & 1).astype(np.int64)
 sigma = 1 - 2 * bits
 H_p_diag = -np.einsum("ij,xi,xj->x", J, sigma, sigma) / 2
 
-prob = IsingProblem(n=n, H_p_diag=H_p_diag, h_x=np.ones(n))
+prob = IsingProblem(n=n, H_p_diag=H_p_diag)
+h_x = np.ones(n)
 psi0 = uniform_superposition(n)             # ground state of H(0)
 
 # Compare short T (non-adiabatic) vs long T (near-adiabatic limit).
 for T in (1.0, 100.0):
-    sched = Schedule.linear(T=T)
+    sched = Schedule.linear(T=T, h_x=h_x)
     save_tlist = np.linspace(0.0, sched.T, 11)
 
     ann = QuantumAnnealer(prob, sched)
@@ -297,7 +286,77 @@ For ``n > 12`` where dense ``eigh`` is impractical, switch to
 low-lying states via ``|⟨gs_j(t)|ψ(t)⟩|²``; see
 [`docs/design/04-python-api.md`](design/04-python-api.md), Japanese only).
 
-## 6. Thread-count control for parallel jobs
+## 6. Per-site/per-axis time-dependent fields with `Schedule.from_xyz`
+
+By default `Schedule` describes the X-only TFIM
+``H(t) = A(s(t)) · (-Σ_i h_x_i X_i) + B(s(t)) · H_p_diag`` with **static**
+``h_x``. For per-site / per-axis time-dependent driver fields (X, Y, and Z
+each as independent callables), use `Schedule.from_xyz(...)` (issue #142
+Phase C):
+
+```text
+H(t) = Σ_i [g_x_i(t)·X_i + g_y_i(t)·Y_i + g_z_i(t)·Z_i] + b(t) · H_p_diag
+```
+
+The legacy `Schedule(...)` / `Schedule.linear` API and the new
+`Schedule.from_xyz` API **coexist**: existing scripts using
+`Schedule.linear(..., h_x=...)` keep working unchanged. The XYZ API
+treats the callable as **already containing the amplitude** (no separate
+``h_x`` argument; embed the per-site amplitude into the callable closures
+themselves).
+
+Example: an XY rotating field combined with a linear annealing envelope
+on the problem Hamiltonian:
+
+```python
+import math
+import numpy as np
+from maqina import IsingProblem, Schedule, QuantumAnnealer
+from maqina.initial_states import uniform_superposition
+
+n = 6
+T = 20.0
+h_amp = 1.0
+omega = 2 * math.pi / T  # one rotation over [0, T]
+H_p_diag = np.arange(1 << n, dtype=np.float64)
+
+# X / Y axes: per-site rotating field of amplitude h_amp (same on every site).
+g_x = [(lambda t, h=h_amp, w=omega: h * math.cos(w * t)) for _ in range(n)]
+g_y = [(lambda t, h=h_amp, w=omega: h * math.sin(w * t)) for _ in range(n)]
+# Z axis: omitted (g_z=None → real-only SIMD kernel fast path on the Rust side).
+# Problem envelope: linear ramp 0 → 1.
+b = lambda t, T=T: t / T  # noqa: E731
+
+prob = IsingProblem(n=n, H_p_diag=H_p_diag)
+sched = Schedule.from_xyz(T=T, g_x=g_x, b=b, g_y=g_y)  # g_z left as None
+psi0 = uniform_superposition(n)
+
+ann = QuantumAnnealer(prob, sched)
+result = ann.run(
+    psi0,
+    t0=0.0,
+    t1=sched.T,
+    atol=1e-8,
+)  # default method "cfm4_adaptive_richardson_chebyshev"
+print(f"n_steps = {result.n_steps_actual}")
+```
+
+Notes on the XYZ API:
+
+- ``IsingProblem`` carries **no** ``h_x``. In the XYZ API the amplitude is
+  embedded in the callable; in the legacy API it lives on ``Schedule``
+  (``Schedule.linear(..., h_x=...)``).
+- ``g_y`` / ``g_z`` default to ``None``, which is the **real-only fast
+  path**: the Rust matvec dispatches to the existing X-only SIMD kernels
+  (no overhead from the XYZ extension).
+- ``method="trotter"`` and ``method="trotter_suzuki4"`` are **not
+  supported** on `Schedule.from_xyz` (the per-axis 2×2 rotation kernel is
+  real-coefficient only). Calling these methods with a XYZ schedule
+  raises ``ValueError``. Use the Magnus path
+  (``cfm4_adaptive_richardson_chebyshev`` / ``_krylov`` / ``cfm4`` / ``m2``)
+  for XYZ driver Hamiltonians.
+
+## 7. Thread-count control for parallel jobs
 
 When running multiple independent calculations in parallel (e.g.
 hyperparameter sweeps, independent trajectories per parameter, Slurm job

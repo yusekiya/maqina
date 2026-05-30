@@ -43,6 +43,7 @@ Usage
 import warnings
 
 from maqina.annealer import QuantumAnnealer
+from maqina.controller import ControllerConfig
 from maqina.eigenstates import instantaneous_eigenstates
 from maqina.observable import Observable
 from maqina.problem import IsingProblem
@@ -52,6 +53,7 @@ from maqina.simulator import AnnealingSimulator
 
 __all__ = [
     "AnnealingSimulator",
+    "ControllerConfig",
     "IsingProblem",
     "Observable",
     "QuantumAnnealer",

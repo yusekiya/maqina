@@ -4,7 +4,7 @@
 
 A **Ma**gnus-based **Q**uantum **I**sing **N**umerical **A**nnealer
 
-Matrix-free simulator for the transverse-field Ising model (TFIM) quantum dynamics.
+Matrix-free quantum dynamics simulator for the Ising model with time-dependent local fields along arbitrary spin axes.
 
 **Links:** [Getting started](#getting-started)
 — [Installation](#Installation)
@@ -24,8 +24,15 @@ Matrix-free simulator for the transverse-field Ising model (TFIM) quantum dynami
 Hamiltonian:
 
 ```
-H(t) = A(s(t)) · H_driver + B(s(t)) · H_problem
-H_driver  = -Σ_i h_x_i X_i              (site-dependent transverse field, bit-flip)
+H(t) = H_driver(t) + b(t) · H_problem
+
+# Schedule(T, A, B, h_x) — X-only, time-dependent amplitude A(s(t))
+H_driver(t) = -A(s(t)) · Σ_i X_i                        # h_x_i = 1
+H_driver(t) = -A(s(t)) · Σ_i h_x_i · X_i                # site-dependent h_x
+
+# Schedule.from_xyz(T, g_x, b, g_y=, g_z=) — arbitrary axes, per-site, time-dependent
+H_driver(t) = Σ_i [g_x_i(t) · X_i + g_y_i(t) · Y_i + g_z_i(t) · Z_i]
+
 H_problem = a k-local polynomial in Z operators only (diagonal in the Z basis)
 ```
 
@@ -45,7 +52,7 @@ N=18, T=10000. Details are in
 
 ```python
 import numpy as np
-from maqina import IsingProblem, Schedule, QuantumAnnealer
+from maqina import IsingProblem, QuantumAnnealer, Schedule
 from maqina.initial_states import uniform_superposition
 
 n = 6
@@ -58,11 +65,11 @@ np.fill_diagonal(J, 0.0)
 # bit 0 = LSB, σ_i(x) = 1 - 2·b_i (see CLAUDE.md "physical conventions").
 x = np.arange(1 << n, dtype=np.int64)
 bits = ((x[:, None] >> np.arange(n)) & 1).astype(np.int64)
-sigma = 1 - 2 * bits                                    # shape (2^n, n)
+sigma = 1 - 2 * bits  # shape (2^n, n)
 H_p_diag = -np.einsum("ij,xi,xj->x", J, sigma, sigma) / 2
 
-prob = IsingProblem(n=n, H_p_diag=H_p_diag, h_x=np.ones(n))
-sched = Schedule.linear(T=20.0)
+prob = IsingProblem(n=n, H_p_diag=H_p_diag)
+sched = Schedule.linear(T=20.0, h_x=np.ones(n))
 psi0 = uniform_superposition(n)
 
 ann = QuantumAnnealer(prob, sched)

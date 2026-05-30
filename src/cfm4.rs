@@ -40,7 +40,7 @@ use pyo3::prelude::*;
 use crate::blas::nrm2;
 use crate::chebyshev::chebyshev_propagate;
 use crate::krylov::lanczos_propagate;
-use crate::matvec::{apply_h, apply_h_drv, apply_h_p_diag};
+use crate::matvec::{apply_h, apply_h_drv, apply_h_general, apply_h_p_diag, compute_gz_eff_diag};
 
 /// `psi_new = exp(-i dt · H(t + dt/2)) · psi` を中点則で計算する.
 ///
@@ -270,60 +270,76 @@ pub(crate) fn cfm4_a_low() -> f64 {
 /// ール係数 `(A_1, B_1) = (a_s1, b_s1)` と `(A_2, B_2) = (a_s2, b_s2)` を
 /// **呼出側で pre-eval** することを前提とする.
 ///
-/// ステージごとに以下の Hamiltonian で `lanczos_propagate` を 1 回ずつ呼ぶ:
+/// Phase C / issue #142 で per-site, per-axis 時間依存場をサポート. 旧 X-only
+/// signature `(h_x, a_s1, b_s1, a_s2, b_s2)` は Python wrap ([`cfm4_step_py`]) 側で
+/// per-axis array form (`g_x_s* = -a_s* · h_x`, `g_y = g_z = None`) に展開する.
+///
+/// ステージごとに per-axis 配列を組んで [`apply_h_general`] を closure として
+/// `lanczos_propagate` に渡す:
 ///
 /// ```text
-/// stage 1 : c_drv  = a_high·A_1 + a_low ·A_2
-///           c_diag = a_high·B_1 + a_low ·B_2
-/// stage 2 : c_drv  = a_low ·A_1 + a_high·A_2
-///           c_diag = a_low ·B_1 + a_high·B_2
+/// stage 1 : g_axis_stage = a_high · g_axis_s1 + a_low  · g_axis_s2   (axis ∈ {x, y, z})
+///           c_b_stage    = a_high · b_s1      + a_low  · b_s2
+/// stage 2 : g_axis_stage = a_low  · g_axis_s1 + a_high · g_axis_s2
+///           c_b_stage    = a_low  · b_s1      + a_high · b_s2
 /// ```
 ///
-/// 各 stage は `apply_h(·, ·, h_x, h_p_diag, c_drv, c_diag, n)` を
-/// closure として `lanczos_propagate` に渡す「線形結合 callback 形式」
-/// (`docs/design/05-2-lanczos.md` §5.2 末尾) で実装される. これにより Lanczos 2 回 / step,
-/// per-step matvec は 2m, LTE ~ O(dt^5).
+/// (`docs/design/05-2-lanczos.md` §5.2 末尾, `docs/design/05-3-propagator.md` §5.3).
+/// これにより Lanczos 2 回 / step, per-step matvec は 2m, LTE ~ O(dt^5).
 ///
 /// # 引数
 /// * `psi` (length `2^n`): 入力状態.
-/// * `h_x` (length `n`): サイト依存横磁場振幅.
 /// * `h_p_diag` (length `2^n`): Z 基底での `H_problem` 対角ベクトル.
-/// * `a_s1`, `b_s1`: ノード `t_1` でのスケジュール係数 `A(s(t + c_1·dt))`,
-///   `B(s(t + c_1·dt))` (Python 側で計算済).
-/// * `a_s2`, `b_s2`: ノード `t_2` でのスケジュール係数 (同上).
+/// * `g_x_s* / g_y_s* / g_z_s* / b_s*` (s* ∈ {s1, s2}): 2 stage 用 per-axis 時間
+///   依存場係数 (ガウス-ルジャンドル 2 点ノードで pre-eval 済). `g_y` / `g_z` が
+///   None あるいは結合後に全 0 のときは Option-based skip 経路で X-only fast
+///   path に縮退.
 /// * `dt`: 時刻刻み幅 (real).
 /// * `m`: Krylov 部分空間次元 (典型値 24).
 /// * `krylov_tol`: Lanczos の β 打切り閾値.
 /// * `n`: サイト数. `dim = 2^n` を呼出側と一意に決める.
+/// * `iter0_cache`: 後述.
 ///
 /// # 戻り値
-/// * `Ok(psi_new)`: 長さ `2^n` の新状態.
+/// * `Ok((psi_new, m_eff_sum, err_lanczos_sum))`: 長さ `2^n` の新状態, 2 stage の
+///   m_eff 合計, 2 stage の Lanczos 誤差上界の triangle inequality 和.
 /// * `Err`: `lanczos_propagate` 内で tridiag 固有分解が収束しなかった場合.
 ///
-/// # iter-0 cache (issue #100)
+/// # iter-0 cache (issue #100, Phase C で 4-tuple 化)
 ///
-/// `iter0_cache` で `(H_drv · ψ, H_p_diag · ψ)` を渡すと, stage 1 の Lanczos
-/// iter 0 で行う合成 matvec
+/// `iter0_cache` で `(cache_drv, cache_diag, a_s1_scalar, a_s2_scalar)` を渡すと,
+/// stage 1 の Lanczos iter 0 で行う合成 matvec を
 ///
 /// ```text
-/// w = c_drv_1 · H_drv · v_0 + c_diag_1 · H_p_diag · v_0
-///   = (c_drv_1 · H_drv · ψ + c_diag_1 · H_p_diag · ψ) / ‖ψ‖
-///   = (c_drv_1 · cache_drv + c_diag_1 · cache_diag) / ‖ψ‖
+/// w = c_drv_1 · cache_drv + c_b_stage · cache_diag   (÷ ‖ψ‖ で v_0 化)
+///   where c_drv_1 = a_high · a_s1_scalar + a_low · a_s2_scalar
 /// ```
 ///
-/// を **再計算なし** に組み立てる. Richardson estimator では full_step / half_1
-/// が同じ入口 ψ を共有するので, 2 つの `cfm4_step` 呼出に同じ cache を渡せ
-/// **2 個の primitive matvec / Richardson step** を削減できる (`cfm4_step_with_
-/// richardson_estimate` 参照). `iter0_cache = None` のときは従来通り
-/// `apply_h` を iter 0 でも呼ぶ.
+/// に差し替える. ここで cache 構築側 ([`apply_h_drv`]) は
+/// `cache_drv = -Σ_i basis_h_x[i] · X_i · ψ` (旧 `H_drv = -Σ h_x X` 規約) を返すので,
+/// X-only path での `g_x_s* = -a_s*_scalar · basis_h_x` 線形性と合わせて
+/// `c_drv_1` (正符号) で合致する.
 ///
-/// cache 経路は `(cache_drv · c_drv + cache_diag · c_diag) / ‖ψ‖` の演算順序
-/// が直接 `apply_h` (diag pass + bit-flip accumulate) と異なるため
+/// **caller 契約**: cache を渡せるのは
+/// 1. `g_y_s* / g_z_s*` がすべて `None` (= X-only path), かつ
+/// 2. `g_x_s1 = -a_s1_scalar · basis_h_x`, `g_x_s2 = -a_s2_scalar · basis_h_x`
+///    (cache 構築に使った同じ basis_h_x で構築されている)
+///
+/// のときのみ. 関数本体では invariant を runtime 検査しない (caller side で
+/// 保証する; 違反すると無声の数値不整合になる). Richardson estimator では
+/// full_step / half_1 が同じ入口 ψ を共有するので, 2 つの `cfm4_step` 呼出に
+/// 同じ `(cache_drv, cache_diag)` + それぞれの `(a_s1_scalar, a_s2_scalar)` を
+/// 渡して **2 個の primitive matvec / Richardson step** を削減する
+/// ([`cfm4_step_with_richardson_estimate`] 参照). `iter0_cache = None` のときは
+/// 従来通り `apply_h_general` を iter 0 でも呼ぶ.
+///
+/// cache 経路は `(cache_drv · c_drv + cache_diag · c_b) / ‖ψ‖` の演算順序が
+/// 直接 `apply_h_general` (diag pass + bit-flip accumulate) と異なるため
 /// **bit-identical ではない** が, IEEE 754 の誤差累積から `rel < 1e-15`
 /// (issue #100 acceptance) を期待する.
 ///
 /// # Panics
-/// `lanczos_propagate` / `apply_h` の precondition と同じ
+/// `lanczos_propagate` / `apply_h_general` の precondition と同じ
 /// (長さ不整合, `m == 0`).
 //
 // 数値カーネル primitive は cv_ising 流に引数フラットで持つ. 構造体化は
@@ -332,17 +348,20 @@ pub(crate) fn cfm4_a_low() -> f64 {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cfm4_step(
     psi: &[Complex64],
-    h_x: &[f64],
     h_p_diag: &[f64],
-    a_s1: f64,
+    g_x_s1: &[f64],
+    g_y_s1: Option<&[f64]>,
+    g_z_s1: Option<&[f64]>,
     b_s1: f64,
-    a_s2: f64,
+    g_x_s2: &[f64],
+    g_y_s2: Option<&[f64]>,
+    g_z_s2: Option<&[f64]>,
     b_s2: f64,
     dt: f64,
     m: usize,
     krylov_tol: f64,
     n: usize,
-    iter0_cache: Option<(&[Complex64], &[Complex64])>,
+    iter0_cache: Option<(&[Complex64], &[Complex64], f64, f64)>,
 ) -> PyResult<(Vec<Complex64>, usize, f64)> {
     // issue #93 (Phase 7): return tuple は (psi_new, m_eff_sum, err_lanczos_sum).
     // err_lanczos_sum は 2 stage の Lanczos a posteriori 誤差上界の triangle
@@ -356,10 +375,12 @@ pub(crate) fn cfm4_step(
 
     let psi_norm = nrm2(psi);
 
-    // stage 1: B_1 = a_high · H_1 + a_low · H_2 を (c_drv_1, c_diag_1) に
-    // 畳み込んで Lanczos 1 回.
-    let c_drv_1 = a_high * a_s1 + a_low * a_s2;
-    let c_diag_1 = a_high * b_s1 + a_low * b_s2;
+    // stage 1: weights (a_high, a_low). per-axis array を 1 度だけ構築して
+    // closure 内で借用する. Gershgorin は Lanczos 経路では不要なので算出しない
+    // (O(2^N) walk 回避).
+    let s1_arrays = build_stage_arrays(
+        g_x_s1, g_y_s1, g_z_s1, b_s1, g_x_s2, g_y_s2, g_z_s2, b_s2, a_high, a_low,
+    );
     let (psi_mid, m_eff_stage1, beta_m_1, c_m_abs_1) = {
         // issue #100: iter0_cache が Some のとき, Lanczos の iter 0 で行う matvec
         // (`w = H · v_0`) を precomputed cache の線形結合に差し替える. closure
@@ -369,30 +390,55 @@ pub(crate) fn cfm4_step(
         // (`lanczos_propagate` の ‖ψ‖=0 fast-path). inv_norm は使われないが
         // div-by-zero を回避するため 0 を入れておく.
         let inv_norm = if psi_norm > 0.0 { 1.0 / psi_norm } else { 0.0 };
+        let s1_ref = &s1_arrays;
         let matvec = |v: &[Complex64], y: &mut [Complex64]| {
             if first_call {
                 first_call = false;
-                if let Some((cache_drv, cache_diag)) = iter0_cache {
-                    // iter 0: v = v_0 = ψ / ‖ψ‖.
-                    //   y = c_drv_1 · H_drv · v_0 + c_diag_1 · H_p_diag · v_0
-                    //     = (c_drv_1 · cache_drv + c_diag_1 · cache_diag) / ‖ψ‖
+                if let Some((cache_drv, cache_diag, a_s1_scalar, a_s2_scalar)) = iter0_cache {
+                    // iter 0: v = v_0 = ψ / ‖ψ‖. caller 契約 (X-only path,
+                    // g_x_s* = -a_s*_scalar · basis_h_x) の下で
+                    //   y = c_drv_1 · H_drv · v_0 + c_b_stage · H_p_diag · v_0
+                    //     = (c_drv_1 · cache_drv + c_b_stage · cache_diag) / ‖ψ‖
+                    // (c_drv_1 = a_high · a_s1_scalar + a_low · a_s2_scalar)
+                    let c_drv_1 = a_high * a_s1_scalar + a_low * a_s2_scalar;
+                    let c_diag_1 = s1_ref.c_b;
                     for k in 0..y.len() {
                         y[k] = (cache_drv[k] * c_drv_1 + cache_diag[k] * c_diag_1) * inv_norm;
                     }
                     return;
                 }
             }
-            apply_h(v, y, h_x, h_p_diag, c_drv_1, c_diag_1, n);
+            apply_h_general(
+                v,
+                y,
+                &s1_ref.g_x,
+                s1_ref.g_y.as_deref(),
+                h_p_diag,
+                s1_ref.c_b,
+                s1_ref.gz_eff_diag.as_deref(),
+                n,
+            );
         };
         lanczos_propagate(matvec, psi, dt, m, krylov_tol)?
     };
 
-    // stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に
-    // 畳み込んで Lanczos もう 1 回.
-    let c_drv_2 = a_low * a_s1 + a_high * a_s2;
-    let c_diag_2 = a_low * b_s1 + a_high * b_s2;
+    // stage 2: weights (a_low, a_high). 入口は psi_mid (= stage 1 出口) で
+    // 共有 cache は適用しない.
+    let s2_arrays = build_stage_arrays(
+        g_x_s1, g_y_s1, g_z_s1, b_s1, g_x_s2, g_y_s2, g_z_s2, b_s2, a_low, a_high,
+    );
+    let s2_ref = &s2_arrays;
     let matvec = |v: &[Complex64], y: &mut [Complex64]| {
-        apply_h(v, y, h_x, h_p_diag, c_drv_2, c_diag_2, n);
+        apply_h_general(
+            v,
+            y,
+            &s2_ref.g_x,
+            s2_ref.g_y.as_deref(),
+            h_p_diag,
+            s2_ref.c_b,
+            s2_ref.gz_eff_diag.as_deref(),
+            n,
+        );
     };
     let (psi_new, m_eff_stage2, beta_m_2, c_m_abs_2) =
         lanczos_propagate(matvec, &psi_mid, dt, m, krylov_tol)?;
@@ -471,15 +517,22 @@ pub(crate) fn cfm4_step_py<'py>(
         return Err(PyValueError::new_err("m must be >= 1"));
     }
 
+    // X-only shim: g_x_s* = -a_s* · h_x, g_y = g_z = None.
+    let g_x_s1: Vec<f64> = h_x_slice.iter().map(|h| -a_s1 * h).collect();
+    let g_x_s2: Vec<f64> = h_x_slice.iter().map(|h| -a_s2 * h).collect();
+
     // issue #93 (Phase 7): cfm4_step は (psi, m_eff_sum, err_lanczos_sum) を返す.
     // issue #100: 単発呼出経路では iter-0 cache は使わない (None).
     let (psi_new, m_eff_sum, err_lanczos_sum) = cfm4_step(
         psi_slice,
-        h_x_slice,
         h_p_diag_slice,
-        a_s1,
+        &g_x_s1,
+        None,
+        None,
         b_s1,
-        a_s2,
+        &g_x_s2,
+        None,
+        None,
         b_s2,
         dt,
         m,
@@ -549,12 +602,18 @@ pub(crate) fn cfm4_step_with_m2_estimate(
     // 新規 Vec を返す所有権モデルなので, 明示 clone は不要 (内部の Lanczos が
     // 各々 ワークバッファ を確保する). 同じ `psi` を 2 度 immutable に
     // 借りる形で「同じ入口 ψ」契約を満たす.
+    // X-only shim: g_x_s* = -a_s* · h_x, g_y = g_z = None で新 cfm4_step に委譲.
+    // M2 embedded estimator は adaptive Richardson driver では使われないので
+    // iter-0 cache (X-only path 最適化) は適用しない (None).
+    let g_x_s1: Vec<f64> = h_x.iter().map(|h| -a_s1 * h).collect();
+    let g_x_s2: Vec<f64> = h_x.iter().map(|h| -a_s2 * h).collect();
     // issue #93 (Phase 7): cfm4_step は (psi, m_eff_sum, err_lanczos_sum) を返すが,
     // この M2 embedded estimator 経路は adaptive Richardson driver (本 issue
     // の主対象) では使われない. 戻り値 signature を保ち m_eff / err_lanczos は
     // discard する (adaptive M2 driver の follow-up で必要になれば露出).
     let (psi_cfm4, _m_eff_sum, _err_lanczos_sum) = cfm4_step(
-        psi, h_x, h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol, n, None,
+        psi, h_p_diag, &g_x_s1, None, None, b_s1, &g_x_s2, None, None, b_s2, dt, m, krylov_tol, n,
+        None,
     )?;
     let psi_m2 = m2_midpoint_step(psi, h_x, h_p_diag, a_mid, b_mid, dt, m, krylov_tol, n)?;
 
@@ -683,118 +742,185 @@ pub(crate) fn cfm4_step_with_m2_estimate_py<'py>(
 /// 戻り値 `err` は `extrapolate` フラグに依らず常に `‖ψ_full - ψ_h2‖` を返す
 /// (推定子の意味を保つため; PI controller は accept 判定にこの値を使う).
 ///
+/// Phase C / issue #142 で per-site, per-axis 時間依存場をサポート. 旧 X-only
+/// signature `(h_x, a_s*_full, b_s*_full, ..., a_s*_h2, b_s*_h2)` は Python wrap
+/// ([`cfm4_step_with_richardson_estimate_py`]) 側で per-axis array form に展開する.
+///
 /// # 引数
 /// * `psi` (length `2^n`): 入出力状態. 入口で読まれ, 出口で `ψ_acc`
 ///   (`extrapolate=true`) または `ψ_h2` (`extrapolate=false`) に in-place 更新される.
-/// * `h_x` (length `n`), `h_p_diag` (length `2^n`): operator 部分.
-/// * `a_s1_full`, `b_s1_full`, `a_s2_full`, `b_s2_full`: full-step CFM4:2 (dt)
-///   の 2 stage 用スケジュール係数. ガウス-ルジャンドル 2 点ノード
-///   `(t + c_1·dt, t + c_2·dt)` で `(A, B)` を評価したもの.
-/// * `a_s1_h1`, `b_s1_h1`, `a_s2_h1`, `b_s2_h1`: 前半 half-step CFM4:2 (dt/2)
-///   の 2 stage 用, ノード `(t + c_1·dt/2, t + c_2·dt/2)`.
-/// * `a_s1_h2`, `b_s1_h2`, `a_s2_h2`, `b_s2_h2`: 後半 half-step CFM4:2 (dt/2)
-///   の 2 stage 用, ノード `(t + dt/2 + c_1·dt/2, t + dt/2 + c_2·dt/2)`.
+/// * `h_p_diag` (length `2^n`): operator 部分 (Z 基底対角ベクトル).
+/// * `g_x_s*_full / g_y_s*_full / g_z_s*_full / b_s*_full` (s* ∈ {s1, s2}):
+///   full-step CFM4:2 (dt) の 2 stage 用 per-axis 時間依存場係数. ガウス-ルジャ
+///   ンドル 2 点ノード `(t + c_1·dt, t + c_2·dt)` で pre-eval 済.
+/// * `g_x_s*_h1 / ... / b_s*_h1`: 前半 half-step CFM4:2 (dt/2) の 2 stage 用,
+///   ノード `(t + c_1·dt/2, t + c_2·dt/2)`.
+/// * `g_x_s*_h2 / ... / b_s*_h2`: 後半 half-step CFM4:2 (dt/2) の 2 stage 用,
+///   ノード `(t + dt/2 + c_1·dt/2, t + dt/2 + c_2·dt/2)`.
 /// * `dt`, `m`, `krylov_tol`, `n`: 既存カーネル primitive と同義.
 /// * `extrapolate`: true で Richardson 外挿後の `ψ_acc` を, false で `ψ_h2` を
 ///   psi に書き戻す.
+/// * `iter0_cache_x_only`: 後述.
 ///
 /// # 戻り値
-/// * `Ok(err)`: `‖ψ_full - ψ_h2‖_2` (real, non-negative).
+/// * `Ok((err, m_eff_total, err_lanczos_total))`: Richardson 残差ノルム,
+///   3 軌道 (full + h1 + h2) の m_eff 合計, 3 軌道分の Lanczos 誤差上界の
+///   triangle inequality 和.
 /// * `Err`: 内部 `cfm4_step` (Lanczos) で tridiag 固有分解が収束しなかった場合
 ///   (full / 前半 half / 後半 half いずれの段でも propagate).
+///
+/// # iter-0 cache (issue #100, Phase C で X-only 専用化)
+///
+/// `iter0_cache_x_only = Some((basis_h_x, a_s1_full, a_s2_full, a_s1_h1, a_s2_h1))`
+/// を渡すと, 入口で `cache_drv = -Σ_i basis_h_x[i] · X_i · ψ` と
+/// `cache_diag = H_p_diag · ψ` を **1 度だけ** 計算し, full_step / half_1 の
+/// 2 cfm4_step 呼出にそれぞれの scalar pair と共に渡して **2 個の primitive
+/// matvec / Richardson step** を削減する. half_2 は入口が psi_mid で異なるため
+/// cache 不可.
+///
+/// **caller 契約** ([`cfm4_step`] のと同じ): cache を渡せるのは
+/// 1. `g_y_s* / g_z_s*` (full / h1 全 stage) がすべて `None`, かつ
+/// 2. `g_x_s1_full = -a_s1_full · basis_h_x`, `g_x_s2_full = -a_s2_full · basis_h_x`,
+///    `g_x_s1_h1 = -a_s1_h1 · basis_h_x`, `g_x_s2_h1 = -a_s2_h1 · basis_h_x`
+///    (cache 構築に使った同じ basis_h_x で構築されている)
+///
+/// のときのみ. half_2 については caller 契約は不要 (cache を渡さないため;
+/// XYZ 一般化されていても可). 関数本体では invariant を runtime 検査しない.
+///
+/// `iter0_cache_x_only = None` のときは 3 軌道とも cache なしで実行
+/// (XYZ 一般化された driver 経路, または Python wrap で X-only path を明示
+/// 無効化したケース).
 ///
 /// # Panics
 /// `cfm4_step` の precondition と同じ (長さ不整合, `m == 0`).
 //
 // 数値カーネル primitive は cv_ising 流に引数フラットで持つ. スケジュール
-// 係数 3 セット × 4 = 12 引数 + 共通 7 引数で計 19 だが, 構造体化は adaptive
+// 係数 3 セット × 8 = 24 引数 + 共通 8 引数で大きいが, 構造体化は adaptive
 // driver (Python 側) の API が固まるまで保留.
 #[allow(clippy::too_many_arguments)]
 pub fn cfm4_step_with_richardson_estimate(
     psi: &mut [Complex64],
-    h_x: &[f64],
     h_p_diag: &[f64],
-    a_s1_full: f64,
+    // full-step (dt) stage coeffs.
+    g_x_s1_full: &[f64],
+    g_y_s1_full: Option<&[f64]>,
+    g_z_s1_full: Option<&[f64]>,
     b_s1_full: f64,
-    a_s2_full: f64,
+    g_x_s2_full: &[f64],
+    g_y_s2_full: Option<&[f64]>,
+    g_z_s2_full: Option<&[f64]>,
     b_s2_full: f64,
-    a_s1_h1: f64,
+    // 前半 half-step (dt/2) stage coeffs.
+    g_x_s1_h1: &[f64],
+    g_y_s1_h1: Option<&[f64]>,
+    g_z_s1_h1: Option<&[f64]>,
     b_s1_h1: f64,
-    a_s2_h1: f64,
+    g_x_s2_h1: &[f64],
+    g_y_s2_h1: Option<&[f64]>,
+    g_z_s2_h1: Option<&[f64]>,
     b_s2_h1: f64,
-    a_s1_h2: f64,
+    // 後半 half-step (dt/2) stage coeffs.
+    g_x_s1_h2: &[f64],
+    g_y_s1_h2: Option<&[f64]>,
+    g_z_s1_h2: Option<&[f64]>,
     b_s1_h2: f64,
-    a_s2_h2: f64,
+    g_x_s2_h2: &[f64],
+    g_y_s2_h2: Option<&[f64]>,
+    g_z_s2_h2: Option<&[f64]>,
     b_s2_h2: f64,
     dt: f64,
     m: usize,
     krylov_tol: f64,
     n: usize,
     extrapolate: bool,
+    iter0_cache_x_only: Option<(&[f64], f64, f64, f64, f64)>,
 ) -> PyResult<(f64, usize, f64)> {
     // issue #93 (Phase 7): Richardson estimator は full + half + half の
     // 3 cfm4_step (= 6 lanczos) の Lanczos 誤差を triangle inequality で合算
     // して err_lanczos_total を返す. これが adaptive driver で
     // err_magnus ≈ err - err_lanczos_total として分離される.
 
-    // issue #100: iter-0 cache. full_step / half_1 は同じ入口 ψ から始まる
-    // ので, それぞれの stage 1 Lanczos iter 0 で計算する `H_drv · ψ` と
-    // `H_p_diag · ψ` は完全に同一. これを 1 度だけ計算し両 cfm4_step 呼出に
-    // 渡す (2 primitive matvec / Richardson step 削減).
+    // issue #100 (Phase C で X-only 専用化): iter-0 cache. full_step / half_1
+    // は同じ入口 ψ から始まるので, それぞれの stage 1 Lanczos iter 0 で
+    // 計算する `H_drv · ψ` と `H_p_diag · ψ` は完全に同一. これを 1 度だけ
+    // 計算し両 cfm4_step 呼出に渡す (2 primitive matvec / Richardson step 削減).
     //
     // half_2 の入口は psi_mid (= half_1 出口) で full_step と異なるので cache
     // は適用しない. stage 2 系列の入口は各 stage 1 出口で stage ごとに異なる
     // ため cache 共有不可.
+    //
+    // 借用 lifetime の都合で cache バッファ自体は outer function scope で
+    // 確保し (Some 経路でも None 経路でも), 中身は cache_constructed フラグで
+    // 区別する. iter0_cache_x_only.map(...) を使うと slice の lifetime が
+    // if-let arm を超えられず borrow checker が通らない.
     let dim = psi.len();
-    let mut cache_h_drv = vec![Complex64::new(0.0, 0.0); dim];
-    let mut cache_h_p_diag = vec![Complex64::new(0.0, 0.0); dim];
-    apply_h_drv(psi, &mut cache_h_drv, h_x, n);
-    apply_h_p_diag(psi, &mut cache_h_p_diag, h_p_diag);
-    let iter0_cache: Option<(&[Complex64], &[Complex64])> =
-        Some((&cache_h_drv[..], &cache_h_p_diag[..]));
+    let mut cache_h_drv: Vec<Complex64> = Vec::new();
+    let mut cache_h_p_diag: Vec<Complex64> = Vec::new();
+    if let Some((basis_h_x, _a1f, _a2f, _a1h1, _a2h1)) = iter0_cache_x_only {
+        cache_h_drv = vec![Complex64::new(0.0, 0.0); dim];
+        cache_h_p_diag = vec![Complex64::new(0.0, 0.0); dim];
+        apply_h_drv(psi, &mut cache_h_drv, basis_h_x, n);
+        apply_h_p_diag(psi, &mut cache_h_p_diag, h_p_diag);
+    }
+    let iter0_full: Option<(&[Complex64], &[Complex64], f64, f64)> = iter0_cache_x_only
+        .map(|(_basis, a1f, a2f, _a1h1, _a2h1)| (&cache_h_drv[..], &cache_h_p_diag[..], a1f, a2f));
+    let iter0_h1: Option<(&[Complex64], &[Complex64], f64, f64)> =
+        iter0_cache_x_only.map(|(_basis, _a1f, _a2f, a1h1, a2h1)| {
+            (&cache_h_drv[..], &cache_h_p_diag[..], a1h1, a2h1)
+        });
 
-    // 1) full-step CFM4:2 (dt) を同じ入口 ψ から走らせる. iter-0 cache 適用.
+    // 1) full-step CFM4:2 (dt) を同じ入口 ψ から走らせる. iter-0 cache 適用
+    //    (Some 経路のとき).
     // C2 (issue #52): cfm4_step は (psi, m_eff_sum, err_lanczos_sum) を返す.
     let (psi_full, m_eff_full, err_lanczos_full) = cfm4_step(
         psi,
-        h_x,
         h_p_diag,
-        a_s1_full,
+        g_x_s1_full,
+        g_y_s1_full,
+        g_z_s1_full,
         b_s1_full,
-        a_s2_full,
+        g_x_s2_full,
+        g_y_s2_full,
+        g_z_s2_full,
         b_s2_full,
         dt,
         m,
         krylov_tol,
         n,
-        iter0_cache,
+        iter0_full,
     )?;
 
     // 2) 前半 half-step CFM4:2 (dt/2) を同じ入口 ψ から走らせる. iter-0 cache 適用.
     let (psi_mid, m_eff_h1, err_lanczos_h1) = cfm4_step(
         psi,
-        h_x,
         h_p_diag,
-        a_s1_h1,
+        g_x_s1_h1,
+        g_y_s1_h1,
+        g_z_s1_h1,
         b_s1_h1,
-        a_s2_h1,
+        g_x_s2_h1,
+        g_y_s2_h1,
+        g_z_s2_h1,
         b_s2_h1,
         0.5 * dt,
         m,
         krylov_tol,
         n,
-        iter0_cache,
+        iter0_h1,
     )?;
 
     // 3) 後半 half-step CFM4:2 (dt/2) を前半の出口状態から走らせる. 入口が
     // 異なるので iter-0 cache は適用しない.
     let (psi_h2, m_eff_h2, err_lanczos_h2) = cfm4_step(
         &psi_mid,
-        h_x,
         h_p_diag,
-        a_s1_h2,
+        g_x_s1_h2,
+        g_y_s1_h2,
+        g_z_s1_h2,
         b_s1_h2,
-        a_s2_h2,
+        g_x_s2_h2,
+        g_y_s2_h2,
+        g_z_s2_h2,
         b_s2_h2,
         0.5 * dt,
         m,
@@ -905,30 +1031,53 @@ pub(crate) fn cfm4_step_with_richardson_estimate_py<'py>(
         return Err(PyValueError::new_err("m must be >= 1"));
     }
 
+    // X-only shim: 各 stage に対し g_x_s* = -a_s* · h_x を構築, g_y = g_z = None.
+    // iter-0 cache は basis_h_x = h_x_slice + (a_s1_full, a_s2_full, a_s1_h1,
+    // a_s2_h1) の 4-tuple で X-only path 専用最適化 (issue #100) を有効化.
+    let mk_gx = |a_s: f64| -> Vec<f64> { h_x_slice.iter().map(|h| -a_s * h).collect() };
+    let g_x_s1_full = mk_gx(a_s1_full);
+    let g_x_s2_full = mk_gx(a_s2_full);
+    let g_x_s1_h1 = mk_gx(a_s1_h1);
+    let g_x_s2_h1 = mk_gx(a_s2_h1);
+    let g_x_s1_h2 = mk_gx(a_s1_h2);
+    let g_x_s2_h2 = mk_gx(a_s2_h2);
+
     let mut psi_owned: Vec<Complex64> = psi_slice.to_vec();
     // issue #93 (Phase 7): cfm4_step_with_richardson_estimate は
     // (err, m_eff_total, err_lanczos_total) を返す.
     let (err, m_eff_total, err_lanczos_total) = cfm4_step_with_richardson_estimate(
         &mut psi_owned,
-        h_x_slice,
         h_p_diag_slice,
-        a_s1_full,
+        &g_x_s1_full,
+        None,
+        None,
         b_s1_full,
-        a_s2_full,
+        &g_x_s2_full,
+        None,
+        None,
         b_s2_full,
-        a_s1_h1,
+        &g_x_s1_h1,
+        None,
+        None,
         b_s1_h1,
-        a_s2_h1,
+        &g_x_s2_h1,
+        None,
+        None,
         b_s2_h1,
-        a_s1_h2,
+        &g_x_s1_h2,
+        None,
+        None,
         b_s1_h2,
-        a_s2_h2,
+        &g_x_s2_h2,
+        None,
+        None,
         b_s2_h2,
         dt,
         m,
         krylov_tol,
         n,
         extrapolate,
+        Some((h_x_slice, a_s1_full, a_s2_full, a_s1_h1, a_s2_h1)),
     )?;
     Ok((
         psi_owned.into_pyarray(py),
@@ -951,8 +1100,199 @@ pub(crate) fn cfm4_step_with_richardson_estimate_py<'py>(
 // 各 stage の凍結 `(c_drv, c_diag)` に対して Gershgorin で per-stage 再計算
 // する.
 
+/// CFM4:2 1 stage の per-axis 配列 + scalar `c_b` を構築する内部ヘルパ
+/// (Phase C / issue #142, C1 part 2-B で split).
+///
+/// Per-node スケジュール係数 (s1 = ガウス-ルジャンドル ノード 1, s2 = ノード 2)
+/// から CFM4 重み `(w_s1, w_s2)` の線形結合で per-stage の `(g_x, g_y,
+/// gz_eff_diag, c_b)` を precompute する.
+///
+/// - stage 1: `(w_s1, w_s2) = (a_high, a_low)`
+/// - stage 2: `(w_s1, w_s2) = (a_low, a_high)`
+///
+/// `g_y` / `g_z` が caller 側で None あるいは結合後に全 0 のとき None に
+/// 縮退させ, [`crate::matvec::apply_h_general`] /
+/// [`crate::chebyshev::chebyshev_propagate`] の Option-based skip 経路に乗せて
+/// 旧 X-only API 相当の演算経路に縮退させる.
+///
+/// Lanczos 系 ([`cfm4_step`]) と Chebyshev 系 ([`cfm4_step_chebyshev`]) で共通の
+/// per-stage 配列構築. Gershgorin 上下界は Chebyshev 系のみで必要なので
+/// [`compute_stage_gershgorin`] に分離している (Lanczos 系は O(2^N) walk を回避).
+struct StageArrays {
+    g_x: Vec<f64>,
+    g_y: Option<Vec<f64>>,
+    gz_eff_diag: Option<Vec<f64>>,
+    c_b: f64,
+}
+
+/// CFM4:2 1 stage の Gershgorin 上下界 (`R_off, [diag_min, diag_max]`). Chebyshev 系
+/// (chebyshev_propagate) のスペクトル中心 / 半径推定で必要.
+struct StageGershgorin {
+    r_off: f64,
+    diag_min: f64,
+    diag_max: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_stage_arrays(
+    g_x_s1: &[f64],
+    g_y_s1: Option<&[f64]>,
+    g_z_s1: Option<&[f64]>,
+    b_s1: f64,
+    g_x_s2: &[f64],
+    g_y_s2: Option<&[f64]>,
+    g_z_s2: Option<&[f64]>,
+    b_s2: f64,
+    w_s1: f64,
+    w_s2: f64,
+) -> StageArrays {
+    let n = g_x_s1.len();
+    // g_x_stage = w_s1 · g_x_s1 + w_s2 · g_x_s2 (always Some).
+    let g_x: Vec<f64> = (0..n)
+        .map(|i| w_s1 * g_x_s1[i] + w_s2 * g_x_s2[i])
+        .collect();
+    // g_y_stage. None なら 0 として扱い, 結合後も全 0 なら None に縮退.
+    let g_y: Option<Vec<f64>> = match (g_y_s1, g_y_s2) {
+        (None, None) => None,
+        (Some(y1), None) => {
+            let y: Vec<f64> = y1.iter().map(|v| w_s1 * v).collect();
+            if y.iter().all(|&v| v == 0.0) {
+                None
+            } else {
+                Some(y)
+            }
+        }
+        (None, Some(y2)) => {
+            let y: Vec<f64> = y2.iter().map(|v| w_s2 * v).collect();
+            if y.iter().all(|&v| v == 0.0) {
+                None
+            } else {
+                Some(y)
+            }
+        }
+        (Some(y1), Some(y2)) => {
+            let y: Vec<f64> = (0..n).map(|i| w_s1 * y1[i] + w_s2 * y2[i]).collect();
+            if y.iter().all(|&v| v == 0.0) {
+                None
+            } else {
+                Some(y)
+            }
+        }
+    };
+    // g_z_stage. 構築 → gz_eff_diag に畳む.
+    let g_z_stage: Option<Vec<f64>> = match (g_z_s1, g_z_s2) {
+        (None, None) => None,
+        (Some(z1), None) => {
+            let z: Vec<f64> = z1.iter().map(|v| w_s1 * v).collect();
+            if z.iter().all(|&v| v == 0.0) {
+                None
+            } else {
+                Some(z)
+            }
+        }
+        (None, Some(z2)) => {
+            let z: Vec<f64> = z2.iter().map(|v| w_s2 * v).collect();
+            if z.iter().all(|&v| v == 0.0) {
+                None
+            } else {
+                Some(z)
+            }
+        }
+        (Some(z1), Some(z2)) => {
+            let z: Vec<f64> = (0..n).map(|i| w_s1 * z1[i] + w_s2 * z2[i]).collect();
+            if z.iter().all(|&v| v == 0.0) {
+                None
+            } else {
+                Some(z)
+            }
+        }
+    };
+    let gz_eff_diag: Option<Vec<f64>> = g_z_stage.as_ref().map(|gz| compute_gz_eff_diag(gz));
+    // c_b_stage scalar.
+    let c_b = w_s1 * b_s1 + w_s2 * b_s2;
+    StageArrays {
+        g_x,
+        g_y,
+        gz_eff_diag,
+        c_b,
+    }
+}
+
+/// Chebyshev 系のためのスペクトル中心 / 半径推定で必要な Gershgorin 上下界を
+/// 算出する.
+///
+/// - `r_off_stage = Σ_i √(g_x[i]² + g_y[i]²)` (off-diagonal 寄与, O(N))
+/// - `[diag_min_stage, diag_max_stage]` = `[min_k, max_k] (c_b · h_p_diag[k] +
+///   gz_eff_diag[k])` (diagonal 寄与の min/max walk, O(2^N))
+///
+/// `gz_eff_diag = None` のときは `gz` 項を加算しない form に縮退し,
+/// `c_b · h_p_diag` の min/max walk のみで完結する.
+///
+/// Lanczos 系 ([`cfm4_step`]) は Gershgorin を必要としないため呼ばない
+/// (旧 X-only path で O(2^N) walk を回避する目的).
+fn compute_stage_gershgorin(
+    arrays: &StageArrays,
+    h_p_diag: &[f64],
+    h_p_min: f64,
+    h_p_max: f64,
+) -> StageGershgorin {
+    // r_off_stage = Σ_i √(g_x[i]² + g_y[i]²).
+    let r_off: f64 = match &arrays.g_y {
+        Some(gy) => arrays
+            .g_x
+            .iter()
+            .zip(gy.iter())
+            .map(|(gx, gy)| (gx * gx + gy * gy).sqrt())
+            .sum(),
+        None => arrays.g_x.iter().map(|gx| gx.abs()).sum(),
+    };
+    let c_b = arrays.c_b;
+    // diag_min/max walk: c_b · h_p_diag[k] + gz_eff_diag[k].
+    let (diag_min, diag_max) = match &arrays.gz_eff_diag {
+        Some(gz) => {
+            // Z 場あり: h_p_diag と gz_eff_diag の合成の min/max は構造的に
+            // O(2^N) walk が必要 (どちらも要素 k に依存). caller の precompute
+            // 値は使えない.
+            let mut dmin = f64::INFINITY;
+            let mut dmax = f64::NEG_INFINITY;
+            for k in 0..h_p_diag.len() {
+                let d = c_b * h_p_diag[k] + gz[k];
+                if d < dmin {
+                    dmin = d;
+                }
+                if d > dmax {
+                    dmax = d;
+                }
+            }
+            (dmin, dmax)
+        }
+        None => {
+            // gz_eff_diag = None (= 時間依存 Z 磁場なし) の経路は IsingProblem
+            // 構築時 precompute 済の `h_p_min, h_p_max` を直接使って O(1) で済ます
+            // (issue #142 PR #146 follow-up). 旧 X-only path で Chebyshev variant
+            // の per-step Gershgorin walk が ~6×O(2^N) 走っていた regression を解消.
+            // c_b の符号で min/max を swap する (b(t) 通常 [0,1] だが robust).
+            let _ = h_p_diag;
+            if c_b >= 0.0 {
+                (c_b * h_p_min, c_b * h_p_max)
+            } else {
+                (c_b * h_p_max, c_b * h_p_min)
+            }
+        }
+    };
+    StageGershgorin {
+        r_off,
+        diag_min,
+        diag_max,
+    }
+}
+
 /// `cfm4_step` の Chebyshev variant. CFM4:2 の 2 stage 短時間プロパゲータを
 /// Lanczos から Chebyshev 3 項漸化に差し替える.
+///
+/// Phase C / issue #142 で per-site, per-axis 時間依存場をサポート. 旧 X-only
+/// signature `(h_x, a_s1, b_s1, a_s2, b_s2, h_x_abs_sum, h_p_min, h_p_max)` は
+/// Python wrap ([`cfm4_step_chebyshev_py`]) 側で per-axis array form に展開する.
 ///
 /// # 引数
 ///
@@ -960,75 +1300,82 @@ pub(crate) fn cfm4_step_with_richardson_estimate_py<'py>(
 /// 切り捨て次数 `K_used` を `chebyshev_tol` から動的に決定する).
 ///
 /// * `psi` (length `2^n`): 入力状態.
-/// * `h_x` (length `n`), `h_p_diag` (length `2^n`): operator 部分.
-/// * `a_s1`, `b_s1`, `a_s2`, `b_s2`: 2 stage 用スケジュール係数 (ガウス-
-///   ルジャンドル 2 点ノードで pre-eval 済).
+/// * `h_p_diag` (length `2^n`): operator 部分 (Z 基底対角ベクトル).
+/// * `g_x_s* / g_y_s* / g_z_s* / b_s*` (s* ∈ {s1, s2}): 2 stage 用 per-axis 時間
+///   依存場係数 (ガウス-ルジャンドル 2 点ノードで pre-eval 済).
 /// * `dt`: 時刻刻み幅.
-/// * `chebyshev_tol`: Chebyshev 切り捨て次数 `K_used` の決定閾値
-///   (`|J_{K+1}(z)| < chebyshev_tol / 2`). semantics は `krylov_tol` 同等
-///   (issue #98 Phase 8: "Krylov 近似の許容誤差"; issue #122 では新パラメータ
-///   `chebyshev_tol` を導入せず `krylov_tol` を流用する方針).
+/// * `chebyshev_tol`: Chebyshev 切り捨て次数 `K_used` の決定閾値.
 /// * `n`: サイト数.
 ///
 /// # 戻り値
 ///
 /// `(psi_new, k_used_sum, err_chebyshev_sum)`:
 /// * `psi_new` (length `2^n`): 2 stage 適用後の状態.
-/// * `k_used_sum`: 2 stage の `K_used` 合計. adaptive Richardson driver が
-///   per-step 統計に集計する.
+/// * `k_used_sum`: 2 stage の `K_used` 合計.
 /// * `err_chebyshev_sum`: 2 stage の Chebyshev 切り捨て残差を triangle inequality
-///   で集約 (`err_estimate_stage1 + err_estimate_stage2`).
+///   で集約.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn cfm4_step_chebyshev(
     psi: &[Complex64],
-    h_x: &[f64],
     h_p_diag: &[f64],
-    a_s1: f64,
+    g_x_s1: &[f64],
+    g_y_s1: Option<&[f64]>,
+    g_z_s1: Option<&[f64]>,
     b_s1: f64,
-    a_s2: f64,
+    g_x_s2: &[f64],
+    g_y_s2: Option<&[f64]>,
+    g_z_s2: Option<&[f64]>,
     b_s2: f64,
     dt: f64,
     chebyshev_tol: f64,
     n: usize,
-    h_x_abs_sum: f64,
     h_p_min: f64,
     h_p_max: f64,
 ) -> PyResult<(Vec<Complex64>, usize, f64)> {
+    // h_p_min / h_p_max は `IsingProblem` 構築時 precompute 済の対角下界 / 上界.
+    // `compute_stage_gershgorin` 内で `gz_eff_diag = None` (= 時間依存 Z 磁場なし)
+    // 経路の O(2^N) walk 回避に使う (issue #142 PR #146 follow-up).
     let a_high = cfm4_a_high();
     let a_low = cfm4_a_low();
 
-    // stage 1: B_1 = a_high · H_1 + a_low · H_2 を (c_drv_1, c_diag_1) に畳み込む.
-    let c_drv_1 = a_high * a_s1 + a_low * a_s2;
-    let c_diag_1 = a_high * b_s1 + a_low * b_s2;
+    // stage 1: weights (a_high, a_low)
+    let s1_arrays = build_stage_arrays(
+        g_x_s1, g_y_s1, g_z_s1, b_s1, g_x_s2, g_y_s2, g_z_s2, b_s2, a_high, a_low,
+    );
+    let s1_gersh = compute_stage_gershgorin(&s1_arrays, h_p_diag, h_p_min, h_p_max);
     let (psi_mid, k_used_stage1, err_stage1) = chebyshev_propagate(
-        h_x,
+        &s1_arrays.g_x,
+        s1_arrays.g_y.as_deref(),
         h_p_diag,
-        c_drv_1,
-        c_diag_1,
+        s1_arrays.c_b,
+        s1_arrays.gz_eff_diag.as_deref(),
         psi,
         dt,
         chebyshev_tol,
         n,
-        h_x_abs_sum,
-        h_p_min,
-        h_p_max,
+        s1_gersh.r_off,
+        s1_gersh.diag_min,
+        s1_gersh.diag_max,
     );
 
-    // stage 2: B_2 = a_low · H_1 + a_high · H_2 を (c_drv_2, c_diag_2) に畳み込む.
-    let c_drv_2 = a_low * a_s1 + a_high * a_s2;
-    let c_diag_2 = a_low * b_s1 + a_high * b_s2;
+    // stage 2: weights (a_low, a_high)
+    let s2_arrays = build_stage_arrays(
+        g_x_s1, g_y_s1, g_z_s1, b_s1, g_x_s2, g_y_s2, g_z_s2, b_s2, a_low, a_high,
+    );
+    let s2_gersh = compute_stage_gershgorin(&s2_arrays, h_p_diag, h_p_min, h_p_max);
     let (psi_new, k_used_stage2, err_stage2) = chebyshev_propagate(
-        h_x,
+        &s2_arrays.g_x,
+        s2_arrays.g_y.as_deref(),
         h_p_diag,
-        c_drv_2,
-        c_diag_2,
+        s2_arrays.c_b,
+        s2_arrays.gz_eff_diag.as_deref(),
         &psi_mid,
         dt,
         chebyshev_tol,
         n,
-        h_x_abs_sum,
-        h_p_min,
-        h_p_max,
+        s2_gersh.r_off,
+        s2_gersh.diag_min,
+        s2_gersh.diag_max,
     );
 
     Ok((
@@ -1039,6 +1386,11 @@ pub(crate) fn cfm4_step_chebyshev(
 }
 
 /// `cfm4_step_chebyshev` の Python wrap (allocate-and-return).
+///
+/// X-only API 互換 shim: 旧引数 `(a_s1, b_s1, a_s2, b_s2, ..., h_x_abs_sum,
+/// h_p_min, h_p_max)` を per-axis array form (`g_x_s* = -a_s* · h_x`,
+/// `g_y = g_z = None`) に内部で展開して新 `cfm4_step_chebyshev` に委譲する.
+/// Phase C / issue #142 の internal Rust API 変更を吸収.
 ///
 /// Python 側 (`_rust.cfm4_step_chebyshev_py`) からは
 ///
@@ -1051,8 +1403,9 @@ pub(crate) fn cfm4_step_chebyshev(
 /// )
 /// ```
 ///
-/// として呼ぶ. 末尾 3 引数は Gershgorin 上下界の precompute 値で,
-/// `IsingProblem` 構築時に 1 度だけ計算して上位 driver から渡す.
+/// として呼ぶ. 末尾 3 引数 (`h_x_abs_sum, h_p_min, h_p_max`) は旧 X-only API の
+/// IsingProblem-time precompute 値. 現在は signature 互換のため受け取るが
+/// 内部処理では使わない (新 `cfm4_step_chebyshev` が per-stage で再計算する).
 #[pyfunction]
 #[pyo3(signature = (
     psi, h_x, h_p_diag,
@@ -1076,6 +1429,12 @@ pub(crate) fn cfm4_step_chebyshev_py<'py>(
     h_p_min: f64,
     h_p_max: f64,
 ) -> PyResult<(Bound<'py, PyArray1<Complex64>>, usize, f64)> {
+    // 旧 X-only API の Gershgorin precompute 値 `h_p_min, h_p_max` は
+    // `cfm4_step_chebyshev` 内部の `compute_stage_gershgorin` (gz_eff_diag = None
+    // 経路) で O(1) Gershgorin 計算に使う (issue #142 PR #146 follow-up).
+    // `h_x_abs_sum` は X-only ホットパスでは使われない (g_x stage の組立てが
+    // ここで完結するため; signature 互換のため受け取るが内部処理では参照しない).
+    let _ = h_x_abs_sum;
     let psi_slice = psi.as_slice()?;
     let h_x_slice = h_x.as_slice()?;
     let h_p_diag_slice = h_p_diag.as_slice()?;
@@ -1098,18 +1457,24 @@ pub(crate) fn cfm4_step_chebyshev_py<'py>(
         )));
     }
 
+    // X-only shim: g_x_s* = -a_s* · h_x, g_y = None, g_z = None.
+    let g_x_s1: Vec<f64> = h_x_slice.iter().map(|h| -a_s1 * h).collect();
+    let g_x_s2: Vec<f64> = h_x_slice.iter().map(|h| -a_s2 * h).collect();
+
     let (psi_new, k_used_sum, err_cheb_sum) = cfm4_step_chebyshev(
         psi_slice,
-        h_x_slice,
         h_p_diag_slice,
-        a_s1,
+        &g_x_s1,
+        None,
+        None,
         b_s1,
-        a_s2,
+        &g_x_s2,
+        None,
+        None,
         b_s2,
         dt,
         chebyshev_tol,
         n,
-        h_x_abs_sum,
         h_p_min,
         h_p_max,
     )?;
@@ -1139,41 +1504,60 @@ pub(crate) fn cfm4_step_chebyshev_py<'py>(
 #[allow(clippy::too_many_arguments)]
 pub fn cfm4_step_chebyshev_with_richardson_estimate(
     psi: &mut [Complex64],
-    h_x: &[f64],
     h_p_diag: &[f64],
-    a_s1_full: f64,
+    // full-step (dt) stage coeffs.
+    g_x_s1_full: &[f64],
+    g_y_s1_full: Option<&[f64]>,
+    g_z_s1_full: Option<&[f64]>,
     b_s1_full: f64,
-    a_s2_full: f64,
+    g_x_s2_full: &[f64],
+    g_y_s2_full: Option<&[f64]>,
+    g_z_s2_full: Option<&[f64]>,
     b_s2_full: f64,
-    a_s1_h1: f64,
+    // 前半 half-step (dt/2) stage coeffs.
+    g_x_s1_h1: &[f64],
+    g_y_s1_h1: Option<&[f64]>,
+    g_z_s1_h1: Option<&[f64]>,
     b_s1_h1: f64,
-    a_s2_h1: f64,
+    g_x_s2_h1: &[f64],
+    g_y_s2_h1: Option<&[f64]>,
+    g_z_s2_h1: Option<&[f64]>,
     b_s2_h1: f64,
-    a_s1_h2: f64,
+    // 後半 half-step (dt/2) stage coeffs.
+    g_x_s1_h2: &[f64],
+    g_y_s1_h2: Option<&[f64]>,
+    g_z_s1_h2: Option<&[f64]>,
     b_s1_h2: f64,
-    a_s2_h2: f64,
+    g_x_s2_h2: &[f64],
+    g_y_s2_h2: Option<&[f64]>,
+    g_z_s2_h2: Option<&[f64]>,
     b_s2_h2: f64,
     dt: f64,
     chebyshev_tol: f64,
     n: usize,
     extrapolate: bool,
-    h_x_abs_sum: f64,
     h_p_min: f64,
     h_p_max: f64,
 ) -> PyResult<(f64, usize, f64)> {
+    // h_p_min / h_p_max は IsingProblem 構築時の precompute 値. per-stage
+    // Gershgorin (`compute_stage_gershgorin`) で gz_eff_diag = None 経路の
+    // O(2^N) walk 回避に使う. issue #142 PR #146 follow-up.
+
     // 1) full-step CFM4:2 (dt) chebyshev variant.
     let (psi_full, k_used_full, err_cheb_full) = cfm4_step_chebyshev(
         psi,
-        h_x,
         h_p_diag,
-        a_s1_full,
+        g_x_s1_full,
+        g_y_s1_full,
+        g_z_s1_full,
         b_s1_full,
-        a_s2_full,
+        g_x_s2_full,
+        g_y_s2_full,
+        g_z_s2_full,
         b_s2_full,
         dt,
         chebyshev_tol,
         n,
-        h_x_abs_sum,
         h_p_min,
         h_p_max,
     )?;
@@ -1181,16 +1565,18 @@ pub fn cfm4_step_chebyshev_with_richardson_estimate(
     // 2) 前半 half-step CFM4:2 (dt/2).
     let (psi_mid, k_used_h1, err_cheb_h1) = cfm4_step_chebyshev(
         psi,
-        h_x,
         h_p_diag,
-        a_s1_h1,
+        g_x_s1_h1,
+        g_y_s1_h1,
+        g_z_s1_h1,
         b_s1_h1,
-        a_s2_h1,
+        g_x_s2_h1,
+        g_y_s2_h1,
+        g_z_s2_h1,
         b_s2_h1,
         0.5 * dt,
         chebyshev_tol,
         n,
-        h_x_abs_sum,
         h_p_min,
         h_p_max,
     )?;
@@ -1198,16 +1584,18 @@ pub fn cfm4_step_chebyshev_with_richardson_estimate(
     // 3) 後半 half-step CFM4:2 (dt/2) — 前半出口から.
     let (psi_h2, k_used_h2, err_cheb_h2) = cfm4_step_chebyshev(
         &psi_mid,
-        h_x,
         h_p_diag,
-        a_s1_h2,
+        g_x_s1_h2,
+        g_y_s1_h2,
+        g_z_s1_h2,
         b_s1_h2,
-        a_s2_h2,
+        g_x_s2_h2,
+        g_y_s2_h2,
+        g_z_s2_h2,
         b_s2_h2,
         0.5 * dt,
         chebyshev_tol,
         n,
-        h_x_abs_sum,
         h_p_min,
         h_p_max,
     )?;
@@ -1319,28 +1707,53 @@ pub(crate) fn cfm4_step_chebyshev_with_richardson_estimate_py<'py>(
         )));
     }
 
+    // X-only shim: 各 stage に対し g_x_s* = -a_s* · h_x を構築, g_y = g_z = None.
+    // h_p_min / h_p_max は `cfm4_step_chebyshev_with_richardson_estimate` 内部の
+    // per-stage Gershgorin で gz_eff_diag = None 経路の O(1) 計算に使う
+    // (issue #142 PR #146 follow-up). h_x_abs_sum は X-only ホットパスでは
+    // 使われない (g_x stage の組立てがここで完結するため; signature 互換のため
+    // 受け取るが内部処理では参照しない).
+    let _ = h_x_abs_sum;
+    let mk_gx = |a_s: f64| -> Vec<f64> { h_x_slice.iter().map(|h| -a_s * h).collect() };
+    let g_x_s1_full = mk_gx(a_s1_full);
+    let g_x_s2_full = mk_gx(a_s2_full);
+    let g_x_s1_h1 = mk_gx(a_s1_h1);
+    let g_x_s2_h1 = mk_gx(a_s2_h1);
+    let g_x_s1_h2 = mk_gx(a_s1_h2);
+    let g_x_s2_h2 = mk_gx(a_s2_h2);
+
     let mut psi_owned: Vec<Complex64> = psi_slice.to_vec();
     let (err, k_used_total, err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate(
         &mut psi_owned,
-        h_x_slice,
         h_p_diag_slice,
-        a_s1_full,
+        &g_x_s1_full,
+        None,
+        None,
         b_s1_full,
-        a_s2_full,
+        &g_x_s2_full,
+        None,
+        None,
         b_s2_full,
-        a_s1_h1,
+        &g_x_s1_h1,
+        None,
+        None,
         b_s1_h1,
-        a_s2_h1,
+        &g_x_s2_h1,
+        None,
+        None,
         b_s2_h1,
-        a_s1_h2,
+        &g_x_s1_h2,
+        None,
+        None,
         b_s1_h2,
-        a_s2_h2,
+        &g_x_s2_h2,
+        None,
+        None,
         b_s2_h2,
         dt,
         chebyshev_tol,
         n,
         extrapolate,
-        h_x_abs_sum,
         h_p_min,
         h_p_max,
     )?;
@@ -1350,6 +1763,640 @@ pub(crate) fn cfm4_step_chebyshev_with_richardson_estimate_py<'py>(
         k_used_total,
         err_cheb_total,
     ))
+}
+
+// ============================================================
+// XYZ-form Python wraps (Phase C / issue #142, C2)
+// ============================================================
+//
+// 新 API (`Schedule.from_xyz`) 経由の driver は per-axis 配列 (g_x / g_y(Option) /
+// g_z(Option) + scalar b) を直接渡す経路で Rust kernel を呼ぶ. ここで定義する
+// `*_xyz_py` wraps は per-axis 配列を `Option<PyReadonlyArray1<f64>>` で受け取り,
+// 内部の per-axis kernel (`apply_h_general` / `cfm4_step` / `cfm4_step_chebyshev*`
+// 等) に直接 dispatch する. X-only 旧 wrap (`cfm4_step_py` 等) は backward-compat
+// のために残置 (Rust 単体テスト 22 箇所が依存).
+//
+// `g_y` / `g_z` の `None` 渡しは axis loop 外で skip され
+// (`crate::matvec::apply_h_general` の Option-based fast path), 既存 X-only path
+// と byte-identical な演算経路に縮退する. 新 API でも `g_y = g_z = None` を渡せば
+// 旧 API 相当のコストになる (legacy shim 経路と同じ).
+//
+// `iter0_cache` (X-only path 専用最適化, issue #100) は XYZ path では None に
+// する (basis_h_x が無いため). 旧 API path は X-only wrap (`cfm4_step_py` /
+// `cfm4_step_with_richardson_estimate_py`) を経由するか, driver 側で X-only
+// 経路を判定して shim を選択する.
+
+/// `m2_midpoint_step` の per-axis 一般化 (Phase C / issue #142, C2).
+///
+/// 中点 `t + dt/2` でフリーズした per-axis 配列 + scalar `c_b` を用いて
+/// `exp(-i dt · H_mid) · psi` を Lanczos で計算する. `apply_h_general` を
+/// closure で渡す形で per-axis 分岐は axis loop 外で吸収される.
+///
+/// `g_y_mid = None` または `g_z_mid = None` のとき, それぞれの軸を skip する
+/// fast path に dispatch (X-only / XY-only 経路を新 API でも温存).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn m2_midpoint_step_xyz(
+    psi: &[Complex64],
+    h_p_diag: &[f64],
+    g_x_mid: &[f64],
+    g_y_mid: Option<&[f64]>,
+    g_z_mid: Option<&[f64]>,
+    b_mid: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+    n: usize,
+) -> PyResult<Vec<Complex64>> {
+    // g_z_mid が Some の場合は中点で凍結した `gz_eff_diag` を 1 度だけ
+    // precompute する (per-stage Walsh doubling, O(2^N)). None の場合は
+    // 既存 diag pass と byte-identical な fast path (`gz_eff_diag = None`)
+    // に縮退.
+    let gz_eff_diag_owned: Option<Vec<f64>> = g_z_mid.map(compute_gz_eff_diag);
+    let matvec = |v: &[Complex64], y: &mut [Complex64]| {
+        apply_h_general(
+            v,
+            y,
+            g_x_mid,
+            g_y_mid,
+            h_p_diag,
+            b_mid,
+            gz_eff_diag_owned.as_deref(),
+            n,
+        );
+    };
+    let (psi_new, _m_eff, _beta_m, _c_m_abs) = lanczos_propagate(matvec, psi, dt, m, krylov_tol)?;
+    Ok(psi_new)
+}
+
+/// 新 API 経由の M2 中点則 1 step in-place 版 Python wrap.
+///
+/// ```python
+/// _rust.m2_midpoint_step_xyz_inplace_py(
+///     psi, h_p_diag,
+///     g_x_mid, g_y_mid_or_none, g_z_mid_or_none, b_mid,
+///     dt, m, krylov_tol,
+/// )
+/// ```
+///
+/// `psi` を `exp(-i dt · H_mid) · psi` で in-place 上書きする (戻り値 None).
+/// shape 検証は `n = len(g_x_mid)` / `dim = 2^n` で行い `psi.len() == dim` /
+/// `h_p_diag.len() == dim` / `g_y_mid` 等の長さ整合性をチェック.
+#[pyfunction]
+#[pyo3(signature = (
+    psi, h_p_diag,
+    g_x_mid, g_y_mid, g_z_mid, b_mid,
+    dt, m, krylov_tol,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn m2_midpoint_step_xyz_inplace_py<'py>(
+    mut psi: PyReadwriteArray1<'py, Complex64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    g_x_mid: PyReadonlyArray1<'py, f64>,
+    g_y_mid: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_mid: Option<PyReadonlyArray1<'py, f64>>,
+    b_mid: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+) -> PyResult<()> {
+    let g_x_slice = g_x_mid.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let psi_slice = psi.as_slice_mut()?;
+    let n = g_x_slice.len();
+    let dim = 1usize << n;
+    if h_p_diag_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "h_p_diag length {} does not match 2^len(g_x_mid) = 2^{} = {}",
+            h_p_diag_slice.len(),
+            n,
+            dim,
+        )));
+    }
+    if psi_slice.len() != dim {
+        return Err(PyValueError::new_err(format!(
+            "psi length {} does not match 2^len(g_x_mid) = {}",
+            psi_slice.len(),
+            dim,
+        )));
+    }
+    if m == 0 {
+        return Err(PyValueError::new_err("m must be >= 1"));
+    }
+    let g_y_slice_opt = match &g_y_mid {
+        Some(arr) => Some(arr.as_slice()?),
+        None => None,
+    };
+    if let Some(g_y) = g_y_slice_opt {
+        if g_y.len() != n {
+            return Err(PyValueError::new_err(format!(
+                "g_y_mid length {} does not match len(g_x_mid) = {}",
+                g_y.len(),
+                n,
+            )));
+        }
+    }
+    let g_z_slice_opt = match &g_z_mid {
+        Some(arr) => Some(arr.as_slice()?),
+        None => None,
+    };
+    if let Some(g_z) = g_z_slice_opt {
+        if g_z.len() != n {
+            return Err(PyValueError::new_err(format!(
+                "g_z_mid length {} does not match len(g_x_mid) = {}",
+                g_z.len(),
+                n,
+            )));
+        }
+    }
+
+    let psi_new = m2_midpoint_step_xyz(
+        psi_slice,
+        h_p_diag_slice,
+        g_x_slice,
+        g_y_slice_opt,
+        g_z_slice_opt,
+        b_mid,
+        dt,
+        m,
+        krylov_tol,
+        n,
+    )?;
+    psi_slice.copy_from_slice(&psi_new);
+    Ok(())
+}
+
+/// 新 API 経由の CFM4:2 1 step Python wrap.
+///
+/// per-axis 配列 (g_x_s1 / g_y_s1(Option) / g_z_s1(Option) / b_s1, stage 2 同様) を
+/// 受け取り `cfm4_step` に直接 dispatch する. iter-0 cache (X-only 専用最適化,
+/// issue #100) は XYZ path では適用しない (None 渡し).
+///
+/// ```python
+/// psi_new, m_eff_sum, err_lanczos_sum = _rust.cfm4_step_xyz_py(
+///     psi, h_p_diag,
+///     g_x_s1, g_y_s1_or_none, g_z_s1_or_none, b_s1,
+///     g_x_s2, g_y_s2_or_none, g_z_s2_or_none, b_s2,
+///     dt, m, krylov_tol,
+/// )
+/// ```
+#[pyfunction]
+#[pyo3(signature = (
+    psi, h_p_diag,
+    g_x_s1, g_y_s1, g_z_s1, b_s1,
+    g_x_s2, g_y_s2, g_z_s2, b_s2,
+    dt, m, krylov_tol,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_xyz_py<'py>(
+    py: Python<'py>,
+    psi: PyReadonlyArray1<'py, Complex64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    g_x_s1: PyReadonlyArray1<'py, f64>,
+    g_y_s1: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1: f64,
+    g_x_s2: PyReadonlyArray1<'py, f64>,
+    g_y_s2: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, usize, f64)> {
+    let psi_slice = psi.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let g_x_s1_slice = g_x_s1.as_slice()?;
+    let g_x_s2_slice = g_x_s2.as_slice()?;
+
+    let n = g_x_s1_slice.len();
+    let dim = 1usize << n;
+    validate_xyz_shapes(psi_slice.len(), h_p_diag_slice.len(), n, dim, m)?;
+    let (g_y_s1_slice, g_y_s2_slice, g_z_s1_slice, g_z_s2_slice) =
+        extract_optional_axes(&g_y_s1, &g_y_s2, &g_z_s1, &g_z_s2, g_x_s2_slice.len(), n)?;
+
+    let (psi_new, m_eff_sum, err_lanczos_sum) = cfm4_step(
+        psi_slice,
+        h_p_diag_slice,
+        g_x_s1_slice,
+        g_y_s1_slice,
+        g_z_s1_slice,
+        b_s1,
+        g_x_s2_slice,
+        g_y_s2_slice,
+        g_z_s2_slice,
+        b_s2,
+        dt,
+        m,
+        krylov_tol,
+        n,
+        None,
+    )?;
+    Ok((psi_new.into_pyarray(py), m_eff_sum, err_lanczos_sum))
+}
+
+/// 新 API 経由の CFM4:2 + step-doubling Richardson Python wrap (Lanczos variant).
+///
+/// 6 stage (full = stage1/2, half_1 = stage1/2, half_2 = stage1/2) 分の per-axis
+/// 配列を受け取り `cfm4_step_with_richardson_estimate` に直接 dispatch.
+///
+/// iter-0 cache (X-only 専用最適化, issue #100) は XYZ path では適用しない
+/// (`iter0_cache_x_only = None`).
+#[pyfunction]
+#[pyo3(signature = (
+    psi, h_p_diag,
+    g_x_s1_full, g_y_s1_full, g_z_s1_full, b_s1_full,
+    g_x_s2_full, g_y_s2_full, g_z_s2_full, b_s2_full,
+    g_x_s1_h1, g_y_s1_h1, g_z_s1_h1, b_s1_h1,
+    g_x_s2_h1, g_y_s2_h1, g_z_s2_h1, b_s2_h1,
+    g_x_s1_h2, g_y_s1_h2, g_z_s1_h2, b_s1_h2,
+    g_x_s2_h2, g_y_s2_h2, g_z_s2_h2, b_s2_h2,
+    dt, m, krylov_tol, extrapolate,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_with_richardson_estimate_xyz_py<'py>(
+    py: Python<'py>,
+    psi: PyReadonlyArray1<'py, Complex64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    g_x_s1_full: PyReadonlyArray1<'py, f64>,
+    g_y_s1_full: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1_full: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1_full: f64,
+    g_x_s2_full: PyReadonlyArray1<'py, f64>,
+    g_y_s2_full: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2_full: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2_full: f64,
+    g_x_s1_h1: PyReadonlyArray1<'py, f64>,
+    g_y_s1_h1: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1_h1: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1_h1: f64,
+    g_x_s2_h1: PyReadonlyArray1<'py, f64>,
+    g_y_s2_h1: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2_h1: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2_h1: f64,
+    g_x_s1_h2: PyReadonlyArray1<'py, f64>,
+    g_y_s1_h2: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1_h2: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1_h2: f64,
+    g_x_s2_h2: PyReadonlyArray1<'py, f64>,
+    g_y_s2_h2: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2_h2: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2_h2: f64,
+    dt: f64,
+    m: usize,
+    krylov_tol: f64,
+    extrapolate: bool,
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, f64, usize, f64)> {
+    let psi_slice = psi.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let g_x_s1_full_slice = g_x_s1_full.as_slice()?;
+    let g_x_s2_full_slice = g_x_s2_full.as_slice()?;
+    let g_x_s1_h1_slice = g_x_s1_h1.as_slice()?;
+    let g_x_s2_h1_slice = g_x_s2_h1.as_slice()?;
+    let g_x_s1_h2_slice = g_x_s1_h2.as_slice()?;
+    let g_x_s2_h2_slice = g_x_s2_h2.as_slice()?;
+    let n = g_x_s1_full_slice.len();
+    let dim = 1usize << n;
+    validate_xyz_shapes(psi_slice.len(), h_p_diag_slice.len(), n, dim, m)?;
+    // 6 stages x 2 axes (g_y/g_z) = 12 optional arrays. Extract & validate.
+    let g_y_s1_full_opt = extract_axis_opt(&g_y_s1_full, n, "g_y_s1_full")?;
+    let g_z_s1_full_opt = extract_axis_opt(&g_z_s1_full, n, "g_z_s1_full")?;
+    let g_y_s2_full_opt = extract_axis_opt(&g_y_s2_full, n, "g_y_s2_full")?;
+    let g_z_s2_full_opt = extract_axis_opt(&g_z_s2_full, n, "g_z_s2_full")?;
+    let g_y_s1_h1_opt = extract_axis_opt(&g_y_s1_h1, n, "g_y_s1_h1")?;
+    let g_z_s1_h1_opt = extract_axis_opt(&g_z_s1_h1, n, "g_z_s1_h1")?;
+    let g_y_s2_h1_opt = extract_axis_opt(&g_y_s2_h1, n, "g_y_s2_h1")?;
+    let g_z_s2_h1_opt = extract_axis_opt(&g_z_s2_h1, n, "g_z_s2_h1")?;
+    let g_y_s1_h2_opt = extract_axis_opt(&g_y_s1_h2, n, "g_y_s1_h2")?;
+    let g_z_s1_h2_opt = extract_axis_opt(&g_z_s1_h2, n, "g_z_s1_h2")?;
+    let g_y_s2_h2_opt = extract_axis_opt(&g_y_s2_h2, n, "g_y_s2_h2")?;
+    let g_z_s2_h2_opt = extract_axis_opt(&g_z_s2_h2, n, "g_z_s2_h2")?;
+    // 同様に X 軸 length 整合性も check.
+    if g_x_s2_full_slice.len() != n
+        || g_x_s1_h1_slice.len() != n
+        || g_x_s2_h1_slice.len() != n
+        || g_x_s1_h2_slice.len() != n
+        || g_x_s2_h2_slice.len() != n
+    {
+        return Err(PyValueError::new_err(
+            "all g_x_* arrays must have the same length",
+        ));
+    }
+    let _ = dim;
+
+    let mut psi_owned: Vec<Complex64> = psi_slice.to_vec();
+    let (err, m_eff_total, err_lanczos_total) = cfm4_step_with_richardson_estimate(
+        &mut psi_owned,
+        h_p_diag_slice,
+        g_x_s1_full_slice,
+        g_y_s1_full_opt,
+        g_z_s1_full_opt,
+        b_s1_full,
+        g_x_s2_full_slice,
+        g_y_s2_full_opt,
+        g_z_s2_full_opt,
+        b_s2_full,
+        g_x_s1_h1_slice,
+        g_y_s1_h1_opt,
+        g_z_s1_h1_opt,
+        b_s1_h1,
+        g_x_s2_h1_slice,
+        g_y_s2_h1_opt,
+        g_z_s2_h1_opt,
+        b_s2_h1,
+        g_x_s1_h2_slice,
+        g_y_s1_h2_opt,
+        g_z_s1_h2_opt,
+        b_s1_h2,
+        g_x_s2_h2_slice,
+        g_y_s2_h2_opt,
+        g_z_s2_h2_opt,
+        b_s2_h2,
+        dt,
+        m,
+        krylov_tol,
+        n,
+        extrapolate,
+        None,
+    )?;
+    Ok((
+        psi_owned.into_pyarray(py),
+        err,
+        m_eff_total,
+        err_lanczos_total,
+    ))
+}
+
+/// 新 API 経由の CFM4:2 1 step (Chebyshev variant) Python wrap.
+///
+/// `h_p_min` / `h_p_max` は `IsingProblem` 構築時 precompute 済の対角下界 / 上界.
+/// `cfm4_step_chebyshev` 内部の `compute_stage_gershgorin` で gz_eff_diag = None
+/// (= 時間依存 Z 磁場なし) 経路の O(1) Gershgorin 計算に使う
+/// (issue #142 PR #146 follow-up; gz=None 経路で per-stage O(2^N) walk が
+/// 走っていた regression を解消).
+#[pyfunction]
+#[pyo3(signature = (
+    psi, h_p_diag,
+    g_x_s1, g_y_s1, g_z_s1, b_s1,
+    g_x_s2, g_y_s2, g_z_s2, b_s2,
+    dt, chebyshev_tol,
+    h_p_min, h_p_max,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_chebyshev_xyz_py<'py>(
+    py: Python<'py>,
+    psi: PyReadonlyArray1<'py, Complex64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    g_x_s1: PyReadonlyArray1<'py, f64>,
+    g_y_s1: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1: f64,
+    g_x_s2: PyReadonlyArray1<'py, f64>,
+    g_y_s2: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2: f64,
+    dt: f64,
+    chebyshev_tol: f64,
+    h_p_min: f64,
+    h_p_max: f64,
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, usize, f64)> {
+    let psi_slice = psi.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let g_x_s1_slice = g_x_s1.as_slice()?;
+    let g_x_s2_slice = g_x_s2.as_slice()?;
+    let n = g_x_s1_slice.len();
+    let dim = 1usize << n;
+    validate_xyz_shapes(psi_slice.len(), h_p_diag_slice.len(), n, dim, 1)?;
+    let (g_y_s1_slice, g_y_s2_slice, g_z_s1_slice, g_z_s2_slice) =
+        extract_optional_axes(&g_y_s1, &g_y_s2, &g_z_s1, &g_z_s2, g_x_s2_slice.len(), n)?;
+    let (psi_new, k_used_sum, err_cheb_sum) = cfm4_step_chebyshev(
+        psi_slice,
+        h_p_diag_slice,
+        g_x_s1_slice,
+        g_y_s1_slice,
+        g_z_s1_slice,
+        b_s1,
+        g_x_s2_slice,
+        g_y_s2_slice,
+        g_z_s2_slice,
+        b_s2,
+        dt,
+        chebyshev_tol,
+        n,
+        h_p_min,
+        h_p_max,
+    )?;
+    Ok((psi_new.into_pyarray(py), k_used_sum, err_cheb_sum))
+}
+
+/// 新 API 経由の CFM4:2 + Richardson Chebyshev variant Python wrap.
+///
+/// `h_p_min` / `h_p_max` は `IsingProblem` 構築時 precompute 済の対角下界 / 上界.
+/// `cfm4_step_chebyshev_with_richardson_estimate` 内部の per-stage Gershgorin
+/// (`compute_stage_gershgorin`) で gz_eff_diag = None 経路の O(1) 計算に使う
+/// (issue #142 PR #146 follow-up).
+#[pyfunction]
+#[pyo3(signature = (
+    psi, h_p_diag,
+    g_x_s1_full, g_y_s1_full, g_z_s1_full, b_s1_full,
+    g_x_s2_full, g_y_s2_full, g_z_s2_full, b_s2_full,
+    g_x_s1_h1, g_y_s1_h1, g_z_s1_h1, b_s1_h1,
+    g_x_s2_h1, g_y_s2_h1, g_z_s2_h1, b_s2_h1,
+    g_x_s1_h2, g_y_s1_h2, g_z_s1_h2, b_s1_h2,
+    g_x_s2_h2, g_y_s2_h2, g_z_s2_h2, b_s2_h2,
+    dt, chebyshev_tol, extrapolate,
+    h_p_min, h_p_max,
+))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cfm4_step_chebyshev_with_richardson_estimate_xyz_py<'py>(
+    py: Python<'py>,
+    psi: PyReadonlyArray1<'py, Complex64>,
+    h_p_diag: PyReadonlyArray1<'py, f64>,
+    g_x_s1_full: PyReadonlyArray1<'py, f64>,
+    g_y_s1_full: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1_full: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1_full: f64,
+    g_x_s2_full: PyReadonlyArray1<'py, f64>,
+    g_y_s2_full: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2_full: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2_full: f64,
+    g_x_s1_h1: PyReadonlyArray1<'py, f64>,
+    g_y_s1_h1: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1_h1: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1_h1: f64,
+    g_x_s2_h1: PyReadonlyArray1<'py, f64>,
+    g_y_s2_h1: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2_h1: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2_h1: f64,
+    g_x_s1_h2: PyReadonlyArray1<'py, f64>,
+    g_y_s1_h2: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1_h2: Option<PyReadonlyArray1<'py, f64>>,
+    b_s1_h2: f64,
+    g_x_s2_h2: PyReadonlyArray1<'py, f64>,
+    g_y_s2_h2: Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2_h2: Option<PyReadonlyArray1<'py, f64>>,
+    b_s2_h2: f64,
+    dt: f64,
+    chebyshev_tol: f64,
+    extrapolate: bool,
+    h_p_min: f64,
+    h_p_max: f64,
+) -> PyResult<(Bound<'py, PyArray1<Complex64>>, f64, usize, f64)> {
+    let psi_slice = psi.as_slice()?;
+    let h_p_diag_slice = h_p_diag.as_slice()?;
+    let g_x_s1_full_slice = g_x_s1_full.as_slice()?;
+    let g_x_s2_full_slice = g_x_s2_full.as_slice()?;
+    let g_x_s1_h1_slice = g_x_s1_h1.as_slice()?;
+    let g_x_s2_h1_slice = g_x_s2_h1.as_slice()?;
+    let g_x_s1_h2_slice = g_x_s1_h2.as_slice()?;
+    let g_x_s2_h2_slice = g_x_s2_h2.as_slice()?;
+    let n = g_x_s1_full_slice.len();
+    let dim = 1usize << n;
+    validate_xyz_shapes(psi_slice.len(), h_p_diag_slice.len(), n, dim, 1)?;
+    let g_y_s1_full_opt = extract_axis_opt(&g_y_s1_full, n, "g_y_s1_full")?;
+    let g_z_s1_full_opt = extract_axis_opt(&g_z_s1_full, n, "g_z_s1_full")?;
+    let g_y_s2_full_opt = extract_axis_opt(&g_y_s2_full, n, "g_y_s2_full")?;
+    let g_z_s2_full_opt = extract_axis_opt(&g_z_s2_full, n, "g_z_s2_full")?;
+    let g_y_s1_h1_opt = extract_axis_opt(&g_y_s1_h1, n, "g_y_s1_h1")?;
+    let g_z_s1_h1_opt = extract_axis_opt(&g_z_s1_h1, n, "g_z_s1_h1")?;
+    let g_y_s2_h1_opt = extract_axis_opt(&g_y_s2_h1, n, "g_y_s2_h1")?;
+    let g_z_s2_h1_opt = extract_axis_opt(&g_z_s2_h1, n, "g_z_s2_h1")?;
+    let g_y_s1_h2_opt = extract_axis_opt(&g_y_s1_h2, n, "g_y_s1_h2")?;
+    let g_z_s1_h2_opt = extract_axis_opt(&g_z_s1_h2, n, "g_z_s1_h2")?;
+    let g_y_s2_h2_opt = extract_axis_opt(&g_y_s2_h2, n, "g_y_s2_h2")?;
+    let g_z_s2_h2_opt = extract_axis_opt(&g_z_s2_h2, n, "g_z_s2_h2")?;
+    if g_x_s2_full_slice.len() != n
+        || g_x_s1_h1_slice.len() != n
+        || g_x_s2_h1_slice.len() != n
+        || g_x_s1_h2_slice.len() != n
+        || g_x_s2_h2_slice.len() != n
+    {
+        return Err(PyValueError::new_err(
+            "all g_x_* arrays must have the same length",
+        ));
+    }
+    let _ = dim;
+
+    let mut psi_owned: Vec<Complex64> = psi_slice.to_vec();
+    let (err, k_used_total, err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate(
+        &mut psi_owned,
+        h_p_diag_slice,
+        g_x_s1_full_slice,
+        g_y_s1_full_opt,
+        g_z_s1_full_opt,
+        b_s1_full,
+        g_x_s2_full_slice,
+        g_y_s2_full_opt,
+        g_z_s2_full_opt,
+        b_s2_full,
+        g_x_s1_h1_slice,
+        g_y_s1_h1_opt,
+        g_z_s1_h1_opt,
+        b_s1_h1,
+        g_x_s2_h1_slice,
+        g_y_s2_h1_opt,
+        g_z_s2_h1_opt,
+        b_s2_h1,
+        g_x_s1_h2_slice,
+        g_y_s1_h2_opt,
+        g_z_s1_h2_opt,
+        b_s1_h2,
+        g_x_s2_h2_slice,
+        g_y_s2_h2_opt,
+        g_z_s2_h2_opt,
+        b_s2_h2,
+        dt,
+        chebyshev_tol,
+        n,
+        extrapolate,
+        h_p_min,
+        h_p_max,
+    )?;
+    Ok((
+        psi_owned.into_pyarray(py),
+        err,
+        k_used_total,
+        err_cheb_total,
+    ))
+}
+
+// ----- XYZ wrap 共通の小ヘルパ -----
+
+/// `*_xyz_py` wraps 共通の shape 検証. `n = len(g_x_s1)`, `dim = 2^n`.
+fn validate_xyz_shapes(
+    psi_len: usize,
+    h_p_diag_len: usize,
+    n: usize,
+    dim: usize,
+    m: usize,
+) -> PyResult<()> {
+    if h_p_diag_len != dim {
+        return Err(PyValueError::new_err(format!(
+            "h_p_diag length {} does not match 2^n = 2^{} = {}",
+            h_p_diag_len, n, dim,
+        )));
+    }
+    if psi_len != dim {
+        return Err(PyValueError::new_err(format!(
+            "psi length {} does not match 2^n = {}",
+            psi_len, dim,
+        )));
+    }
+    if m == 0 {
+        return Err(PyValueError::new_err("m must be >= 1"));
+    }
+    Ok(())
+}
+
+/// 単一 stage の per-axis Optional 引数 (g_y_s1, g_y_s2, g_z_s1, g_z_s2) を slice
+/// に変換し長さ整合性を検証する.
+#[allow(clippy::type_complexity)]
+fn extract_optional_axes<'a, 'py>(
+    g_y_s1: &'a Option<PyReadonlyArray1<'py, f64>>,
+    g_y_s2: &'a Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s1: &'a Option<PyReadonlyArray1<'py, f64>>,
+    g_z_s2: &'a Option<PyReadonlyArray1<'py, f64>>,
+    g_x_s2_len: usize,
+    n: usize,
+) -> PyResult<(
+    Option<&'a [f64]>,
+    Option<&'a [f64]>,
+    Option<&'a [f64]>,
+    Option<&'a [f64]>,
+)> {
+    if g_x_s2_len != n {
+        return Err(PyValueError::new_err(format!(
+            "g_x_s2 length {} does not match g_x_s1 length {}",
+            g_x_s2_len, n,
+        )));
+    }
+    let g_y_s1_slice = extract_axis_opt(g_y_s1, n, "g_y_s1")?;
+    let g_y_s2_slice = extract_axis_opt(g_y_s2, n, "g_y_s2")?;
+    let g_z_s1_slice = extract_axis_opt(g_z_s1, n, "g_z_s1")?;
+    let g_z_s2_slice = extract_axis_opt(g_z_s2, n, "g_z_s2")?;
+    Ok((g_y_s1_slice, g_y_s2_slice, g_z_s1_slice, g_z_s2_slice))
+}
+
+/// 単一 axis の Optional 引数を slice に変換し長さ検証する.
+fn extract_axis_opt<'a, 'py>(
+    arr: &'a Option<PyReadonlyArray1<'py, f64>>,
+    expected_n: usize,
+    name: &str,
+) -> PyResult<Option<&'a [f64]>> {
+    match arr {
+        None => Ok(None),
+        Some(a) => {
+            let slice = a.as_slice()?;
+            if slice.len() != expected_n {
+                return Err(PyValueError::new_err(format!(
+                    "{} length {} does not match n = {}",
+                    name,
+                    slice.len(),
+                    expected_n,
+                )));
+            }
+            Ok(Some(slice))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1466,6 +2513,375 @@ mod tests {
         psi_new
     }
 
+    /// テスト用ヘルパ: 旧 X-only API 経由で新 `cfm4_step` (Lanczos 版) を呼ぶ thin shim.
+    /// (Phase C / issue #142 C1 part 2-B で internal API が per-axis array form に
+    /// 変わったため, 既存テストが古い `(h_x, a_s1, b_s1, a_s2, b_s2)` signature を
+    /// 保てるようにする). `iter0_cache` も X-only 4-tuple form に合わせて Option を
+    /// そのまま渡す経路にする (テストは現在 cache を呼ぶケースなし → caller は None
+    /// を渡せば iter-0 cache 非適用).
+    #[allow(clippy::too_many_arguments)]
+    fn cfm4_step_x_only(
+        psi: &[Complex64],
+        h_x: &[f64],
+        h_p_diag: &[f64],
+        a_s1: f64,
+        b_s1: f64,
+        a_s2: f64,
+        b_s2: f64,
+        dt: f64,
+        m: usize,
+        krylov_tol: f64,
+        n: usize,
+        iter0_cache: Option<(&[Complex64], &[Complex64], f64, f64)>,
+    ) -> PyResult<(Vec<Complex64>, usize, f64)> {
+        let g_x_s1: Vec<f64> = h_x.iter().map(|h| -a_s1 * h).collect();
+        let g_x_s2: Vec<f64> = h_x.iter().map(|h| -a_s2 * h).collect();
+        cfm4_step(
+            psi,
+            h_p_diag,
+            &g_x_s1,
+            None,
+            None,
+            b_s1,
+            &g_x_s2,
+            None,
+            None,
+            b_s2,
+            dt,
+            m,
+            krylov_tol,
+            n,
+            iter0_cache,
+        )
+    }
+
+    /// テスト用ヘルパ: 旧 X-only API 経由で新 `cfm4_step_with_richardson_estimate`
+    /// を呼ぶ thin shim. iter-0 cache は basis_h_x = h_x で X-only path 最適化を
+    /// 自動 enable する (`iter0_cache_x_only = Some(...)`).
+    #[allow(clippy::too_many_arguments)]
+    fn cfm4_step_with_richardson_estimate_x_only(
+        psi: &mut [Complex64],
+        h_x: &[f64],
+        h_p_diag: &[f64],
+        a_s1_full: f64,
+        b_s1_full: f64,
+        a_s2_full: f64,
+        b_s2_full: f64,
+        a_s1_h1: f64,
+        b_s1_h1: f64,
+        a_s2_h1: f64,
+        b_s2_h1: f64,
+        a_s1_h2: f64,
+        b_s1_h2: f64,
+        a_s2_h2: f64,
+        b_s2_h2: f64,
+        dt: f64,
+        m: usize,
+        krylov_tol: f64,
+        n: usize,
+        extrapolate: bool,
+    ) -> PyResult<(f64, usize, f64)> {
+        let mk_gx = |a_s: f64| -> Vec<f64> { h_x.iter().map(|h| -a_s * h).collect() };
+        let g_x_s1_full = mk_gx(a_s1_full);
+        let g_x_s2_full = mk_gx(a_s2_full);
+        let g_x_s1_h1 = mk_gx(a_s1_h1);
+        let g_x_s2_h1 = mk_gx(a_s2_h1);
+        let g_x_s1_h2 = mk_gx(a_s1_h2);
+        let g_x_s2_h2 = mk_gx(a_s2_h2);
+        cfm4_step_with_richardson_estimate(
+            psi,
+            h_p_diag,
+            &g_x_s1_full,
+            None,
+            None,
+            b_s1_full,
+            &g_x_s2_full,
+            None,
+            None,
+            b_s2_full,
+            &g_x_s1_h1,
+            None,
+            None,
+            b_s1_h1,
+            &g_x_s2_h1,
+            None,
+            None,
+            b_s2_h1,
+            &g_x_s1_h2,
+            None,
+            None,
+            b_s1_h2,
+            &g_x_s2_h2,
+            None,
+            None,
+            b_s2_h2,
+            dt,
+            m,
+            krylov_tol,
+            n,
+            extrapolate,
+            Some((h_x, a_s1_full, a_s2_full, a_s1_h1, a_s2_h1)),
+        )
+    }
+
+    /// テスト用ヘルパ: 旧 X-only API 経由で新 `cfm4_step_chebyshev` を呼ぶ thin shim.
+    /// (Phase C / issue #142 で internal API が per-axis array form に変わったため,
+    /// 既存テストが古い `(h_x, a_s1, b_s1, a_s2, b_s2, ..., h_x_abs_sum, h_p_min, h_p_max)`
+    /// signature を保てるようにする).
+    #[allow(clippy::too_many_arguments)]
+    fn cfm4_step_chebyshev_x_only(
+        psi: &[Complex64],
+        h_x: &[f64],
+        h_p_diag: &[f64],
+        a_s1: f64,
+        b_s1: f64,
+        a_s2: f64,
+        b_s2: f64,
+        dt: f64,
+        chebyshev_tol: f64,
+        n: usize,
+    ) -> PyResult<(Vec<Complex64>, usize, f64)> {
+        let g_x_s1: Vec<f64> = h_x.iter().map(|h| -a_s1 * h).collect();
+        let g_x_s2: Vec<f64> = h_x.iter().map(|h| -a_s2 * h).collect();
+        let (h_p_min, h_p_max) = h_p_diag_bounds(h_p_diag);
+        cfm4_step_chebyshev(
+            psi,
+            h_p_diag,
+            &g_x_s1,
+            None,
+            None,
+            b_s1,
+            &g_x_s2,
+            None,
+            None,
+            b_s2,
+            dt,
+            chebyshev_tol,
+            n,
+            h_p_min,
+            h_p_max,
+        )
+    }
+
+    /// テスト用ヘルパ: 旧 X-only API 経由で新 `cfm4_step_chebyshev_with_richardson_estimate`
+    /// を呼ぶ thin shim.
+    #[allow(clippy::too_many_arguments)]
+    fn cfm4_step_chebyshev_with_richardson_estimate_x_only(
+        psi: &mut [Complex64],
+        h_x: &[f64],
+        h_p_diag: &[f64],
+        a_s1_full: f64,
+        b_s1_full: f64,
+        a_s2_full: f64,
+        b_s2_full: f64,
+        a_s1_h1: f64,
+        b_s1_h1: f64,
+        a_s2_h1: f64,
+        b_s2_h1: f64,
+        a_s1_h2: f64,
+        b_s1_h2: f64,
+        a_s2_h2: f64,
+        b_s2_h2: f64,
+        dt: f64,
+        chebyshev_tol: f64,
+        n: usize,
+        extrapolate: bool,
+    ) -> PyResult<(f64, usize, f64)> {
+        let mk_gx = |a_s: f64| -> Vec<f64> { h_x.iter().map(|h| -a_s * h).collect() };
+        let g_x_s1_full = mk_gx(a_s1_full);
+        let g_x_s2_full = mk_gx(a_s2_full);
+        let g_x_s1_h1 = mk_gx(a_s1_h1);
+        let g_x_s2_h1 = mk_gx(a_s2_h1);
+        let g_x_s1_h2 = mk_gx(a_s1_h2);
+        let g_x_s2_h2 = mk_gx(a_s2_h2);
+        let (h_p_min, h_p_max) = h_p_diag_bounds(h_p_diag);
+        cfm4_step_chebyshev_with_richardson_estimate(
+            psi,
+            h_p_diag,
+            &g_x_s1_full,
+            None,
+            None,
+            b_s1_full,
+            &g_x_s2_full,
+            None,
+            None,
+            b_s2_full,
+            &g_x_s1_h1,
+            None,
+            None,
+            b_s1_h1,
+            &g_x_s2_h1,
+            None,
+            None,
+            b_s2_h1,
+            &g_x_s1_h2,
+            None,
+            None,
+            b_s1_h2,
+            &g_x_s2_h2,
+            None,
+            None,
+            b_s2_h2,
+            dt,
+            chebyshev_tol,
+            n,
+            extrapolate,
+            h_p_min,
+            h_p_max,
+        )
+    }
+
+    /// テストヘルパ: `h_p_diag` の `(min, max)` を返す.
+    /// X-only テスト経路で IsingProblem の precompute 相当を組み立てる用途.
+    fn h_p_diag_bounds(h_p_diag: &[f64]) -> (f64, f64) {
+        let mut h_min = f64::INFINITY;
+        let mut h_max = f64::NEG_INFINITY;
+        for &v in h_p_diag {
+            if v < h_min {
+                h_min = v;
+            }
+            if v > h_max {
+                h_max = v;
+            }
+        }
+        (h_min, h_max)
+    }
+
+    /// `compute_stage_gershgorin` の `gz_eff_diag = None` 経路で precompute
+    /// された `(h_p_min, h_p_max)` を渡した結果が, full walk で算出した
+    /// `(min, max)` と bit-identical に一致することを確認する.
+    /// issue #142 PR #146 follow-up: per-stage Gershgorin O(2^N) walk 回避の
+    /// 数値同等性契約.
+    #[test]
+    fn compute_stage_gershgorin_no_z_matches_full_walk() {
+        let n = 6_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(20260528);
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let (h_p_min, h_p_max) = h_p_diag_bounds(&h_p_diag);
+        // 2 stage 用 g_x / g_y / b_s* を構築 (gz_eff_diag = None になる組合せ).
+        let g_x_s1: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let g_x_s2: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let g_y_s1: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let g_y_s2: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let b_s1 = rng.signed();
+        let b_s2 = rng.signed();
+        // c_b ≥ 0 と c_b < 0 の両 case で min/max の swap を確認するため
+        // a_high, a_low の符号を 4 通りで試行.
+        for (w_s1, w_s2) in [(0.5, 0.5), (-0.5, -0.5), (1.0, -0.5), (-0.5, 1.0)] {
+            let arrays = build_stage_arrays(
+                &g_x_s1,
+                Some(&g_y_s1),
+                None,
+                b_s1,
+                &g_x_s2,
+                Some(&g_y_s2),
+                None,
+                b_s2,
+                w_s1,
+                w_s2,
+            );
+            assert!(
+                arrays.gz_eff_diag.is_none(),
+                "gz_eff_diag should be None when g_z_s* are both None"
+            );
+            // precompute 値を渡した結果.
+            let gersh_cached = compute_stage_gershgorin(&arrays, &h_p_diag, h_p_min, h_p_max);
+            // h_p_diag を full walk して算出した参照値 (c_b · h_p_diag[k] の min/max).
+            let mut dmin_ref = f64::INFINITY;
+            let mut dmax_ref = f64::NEG_INFINITY;
+            for &v in &h_p_diag {
+                let d = arrays.c_b * v;
+                if d < dmin_ref {
+                    dmin_ref = d;
+                }
+                if d > dmax_ref {
+                    dmax_ref = d;
+                }
+            }
+            // r_off は precompute と独立 (g_x/g_y のみから算出される) ので
+            // diag_min/max のみ比較.
+            assert!(
+                (gersh_cached.diag_min - dmin_ref).abs() < 1e-13 * dmin_ref.abs().max(1.0),
+                "diag_min: cached = {}, full-walk = {} (w_s1={}, w_s2={})",
+                gersh_cached.diag_min,
+                dmin_ref,
+                w_s1,
+                w_s2,
+            );
+            assert!(
+                (gersh_cached.diag_max - dmax_ref).abs() < 1e-13 * dmax_ref.abs().max(1.0),
+                "diag_max: cached = {}, full-walk = {} (w_s1={}, w_s2={})",
+                gersh_cached.diag_max,
+                dmax_ref,
+                w_s1,
+                w_s2,
+            );
+        }
+    }
+
+    /// `compute_stage_gershgorin` の `gz_eff_diag = Some(...)` 経路 (時間依存 Z
+    /// 磁場あり) は依然として O(2^N) walk が必要で precompute だけでは bound を
+    /// 取れない. h_p_min/h_p_max を渡しても結果が正しい min/max になることを
+    /// 確認する (`Some` 経路で precompute 引数が誤って使われないことの保証).
+    #[test]
+    fn compute_stage_gershgorin_with_z_walks_correctly() {
+        let n = 5_usize;
+        let dim = 1usize << n;
+        let mut rng = Xor64::new(20260529);
+        let h_p_diag: Vec<f64> = (0..dim).map(|_| rng.signed()).collect();
+        let (h_p_min, h_p_max) = h_p_diag_bounds(&h_p_diag);
+        let g_x_s1: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let g_x_s2: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        // g_z_s* を非ゼロにして gz_eff_diag = Some(...) を発火させる.
+        let g_z_s1: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let g_z_s2: Vec<f64> = (0..n).map(|_| rng.signed()).collect();
+        let b_s1 = rng.signed();
+        let b_s2 = rng.signed();
+        let arrays = build_stage_arrays(
+            &g_x_s1,
+            None,
+            Some(&g_z_s1),
+            b_s1,
+            &g_x_s2,
+            None,
+            Some(&g_z_s2),
+            b_s2,
+            0.5,
+            0.5,
+        );
+        let gz = arrays
+            .gz_eff_diag
+            .as_ref()
+            .expect("gz_eff_diag should be Some when g_z_s* are not None");
+        // 参照値: c_b · h_p_diag[k] + gz[k] の min/max を full walk.
+        let mut dmin_ref = f64::INFINITY;
+        let mut dmax_ref = f64::NEG_INFINITY;
+        for k in 0..dim {
+            let d = arrays.c_b * h_p_diag[k] + gz[k];
+            if d < dmin_ref {
+                dmin_ref = d;
+            }
+            if d > dmax_ref {
+                dmax_ref = d;
+            }
+        }
+        // h_p_min/max を渡しても Some 経路では使われず, 正しい合成 min/max が出る.
+        let gersh = compute_stage_gershgorin(&arrays, &h_p_diag, h_p_min, h_p_max);
+        assert!(
+            (gersh.diag_min - dmin_ref).abs() < 1e-13 * dmin_ref.abs().max(1.0),
+            "diag_min (with Z): got = {}, expected = {}",
+            gersh.diag_min,
+            dmin_ref,
+        );
+        assert!(
+            (gersh.diag_max - dmax_ref).abs() < 1e-13 * dmax_ref.abs().max(1.0),
+            "diag_max (with Z): got = {}, expected = {}",
+            gersh.diag_max,
+            dmax_ref,
+        );
+    }
+
     /// dt = 0 で恒等変換になる: `exp(-i · 0 · H) · ψ = ψ`.
     /// Lanczos は dt = 0 のとき位相 `exp(0) = 1` を返すので, 部分空間内の
     /// 数値誤差のみが残る. rel < 1e-13 で一致するはず.
@@ -1557,7 +2973,7 @@ mod tests {
         let (a_s1, b_s1) = (rng.signed(), rng.signed());
         let (a_s2, b_s2) = (rng.signed(), rng.signed());
 
-        let (result, _m_eff, _err_lanczos_sum) = cfm4_step(
+        let (result, _m_eff, _err_lanczos_sum) = cfm4_step_x_only(
             &psi, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, 0.0, 24, 1e-12, n, None,
         )
         .expect("ok");
@@ -1580,7 +2996,7 @@ mod tests {
         let (a_s2, b_s2) = (0.7_f64, 0.3_f64);
         let dt = 0.25_f64;
 
-        let (result, _m_eff, _err_lanczos_sum) = cfm4_step(
+        let (result, _m_eff, _err_lanczos_sum) = cfm4_step_x_only(
             &psi, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, 24, 1e-12, n, None,
         )
         .expect("ok");
@@ -1619,7 +3035,7 @@ mod tests {
 
         let mut psi = psi0.clone();
         for _ in 0..n_steps {
-            let (psi_new, _m_eff, _err_lanczos_sum) = cfm4_step(
+            let (psi_new, _m_eff, _err_lanczos_sum) = cfm4_step_x_only(
                 &psi, &h_x, &h_p_diag, a_t, b_t, a_t, b_t, dt, 24, 1e-14, n, None,
             )
             .expect("ok");
@@ -1696,7 +3112,7 @@ mod tests {
                 let b_s1 = b_base * f(s_1);
                 let a_s2 = a_base * f(s_2);
                 let b_s2 = b_base * f(s_2);
-                let (psi_new, _m_eff, _err_lanczos_sum) = cfm4_step(
+                let (psi_new, _m_eff, _err_lanczos_sum) = cfm4_step_x_only(
                     &psi, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol, n, None,
                 )
                 .expect("ok");
@@ -1762,7 +3178,7 @@ mod tests {
             let t_k = k as f64 * dt;
             let s_1 = t_k + c_1 * dt;
             let s_2 = t_k + c_2 * dt;
-            let (psi_new, _m_eff, _err_lanczos_sum) = cfm4_step(
+            let (psi_new, _m_eff, _err_lanczos_sum) = cfm4_step_x_only(
                 &psi_cfm4,
                 &h_x,
                 &h_p_diag,
@@ -1937,7 +3353,7 @@ mod tests {
         let m = 24_usize;
         let krylov_tol = 1e-12_f64;
 
-        let (psi_expected, _m_eff_expected, _err_lanczos_sum) = cfm4_step(
+        let (psi_expected, _m_eff_expected, _err_lanczos_sum) = cfm4_step_x_only(
             &psi0, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol, n, None,
         )
         .expect("ok");
@@ -2022,7 +3438,7 @@ mod tests {
         let (a_s2_h2, b_s2_h2) = (rng.signed(), rng.signed());
 
         let mut psi = psi0.clone();
-        let (err, _m_eff_total, _err_lanczos_total) = cfm4_step_with_richardson_estimate(
+        let (err, _m_eff_total, _err_lanczos_total) = cfm4_step_with_richardson_estimate_x_only(
             &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
             b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, 0.0, 24, 1e-12, n,
             false,
@@ -2089,12 +3505,13 @@ mod tests {
             let b_s2_h2 = b_base * f(t0 + 0.5 * dt + c_2 * dt * 0.5);
 
             let mut psi = psi0.clone();
-            let (err, _m_eff_total, _err_lanczos_total) = cfm4_step_with_richardson_estimate(
-                &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
-                b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, dt, m, krylov_tol,
-                n, false,
-            )
-            .expect("ok");
+            let (err, _m_eff_total, _err_lanczos_total) =
+                cfm4_step_with_richardson_estimate_x_only(
+                    &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
+                    b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, dt, m,
+                    krylov_tol, n, false,
+                )
+                .expect("ok");
             err
         };
 
@@ -2179,7 +3596,7 @@ mod tests {
             let b_s2_h2 = b_base * f(t0 + 0.5 * dt + c_2 * dt * 0.5);
 
             let mut psi = psi0.clone();
-            cfm4_step_with_richardson_estimate(
+            cfm4_step_with_richardson_estimate_x_only(
                 &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
                 b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, dt, m, krylov_tol,
                 n, true,
@@ -2244,7 +3661,7 @@ mod tests {
         let krylov_tol = 1e-12_f64;
 
         // reference: cfm4_step を dt/2 で 2 回叩く. iter-0 cache 適用なしで.
-        let (psi_mid_expected, _m_eff_mid, _err_lanczos_mid) = cfm4_step(
+        let (psi_mid_expected, _m_eff_mid, _err_lanczos_mid) = cfm4_step_x_only(
             &psi0,
             &h_x,
             &h_p_diag,
@@ -2259,7 +3676,7 @@ mod tests {
             None,
         )
         .expect("ok");
-        let (psi_expected, _m_eff_h2, _err_lanczos_h2) = cfm4_step(
+        let (psi_expected, _m_eff_h2, _err_lanczos_h2) = cfm4_step_x_only(
             &psi_mid_expected,
             &h_x,
             &h_p_diag,
@@ -2277,7 +3694,7 @@ mod tests {
 
         // actual: Richardson 経路を extrapolate=false で実行.
         let mut psi_actual = psi0.clone();
-        let (_err, _m_eff_total, _err_lanczos_total) = cfm4_step_with_richardson_estimate(
+        let (_err, _m_eff_total, _err_lanczos_total) = cfm4_step_with_richardson_estimate_x_only(
             &mut psi_actual,
             &h_x,
             &h_p_diag,
@@ -2336,18 +3753,21 @@ mod tests {
             let krylov_tol = 1e-12_f64;
 
             // cache 計算 (Richardson estimator 入口で行うのと同等).
+            // Phase C / issue #142 C1 part 2-B で cache tuple は 4 要素化
+            // ((cache_drv, cache_diag, a_s1_scalar, a_s2_scalar)) に拡張.
+            // X-only path caller 契約のため (a_s1, a_s2) スカラを末尾に渡す.
             let mut cache_drv = vec![Complex64::new(0.0, 0.0); dim];
             let mut cache_diag = vec![Complex64::new(0.0, 0.0); dim];
             crate::matvec::apply_h_drv(&psi, &mut cache_drv, &h_x, n);
             crate::matvec::apply_h_p_diag(&psi, &mut cache_diag, &h_p_diag);
-            let cache: Option<(&[Complex64], &[Complex64])> =
-                Some((&cache_drv[..], &cache_diag[..]));
+            let cache: Option<(&[Complex64], &[Complex64], f64, f64)> =
+                Some((&cache_drv[..], &cache_diag[..], a_s1, a_s2));
 
-            let (psi_with_cache, _m_eff_a, _err_a) = cfm4_step(
+            let (psi_with_cache, _m_eff_a, _err_a) = cfm4_step_x_only(
                 &psi, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol, n, cache,
             )
             .expect("ok with cache");
-            let (psi_no_cache, _m_eff_b, _err_b) = cfm4_step(
+            let (psi_no_cache, _m_eff_b, _err_b) = cfm4_step_x_only(
                 &psi, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, krylov_tol, n, None,
             )
             .expect("ok without cache");
@@ -2393,37 +3813,38 @@ mod tests {
 
         // actual: cache 適用版 (現状 cfm4_step_with_richardson_estimate 実装).
         let mut psi_actual = psi0.clone();
-        let (err_actual, _m_eff_actual, _err_lanczos_actual) = cfm4_step_with_richardson_estimate(
-            &mut psi_actual,
-            &h_x,
-            &h_p_diag,
-            a_s1_full,
-            b_s1_full,
-            a_s2_full,
-            b_s2_full,
-            a_s1_h1,
-            b_s1_h1,
-            a_s2_h1,
-            b_s2_h1,
-            a_s1_h2,
-            b_s1_h2,
-            a_s2_h2,
-            b_s2_h2,
-            dt,
-            m,
-            krylov_tol,
-            n,
-            false,
-        )
-        .expect("ok actual");
+        let (err_actual, _m_eff_actual, _err_lanczos_actual) =
+            cfm4_step_with_richardson_estimate_x_only(
+                &mut psi_actual,
+                &h_x,
+                &h_p_diag,
+                a_s1_full,
+                b_s1_full,
+                a_s2_full,
+                b_s2_full,
+                a_s1_h1,
+                b_s1_h1,
+                a_s2_h1,
+                b_s2_h1,
+                a_s1_h2,
+                b_s1_h2,
+                a_s2_h2,
+                b_s2_h2,
+                dt,
+                m,
+                krylov_tol,
+                n,
+                false,
+            )
+            .expect("ok actual");
 
         // expected: cache 適用なし版 (cfm4_step を None で 3 回呼ぶ).
-        let (psi_full_ref, _m_eff_f, _err_l_f) = cfm4_step(
+        let (psi_full_ref, _m_eff_f, _err_l_f) = cfm4_step_x_only(
             &psi0, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, dt, m, krylov_tol,
             n, None,
         )
         .expect("ok full ref");
-        let (psi_mid_ref, _m_eff_m, _err_l_m) = cfm4_step(
+        let (psi_mid_ref, _m_eff_m, _err_l_m) = cfm4_step_x_only(
             &psi0,
             &h_x,
             &h_p_diag,
@@ -2438,7 +3859,7 @@ mod tests {
             None,
         )
         .expect("ok mid ref");
-        let (psi_h2_ref, _m_eff_h2, _err_l_h2) = cfm4_step(
+        let (psi_h2_ref, _m_eff_h2, _err_l_h2) = cfm4_step_x_only(
             &psi_mid_ref,
             &h_x,
             &h_p_diag,
@@ -2502,26 +3923,10 @@ mod tests {
         let dt = total_t / n_steps as f64;
         let cheb_tol = 1e-13_f64;
 
-        let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
-        let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
-        let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
         let mut psi = psi0.clone();
         for _ in 0..n_steps {
-            let (psi_new, _k_used, _err_cheb) = cfm4_step_chebyshev(
-                &psi,
-                &h_x,
-                &h_p_diag,
-                a_t,
-                b_t,
-                a_t,
-                b_t,
-                dt,
-                cheb_tol,
-                n,
-                h_x_abs_sum,
-                h_p_min,
-                h_p_max,
+            let (psi_new, _k_used, _err_cheb) = cfm4_step_chebyshev_x_only(
+                &psi, &h_x, &h_p_diag, a_t, b_t, a_t, b_t, dt, cheb_tol, n,
             )
             .expect("ok");
             psi = psi_new;
@@ -2561,10 +3966,6 @@ mod tests {
         let c_1 = cfm4_c1();
         let c_2 = cfm4_c2();
 
-        let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
-        let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
-        let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
         let mut psi_lan = psi0.clone();
         let mut psi_che = psi0.clone();
         for k in 0..n_steps {
@@ -2576,26 +3977,14 @@ mod tests {
             let a_s2 = a_base * f(s_2);
             let b_s2 = b_base * f(s_2);
 
-            let (psi_lan_new, _m_eff, _err_l) = cfm4_step(
+            let (psi_lan_new, _m_eff, _err_l) = cfm4_step_x_only(
                 &psi_lan, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, m, tol, n, None,
             )
             .expect("lanczos ok");
             psi_lan = psi_lan_new;
 
-            let (psi_che_new, _k, _err_c) = cfm4_step_chebyshev(
-                &psi_che,
-                &h_x,
-                &h_p_diag,
-                a_s1,
-                b_s1,
-                a_s2,
-                b_s2,
-                dt,
-                tol,
-                n,
-                h_x_abs_sum,
-                h_p_min,
-                h_p_max,
+            let (psi_che_new, _k, _err_c) = cfm4_step_chebyshev_x_only(
+                &psi_che, &h_x, &h_p_diag, a_s1, b_s1, a_s2, b_s2, dt, tol, n,
             )
             .expect("chebyshev ok");
             psi_che = psi_che_new;
@@ -2635,10 +4024,6 @@ mod tests {
         let c_1 = cfm4_c1();
         let c_2 = cfm4_c2();
 
-        let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
-        let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
-        let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
         let step_err = |dt: f64| -> f64 {
             let a_s1_full = a_base * f(t0 + c_1 * dt);
             let b_s1_full = b_base * f(t0 + c_1 * dt);
@@ -2654,31 +4039,13 @@ mod tests {
             let b_s2_h2 = b_base * f(t0 + 0.5 * dt + c_2 * dt * 0.5);
 
             let mut psi = psi0.clone();
-            let (err, _k_total, _err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate(
-                &mut psi,
-                &h_x,
-                &h_p_diag,
-                a_s1_full,
-                b_s1_full,
-                a_s2_full,
-                b_s2_full,
-                a_s1_h1,
-                b_s1_h1,
-                a_s2_h1,
-                b_s2_h1,
-                a_s1_h2,
-                b_s1_h2,
-                a_s2_h2,
-                b_s2_h2,
-                dt,
-                tol,
-                n,
-                false,
-                h_x_abs_sum,
-                h_p_min,
-                h_p_max,
-            )
-            .expect("ok");
+            let (err, _k_total, _err_cheb_total) =
+                cfm4_step_chebyshev_with_richardson_estimate_x_only(
+                    &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
+                    b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, dt, tol, n,
+                    false,
+                )
+                .expect("ok");
             err
         };
 
@@ -2717,34 +4084,10 @@ mod tests {
         let (a_s1_h2, b_s1_h2) = (rng.signed(), rng.signed());
         let (a_s2_h2, b_s2_h2) = (rng.signed(), rng.signed());
 
-        let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
-        let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
-        let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
         let mut psi = psi0.clone();
-        let (err, _k_total, _err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate(
-            &mut psi,
-            &h_x,
-            &h_p_diag,
-            a_s1_full,
-            b_s1_full,
-            a_s2_full,
-            b_s2_full,
-            a_s1_h1,
-            b_s1_h1,
-            a_s2_h1,
-            b_s2_h1,
-            a_s1_h2,
-            b_s1_h2,
-            a_s2_h2,
-            b_s2_h2,
-            0.0,
-            1e-12,
-            n,
-            false,
-            h_x_abs_sum,
-            h_p_min,
-            h_p_max,
+        let (err, _k_total, _err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate_x_only(
+            &mut psi, &h_x, &h_p_diag, a_s1_full, b_s1_full, a_s2_full, b_s2_full, a_s1_h1,
+            b_s1_h1, a_s2_h1, b_s2_h1, a_s1_h2, b_s1_h2, a_s2_h2, b_s2_h2, 0.0, 1e-12, n, false,
         )
         .expect("ok");
 
@@ -2777,12 +4120,8 @@ mod tests {
         let dt = 0.25_f64;
         let tol = 1e-12_f64;
 
-        let h_x_abs_sum: f64 = h_x.iter().map(|x| x.abs()).sum();
-        let h_p_min = h_p_diag.iter().cloned().fold(f64::INFINITY, f64::min);
-        let h_p_max = h_p_diag.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-
-        // reference: cfm4_step_chebyshev を dt/2 で 2 回叩く.
-        let (psi_mid_expected, _k_mid, _err_mid) = cfm4_step_chebyshev(
+        // reference: cfm4_step_chebyshev_x_only を dt/2 で 2 回叩く.
+        let (psi_mid_expected, _k_mid, _err_mid) = cfm4_step_chebyshev_x_only(
             &psi0,
             &h_x,
             &h_p_diag,
@@ -2793,12 +4132,9 @@ mod tests {
             0.5 * dt,
             tol,
             n,
-            h_x_abs_sum,
-            h_p_min,
-            h_p_max,
         )
         .expect("ok");
-        let (psi_expected, _k_h2, _err_h2) = cfm4_step_chebyshev(
+        let (psi_expected, _k_h2, _err_h2) = cfm4_step_chebyshev_x_only(
             &psi_mid_expected,
             &h_x,
             &h_p_diag,
@@ -2809,39 +4145,34 @@ mod tests {
             0.5 * dt,
             tol,
             n,
-            h_x_abs_sum,
-            h_p_min,
-            h_p_max,
         )
         .expect("ok");
 
         // actual: Richardson 経路 (extrapolate=false).
         let mut psi_actual = psi0.clone();
-        let (_err, _k_total, _err_cheb_total) = cfm4_step_chebyshev_with_richardson_estimate(
-            &mut psi_actual,
-            &h_x,
-            &h_p_diag,
-            a_s1_full,
-            b_s1_full,
-            a_s2_full,
-            b_s2_full,
-            a_s1_h1,
-            b_s1_h1,
-            a_s2_h1,
-            b_s2_h1,
-            a_s1_h2,
-            b_s1_h2,
-            a_s2_h2,
-            b_s2_h2,
-            dt,
-            tol,
-            n,
-            false,
-            h_x_abs_sum,
-            h_p_min,
-            h_p_max,
-        )
-        .expect("ok");
+        let (_err, _k_total, _err_cheb_total) =
+            cfm4_step_chebyshev_with_richardson_estimate_x_only(
+                &mut psi_actual,
+                &h_x,
+                &h_p_diag,
+                a_s1_full,
+                b_s1_full,
+                a_s2_full,
+                b_s2_full,
+                a_s1_h1,
+                b_s1_h1,
+                a_s2_h1,
+                b_s2_h1,
+                a_s1_h2,
+                b_s1_h2,
+                a_s2_h2,
+                b_s2_h2,
+                dt,
+                tol,
+                n,
+                false,
+            )
+            .expect("ok");
 
         for k in 0..dim {
             assert_eq!(
