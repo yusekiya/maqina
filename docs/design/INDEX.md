@@ -1,4 +1,4 @@
-# maqina: 設計書 (v0.13) — INDEX
+# maqina: 設計書 (v0.14) — INDEX
 
 横磁場イジングモデル (TFIM) の量子ダイナミクスを matrix-free に計算する
 Python パッケージ。Krylov 法 (Lanczos) で matvec を介した短時間プロパゲータ
