@@ -29,11 +29,12 @@
 #   として benchmarks/results/0.14.0/states/ に保存する. 参照解が将来また差し替わって
 #   も保存済 ψ から infidelity を再計算できる. 容量見積もり:
 #     1 状態 = 2^18 · 16 byte = 4.0 MiB raw / ~3.84 MiB 圧縮.
-#     保存対象 (合計 26 cell ≒ 100 MiB, git に通常 commit; ユーザー許可済):
-#       - maqina adaptive 18 cell → benchmarks/results/0.14.0/states/
+#     保存対象 (合計 30 cell ≒ 115 MiB, git に通常 commit; ユーザー許可済):
+#       - maqina 22 cell → benchmarks/results/0.14.0/states/
 #           non-stiff: krylov adapt 3 + cheb 6 = 9
-#           stiff:     krylov adapt 3 + cheb 6 = 9
-#         (固定 cfm4 は version 依存で保存価値小のため ψ 非保存; CSV 行のみ)
+#           stiff:     krylov adapt 3 + cheb 6 + cfm4 4 = 13
+#         (narrow 固定 cfm4 は再計算せず 0.8.0 流用なので ψ 保存対象外. stiff 固定 cfm4 は
+#          新 BDF 参照のため再計算する以上, そのとき ψ も保存する方針; #159)
 #       - QuTiP  8 cell → benchmarks/results/qutip/states/ (version 非依存共有)
 #           non-stiff 4 + stiff 4
 #
@@ -158,11 +159,6 @@ run_method() {
 
     local -a extra=()
     local variant_tag method_arg
-    # save_states: adaptive 系 (krylov / chebyshev) は高コスト + 再解析 / 参照解変更
-    # 耐性のため ψ を保存する. 固定 cfm4 は version 依存 (伝播器実装が version で
-    # 変わりうる) で更新ごとに再計算が必要なため保存価値が小さく, ψ は保存しない
-    # (CSV 行のみ; stiff は新 BDF 参照 infidelity を得るために再実行する).
-    local save_states=1
     case "$method" in
         adaptive)
             method_arg="adaptive"
@@ -178,7 +174,6 @@ run_method() {
             method_arg="cfm4"
             variant_tag="krylov_fixed"
             extra=(--cfm4-dts "$CFM4_DTS")
-            save_states=0
             ;;
         *)
             echo "ERROR: unknown method $method" >&2
@@ -186,9 +181,12 @@ run_method() {
             ;;
     esac
 
-    if [ "$save_states" -eq 1 ]; then
-        extra+=(--save-states-dir "$STATES_DIR")
-    fi
+    # 実際に計算する cell の ψ は保存する (参照解差し替え時の再解析用). 固定 cfm4 の ψ は
+    # 伝播器実装が version で変わると無効化するが, "再計算しないものをわざわざ計算してまで
+    # 保存はしない / 再計算する以上はそのとき保存する" 方針 (#159). run_method は stiff のみ
+    # cfm4 を呼ぶので, ψ 保存対象になるのは stiff 固定 cfm4 だけ. narrow 固定 cfm4 は再計算
+    # せず 0.8.0 を流用するので ψ 保存対象にならない.
+    extra+=(--save-states-dir "$STATES_DIR")
 
     echo ""
     echo "================================================================"
@@ -307,7 +305,7 @@ echo ""
 echo "================================================================"
 echo "run_bench_readme_0_14_0.sh done: $(date)"
 echo "  maqina CSV:   $OUTPUT_DIR/bench_<scenario>.csv (krylov adapt / cheb / stiff cfm4)"
-echo "  maqina states:$STATES_DIR/state_*.npz (18 cell; adaptive のみ, cfm4 は非保存)"
+echo "  maqina states:$STATES_DIR/state_*.npz (22 cell; adaptive 18 + stiff cfm4 4)"
 echo "  qutip CSV:    $QUTIP_OUTPUT_DIR/bench_<scenario>.csv (新参照で再生成; 旧は .bak)"
 echo "  qutip states: $QUTIP_STATES_DIR/state_*.npz (8 cell) — version 非依存共有"
 echo ""
