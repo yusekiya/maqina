@@ -89,6 +89,7 @@ from maqina._helpers import (
 from maqina._helpers import _resolve_dt_init_auto as _resolve_dt_init_auto
 from maqina._helpers import _resolve_dt_max_auto as _resolve_dt_max_auto
 from maqina._helpers import _validate_psi0 as _validate_psi0
+from maqina.controller import ControllerConfig
 from maqina.krylov import (
     evolve_schedule_adaptive_richardson,
     evolve_schedule_adaptive_richardson_chebyshev,
@@ -218,6 +219,7 @@ class QuantumAnnealer:
         dt_init: float | None = None,
         dt_max: float | None = None,
         m_max: int | None = None,
+        controller: ControllerConfig | None = None,
         observables: dict[str, Observable] | None = None,
         save_tlist: np.ndarray | None = None,
         store_states: bool = False,
@@ -322,6 +324,20 @@ class QuantumAnnealer:
             ``m_eff`` 累積統計の ``QuantumResult`` 露出は Rust API 拡張
             (``lanczos_propagate`` の戻り値追加 + PyO3 plumbing) が
             必要なため本フェーズでは保留 (``docs/design/05-3-propagator.md`` §5.3 参照)。
+        controller
+            adaptive PI controller の数値挙動 knob を集約した
+            :class:`~maqina.ControllerConfig` (issue #149). ``None`` (デフォルト)
+            のとき全 default (``ControllerConfig()``). adaptive 経路
+            (``cfm4_adaptive_richardson_krylov`` /
+            ``cfm4_adaptive_richardson_chebyshev``) でのみ参照され, ``safety`` /
+            ``growth_max`` / ``max_rejects`` / ``dt_min`` / ``reject_shrink_min``
+            / ``reject_shrink_max`` を driver に渡す. 固定 dt 経路では無視される
+            (``atol`` 等と同じ寛容な扱い; strict に弾くのは
+            ``AnnealingSimulator`` のみ). reject 時の dt 縮小が固定 0.5 倍から
+            予測式 + クランプ ``[reject_shrink_min, reject_shrink_max]`` に
+            変わるため, 既定挙動が従来と異なる (破壊的変更). 旧挙動は
+            ``ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)``
+            で再現できる.
         observables
             Phase 5 (issue #47) で有効化. ``{name: Observable}`` dict もしくは
             ``None``. ``save_tlist`` 非 None かつ非空 dict のとき, 各
@@ -413,6 +429,11 @@ class QuantumAnnealer:
 
         psi0_arr = _validate_psi0(self.problem, psi0)
 
+        # issue #149: controller knob を ControllerConfig に集約. None なら
+        # 全 default. adaptive 経路のみで参照され, 固定 dt 経路では (atol 等と
+        # 同じく run() では) silent に無視される.
+        ctrl = controller if controller is not None else ControllerConfig()
+
         if method == "cfm4_adaptive_richardson_krylov":
             # NOTE: 既定値は driver (``evolve_schedule_adaptive_richardson``)
             # 側と一致させること. driver 側を変えたら本ファイルも追従する.
@@ -482,7 +503,13 @@ class QuantumAnnealer:
                 krylov_tol=effective_propagator_tol,
                 tol_step=tol_step,
                 dt0=dt0,
+                dt_min=ctrl.dt_min,
                 dt_max=dt_max_resolved,
+                safety=ctrl.safety,
+                growth_max=ctrl.growth_max,
+                max_rejects=ctrl.max_rejects,
+                reject_shrink_min=ctrl.reject_shrink_min,
+                reject_shrink_max=ctrl.reject_shrink_max,
                 observables=observables_validated,
                 save_tlist=save_tlist_arr,
                 store_states=store_states,
@@ -593,7 +620,13 @@ class QuantumAnnealer:
                 chebyshev_tol=effective_propagator_tol,
                 tol_step=tol_step,
                 dt0=dt0,
+                dt_min=ctrl.dt_min,
                 dt_max=dt_max_resolved_cheb,
+                safety=ctrl.safety,
+                growth_max=ctrl.growth_max,
+                max_rejects=ctrl.max_rejects,
+                reject_shrink_min=ctrl.reject_shrink_min,
+                reject_shrink_max=ctrl.reject_shrink_max,
                 observables=observables_validated,
                 save_tlist=save_tlist_arr,
                 store_states=store_states,
@@ -861,6 +894,7 @@ class QuantumAnnealer:
         dt_init: float | None = None,
         dt_max: float | None = None,
         m_max: int | None = None,
+        controller: ControllerConfig | None = None,
     ) -> AnnealingSimulator:
         """``AnnealingSimulator`` (step-wise stateful API) を生成する.
 
@@ -880,13 +914,15 @@ class QuantumAnnealer:
             ``cfm4_adaptive_richardson_krylov`` /
             ``cfm4_adaptive_richardson_chebyshev``). default は ``run`` と同じ
             ``"cfm4_adaptive_richardson_chebyshev"`` (issue #124).
-        atol, dt_init, dt_max, m_max
+        atol, dt_init, dt_max, m_max, controller
             adaptive method (``cfm4_adaptive_richardson_krylov`` /
             ``cfm4_adaptive_richardson_chebyshev``) 専用パラメータ.
             固定 dt method で指定すると ``ValueError``. ``m_max`` は
             Chebyshev variant では追加で ``ValueError`` (K_used 動的決定の
-            ため Krylov 部分空間次元の概念がない). 詳細は
-            ``AnnealingSimulator.__init__`` の docstring.
+            ため Krylov 部分空間次元の概念がない). ``controller`` は
+            :class:`~maqina.ControllerConfig` (issue #149, PI controller の
+            数値挙動 knob 集約). 詳細は ``AnnealingSimulator.__init__`` の
+            docstring.
 
         Returns
         -------
@@ -912,4 +948,5 @@ class QuantumAnnealer:
             dt_init=dt_init,
             dt_max=dt_max,
             m_max=m_max,
+            controller=controller,
         )

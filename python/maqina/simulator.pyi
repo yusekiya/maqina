@@ -37,6 +37,7 @@ from __future__ import annotations as annotations
 from typing import Literal as Literal
 import numpy as np
 from maqina._helpers import _KRYLOV_TOL_ATOL_RATIO as _KRYLOV_TOL_ATOL_RATIO, _KRYLOV_TOL_FIXED_DEFAULT as _KRYLOV_TOL_FIXED_DEFAULT, _resolve_dt_init_auto as _resolve_dt_init_auto, _resolve_dt_max_auto as _resolve_dt_max_auto, _validate_psi0 as _validate_psi0
+from maqina.controller import ControllerConfig as ControllerConfig
 from maqina.krylov import evolve_schedule_adaptive_richardson as evolve_schedule_adaptive_richardson, evolve_schedule_adaptive_richardson_chebyshev as evolve_schedule_adaptive_richardson_chebyshev, evolve_schedule_cfm4 as evolve_schedule_cfm4, evolve_schedule_m2 as evolve_schedule_m2, evolve_schedule_trotter as evolve_schedule_trotter, evolve_schedule_trotter_suzuki4 as evolve_schedule_trotter_suzuki4
 from maqina.observable import Observable as Observable
 from maqina.problem import IsingProblem as IsingProblem
@@ -119,6 +120,15 @@ class AnnealingSimulator:
         する. ``None`` (default) で ``m`` をそのまま使う. 固定 dt method
         で指定すると ``ValueError``. ``QuantumAnnealer.run`` の ``m_max``
         と同義.
+    controller
+        adaptive 経路専用. PI controller の数値挙動 knob を集約した
+        :class:`~maqina.ControllerConfig` (issue #149). ``None`` (default)
+        で全 default. ``safety`` / ``growth_max`` / ``max_rejects`` /
+        ``dt_min`` / ``reject_shrink_min`` / ``reject_shrink_max`` を driver
+        に渡す. 固定 dt method で指定すると ``ValueError`` (``QuantumAnnealer.run``
+        と違い Simulator は strict). reject 時の dt 縮小が固定 0.5 倍から
+        予測式 + クランプに変わるため既定挙動が変わる (破壊的変更). 旧挙動は
+        ``ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)``.
 
     Raises
     ------
@@ -127,7 +137,8 @@ class AnnealingSimulator:
     ValueError
         ``m`` / ``propagator_tol`` / ``atol`` / ``dt_init`` / ``dt_max`` /
         ``m_max`` が範囲外, ``psi0`` の shape / dtype / 非正規化,
-        固定 dt method に adaptive 専用パラメータを渡した場合.
+        固定 dt method に adaptive 専用パラメータ (``controller`` 含む) を
+        渡した場合.
 
     Examples
     --------
@@ -163,11 +174,12 @@ class AnnealingSimulator:
     _dt_init: Any
     _dt_max: Any
     _m_max: Any
+    _controller: Any
     _t: Any
     _psi: Any
     _n_matvec: Any
 
-    def __init__(self, problem: IsingProblem, schedule: Schedule, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', m: int=24, propagator_tol: float | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> None:
+    def __init__(self, problem: IsingProblem, schedule: Schedule, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', m: int=24, propagator_tol: float | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None, controller: ControllerConfig | None=None) -> None:
         ...
 
     @property

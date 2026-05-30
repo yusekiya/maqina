@@ -44,6 +44,7 @@ from maqina._helpers import (
     _resolve_dt_max_auto,
     _validate_psi0,
 )
+from maqina.controller import ControllerConfig
 from maqina.krylov import (
     evolve_schedule_adaptive_richardson,
     evolve_schedule_adaptive_richardson_chebyshev,
@@ -146,6 +147,15 @@ class AnnealingSimulator:
         する. ``None`` (default) で ``m`` をそのまま使う. 固定 dt method
         で指定すると ``ValueError``. ``QuantumAnnealer.run`` の ``m_max``
         と同義.
+    controller
+        adaptive 経路専用. PI controller の数値挙動 knob を集約した
+        :class:`~maqina.ControllerConfig` (issue #149). ``None`` (default)
+        で全 default. ``safety`` / ``growth_max`` / ``max_rejects`` /
+        ``dt_min`` / ``reject_shrink_min`` / ``reject_shrink_max`` を driver
+        に渡す. 固定 dt method で指定すると ``ValueError`` (``QuantumAnnealer.run``
+        と違い Simulator は strict). reject 時の dt 縮小が固定 0.5 倍から
+        予測式 + クランプに変わるため既定挙動が変わる (破壊的変更). 旧挙動は
+        ``ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)``.
 
     Raises
     ------
@@ -154,7 +164,8 @@ class AnnealingSimulator:
     ValueError
         ``m`` / ``propagator_tol`` / ``atol`` / ``dt_init`` / ``dt_max`` /
         ``m_max`` が範囲外, ``psi0`` の shape / dtype / 非正規化,
-        固定 dt method に adaptive 専用パラメータを渡した場合.
+        固定 dt method に adaptive 専用パラメータ (``controller`` 含む) を
+        渡した場合.
 
     Examples
     --------
@@ -203,6 +214,7 @@ class AnnealingSimulator:
         dt_init: float | None = None,
         dt_max: float | None = None,
         m_max: int | None = None,
+        controller: ControllerConfig | None = None,
     ) -> None:
         if method not in _VALID_METHODS:
             raise NotImplementedError(
@@ -225,6 +237,7 @@ class AnnealingSimulator:
                 ("dt_init", dt_init),
                 ("dt_max", dt_max),
                 ("m_max", m_max),
+                ("controller", controller),
             ):
                 if val is not None:
                     raise ValueError(
@@ -267,6 +280,11 @@ class AnnealingSimulator:
         self._dt_init: float | None = float(dt_init) if dt_init is not None else None
         self._dt_max: float | None = float(dt_max) if dt_max is not None else None
         self._m_max: int | None = int(m_max) if m_max is not None else None
+        # issue #149: controller knob を ControllerConfig に集約. None なら
+        # 全 default. adaptive driver 呼出 (_run_adaptive) で field を展開する.
+        self._controller: ControllerConfig = (
+            controller if controller is not None else ControllerConfig()
+        )
 
         # _psi は呼出側 psi0 の後続 mutation から内部状態を守るため copy.
         # _validate_psi0 は C-contiguous な配列を返すが, 既存 buffer を返す
@@ -587,7 +605,13 @@ class AnnealingSimulator:
                 chebyshev_tol=propagator_tol,
                 tol_step=tol_step,
                 dt0=dt0,
+                dt_min=self._controller.dt_min,
                 dt_max=dt_max_resolved,
+                safety=self._controller.safety,
+                growth_max=self._controller.growth_max,
+                max_rejects=self._controller.max_rejects,
+                reject_shrink_min=self._controller.reject_shrink_min,
+                reject_shrink_max=self._controller.reject_shrink_max,
             )
         else:
             (
@@ -611,7 +635,13 @@ class AnnealingSimulator:
                 krylov_tol=propagator_tol,
                 tol_step=tol_step,
                 dt0=dt0,
+                dt_min=self._controller.dt_min,
                 dt_max=dt_max_resolved,
+                safety=self._controller.safety,
+                growth_max=self._controller.growth_max,
+                max_rejects=self._controller.max_rejects,
+                reject_shrink_min=self._controller.reject_shrink_min,
+                reject_shrink_max=self._controller.reject_shrink_max,
             )
         self._psi = psi_new
         self._t = t_next

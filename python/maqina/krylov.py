@@ -1994,6 +1994,49 @@ def _pi_dt_next(
     return float(dt_next)
 
 
+def _pi_dt_reject(
+    dt_try: float,
+    err_for_pi: float,
+    *,
+    tol_step: float,
+    safety: float,
+    reject_shrink_min: float,
+    reject_shrink_max: float,
+    dt_min: float,
+    p: int,
+) -> float:
+    """PI controller の reject 時 ``dt`` を計算する (issue #149).
+
+    .. code-block:: text
+
+        factor = safety · (tol_step / err_for_pi)^{1/(p+1)}
+        factor = clamp(factor, reject_shrink_min, reject_shrink_max)
+        dt     = max(dt_try · factor, dt_min)
+
+    accept 時 (:func:`_pi_dt_next`) と **同じ予測式** を使い、reject 用クランプ
+    ``[reject_shrink_min, reject_shrink_max]`` (``reject_shrink_max < 1`` で
+    必ず縮小) を掛ける。これにより ``err`` が ``tol_step`` をわずかに超えた
+    だけなら ``factor ≈ reject_shrink_max`` 程度で済み、固定 0.5 倍が招いていた
+    order-5 推定子での過剰縮小 (誤差 32× 削減 → 楽々 accept → 再上昇 → 再 reject
+    のノコギリ波) を断つ。大きく超えたときだけ ``reject_shrink_min`` まで落ちる。
+
+    ``growth_max`` / ``dt_max`` は reject 経路では適用不要 (``reject_shrink_max
+    < 1`` で定義上拡大しないため)。``dt_min`` 床は維持する。
+
+    ``err_for_pi <= 1e-30`` (0 近傍) のときは予測式が発散するので ``factor =
+    reject_shrink_max`` に折り返す (reject 経路では ``err`` が tol を超えて
+    いるため通常この分岐には入らないが defensive guard)。``p`` は推定子の order
+    (M2 embedded = 2, Richardson / Chebyshev = 4)。詳細は
+    ``docs/design/05-3-propagator.md`` "PI controller / adaptive ドライバ" 節。
+    """
+    if err_for_pi <= 1.0e-30:
+        factor = reject_shrink_max
+    else:
+        factor = safety * (tol_step / err_for_pi) ** (1.0 / (p + 1))
+    factor = min(max(factor, reject_shrink_min), reject_shrink_max)
+    return float(max(dt_try * factor, dt_min))
+
+
 def evolve_schedule_adaptive_m2(
     h_p_diag: np.ndarray,
     schedule: Schedule,
@@ -2010,6 +2053,8 @@ def evolve_schedule_adaptive_m2(
     safety: float = 0.9,
     growth_max: float = 4.0,
     max_rejects: int = 50,
+    reject_shrink_min: float = 0.2,
+    reject_shrink_max: float = 0.9,
     save_tlist: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """CFM4:2 + M2 embedded 推定子による adaptive dt ドライバ (Phase 4 C3).
@@ -2058,6 +2103,14 @@ def evolve_schedule_adaptive_m2(
     max_rejects
         同一 step での連続 reject 上限. 超過で ``RuntimeError``
         (既定 ``50``).
+    reject_shrink_min, reject_shrink_max
+        reject 時の dt 縮小 factor のクランプ範囲 ``[reject_shrink_min,
+        reject_shrink_max]`` (issue #149, 既定 ``[0.2, 0.9]``). reject 時も
+        accept と同じ予測式 ``safety · (tol_step / err)^{1/(p+1)}`` で factor を
+        出し, この範囲にクランプして ``dt = max(dt_try · factor, dt_min)``
+        とする. ``reject_shrink_min = reject_shrink_max = 0.5`` で旧挙動
+        (固定半減) を厳密再現. M2 経路は誤差源分離がないため ``err`` を
+        そのまま PI 駆動量に使う (p=2).
     save_tlist
         Phase 5 拡張対象外 (issue #47 では adaptive Richardson のみ有効化).
         adaptive M2 driver は ``annealer.py`` の facade からは呼ばれない
@@ -2182,7 +2235,18 @@ def evolve_schedule_adaptive_m2(
                     f"consecutive rejects at t={t}, dt={dt_try}, err={err}; "
                     f"consider relaxing tol_step or shrinking dt0."
                 )
-            dt = max(dt_try * 0.5, dt_min)
+            # issue #149: reject 時も accept と同じ予測式 + reject 用クランプ.
+            # M2 経路は誤差源分離なし (``err`` をそのまま PI 駆動量に使う, p=2).
+            dt = _pi_dt_reject(
+                dt_try,
+                err,
+                tol_step=tol_step,
+                safety=safety,
+                reject_shrink_min=reject_shrink_min,
+                reject_shrink_max=reject_shrink_max,
+                dt_min=dt_min,
+                p=2,
+            )
 
     return (
         psi,
@@ -2208,6 +2272,8 @@ def evolve_schedule_adaptive_richardson(
     safety: float = 0.9,
     growth_max: float = 4.0,
     max_rejects: int = 50,
+    reject_shrink_min: float = 0.2,
+    reject_shrink_max: float = 0.9,
     richardson_extrapolate: bool = False,
     observables: "dict[str, Observable] | None" = None,
     save_tlist: np.ndarray | None = None,
@@ -2249,6 +2315,13 @@ def evolve_schedule_adaptive_richardson(
         ``evolve_schedule_adaptive_m2`` と同じ.
     m, krylov_tol, tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects
         PI controller の既定パラメータ (``docs/design/05-3-propagator.md`` §5.3).
+    reject_shrink_min, reject_shrink_max
+        reject 時の dt 縮小 factor のクランプ範囲 (issue #149, 既定
+        ``[0.2, 0.9]``). reject 時も accept と同じ予測式で factor を出し
+        ``[reject_shrink_min, reject_shrink_max]`` にクランプする. 駆動量は
+        accept 経路と整合し ``err_magnus = max(0, err - err_{lanczos/cheb}_total)``
+        (p=4). ``reject_shrink_min = reject_shrink_max = 0.5`` で旧挙動
+        (固定半減) を厳密再現.
     richardson_extrapolate
         ``True`` で外挿後の ``ψ_acc`` を accept 時の状態とする
         (実効 6 次精度; 既定 ``False``).
@@ -2519,7 +2592,22 @@ def evolve_schedule_adaptive_richardson(
                     f"err_lanczos={err_lanczos_total}; "
                     f"consider relaxing tol_step or increasing m."
                 )
-            dt = max(dt_try * 0.5, dt_min)
+            # issue #149: reject 時も accept 経路と整合させ, err_magnus
+            # (= max(0, err - err_lanczos_total)) を PI 駆動量に使う (p=4).
+            # err_magnus が 0 近傍のときは accept 経路と同じ tol_step·1e-3
+            # フォールバック (reject では err_magnus > tol_step なので通常
+            # 発火しないが accept 経路と式を揃える).
+            err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+            dt = _pi_dt_reject(
+                dt_try,
+                err_for_pi,
+                tol_step=tol_step,
+                safety=safety,
+                reject_shrink_min=reject_shrink_min,
+                reject_shrink_max=reject_shrink_max,
+                dt_min=dt_min,
+                p=4,
+            )
 
     snapshot = recorder.finalize() if recorder is not None else None
     return (
@@ -2641,6 +2729,8 @@ def evolve_schedule_adaptive_richardson_chebyshev(
     safety: float = 0.9,
     growth_max: float = 4.0,
     max_rejects: int = 50,
+    reject_shrink_min: float = 0.2,
+    reject_shrink_max: float = 0.9,
     richardson_extrapolate: bool = False,
     observables: "dict[str, Observable] | None" = None,
     save_tlist: np.ndarray | None = None,
@@ -2690,6 +2780,7 @@ def evolve_schedule_adaptive_richardson_chebyshev(
         新パラメータは導入せず本 driver 内では ``chebyshev_tol`` 命名のみ
         使う. 既定 ``1e-12``.
     tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects,
+    reject_shrink_min, reject_shrink_max,
     richardson_extrapolate, observables, save_tlist, store_states
         :func:`evolve_schedule_adaptive_richardson` と同じ.
 
@@ -2908,7 +2999,21 @@ def evolve_schedule_adaptive_richardson_chebyshev(
                     f"err_chebyshev={err_chebyshev_total}; "
                     f"consider relaxing tol_step or tightening chebyshev_tol."
                 )
-            dt = max(dt_try * 0.5, dt_min)
+            # issue #149: reject 時も accept 経路と整合させ, err_magnus
+            # (= max(0, err - err_chebyshev_total)) を PI 駆動量に使う (p=4).
+            # err_magnus が 0 近傍のときは accept 経路と同じ tol_step·1e-3
+            # フォールバック.
+            err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+            dt = _pi_dt_reject(
+                dt_try,
+                err_for_pi,
+                tol_step=tol_step,
+                safety=safety,
+                reject_shrink_min=reject_shrink_min,
+                reject_shrink_max=reject_shrink_max,
+                dt_min=dt_min,
+                p=4,
+            )
 
     snapshot = recorder.finalize() if recorder is not None else None
     return (

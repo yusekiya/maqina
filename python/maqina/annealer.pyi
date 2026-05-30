@@ -86,6 +86,7 @@ from maqina._helpers import _gershgorin_norm_upper_bound as _gershgorin_norm_upp
 from maqina._helpers import _resolve_dt_init_auto as _resolve_dt_init_auto
 from maqina._helpers import _resolve_dt_max_auto as _resolve_dt_max_auto
 from maqina._helpers import _validate_psi0 as _validate_psi0
+from maqina.controller import ControllerConfig as ControllerConfig
 from maqina.krylov import evolve_schedule_adaptive_richardson as evolve_schedule_adaptive_richardson, evolve_schedule_adaptive_richardson_chebyshev as evolve_schedule_adaptive_richardson_chebyshev, evolve_schedule_cfm4 as evolve_schedule_cfm4, evolve_schedule_m2 as evolve_schedule_m2, evolve_schedule_trotter as evolve_schedule_trotter, evolve_schedule_trotter_suzuki4 as evolve_schedule_trotter_suzuki4
 from maqina.observable import Observable as Observable
 from maqina.problem import IsingProblem as IsingProblem
@@ -171,7 +172,7 @@ class QuantumAnnealer:
     def __init__(self, problem: IsingProblem, schedule: Schedule, *, m: int=24, propagator_tol: float | None=None) -> None:
         ...
 
-    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', n_steps: int | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None, observables: dict[str, Observable] | None=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> QuantumResult:
+    def run(self, psi0: np.ndarray, t0: float, t1: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', n_steps: int | None=None, atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None, controller: ControllerConfig | None=None, observables: dict[str, Observable] | None=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> QuantumResult:
         """``[t0, t1]`` 区間で時間発展を実行し ``QuantumResult`` を返す.
 
         Parameters
@@ -272,6 +273,20 @@ class QuantumAnnealer:
             ``m_eff`` 累積統計の ``QuantumResult`` 露出は Rust API 拡張
             (``lanczos_propagate`` の戻り値追加 + PyO3 plumbing) が
             必要なため本フェーズでは保留 (``docs/design/05-3-propagator.md`` §5.3 参照)。
+        controller
+            adaptive PI controller の数値挙動 knob を集約した
+            :class:`~maqina.ControllerConfig` (issue #149). ``None`` (デフォルト)
+            のとき全 default (``ControllerConfig()``). adaptive 経路
+            (``cfm4_adaptive_richardson_krylov`` /
+            ``cfm4_adaptive_richardson_chebyshev``) でのみ参照され, ``safety`` /
+            ``growth_max`` / ``max_rejects`` / ``dt_min`` / ``reject_shrink_min``
+            / ``reject_shrink_max`` を driver に渡す. 固定 dt 経路では無視される
+            (``atol`` 等と同じ寛容な扱い; strict に弾くのは
+            ``AnnealingSimulator`` のみ). reject 時の dt 縮小が固定 0.5 倍から
+            予測式 + クランプ ``[reject_shrink_min, reject_shrink_max]`` に
+            変わるため, 既定挙動が従来と異なる (破壊的変更). 旧挙動は
+            ``ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)``
+            で再現できる.
         observables
             Phase 5 (issue #47) で有効化. ``{name: Observable}`` dict もしくは
             ``None``. ``save_tlist`` 非 None かつ非空 dict のとき, 各
@@ -363,7 +378,7 @@ class QuantumAnnealer:
         """
         ...
 
-    def create_simulator(self, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None) -> AnnealingSimulator:
+    def create_simulator(self, psi0: np.ndarray, t0: float, *, method: Literal['m2', 'trotter', 'trotter_suzuki4', 'cfm4', 'cfm4_adaptive_richardson_krylov', 'cfm4_adaptive_richardson_chebyshev']='cfm4_adaptive_richardson_chebyshev', atol: float | None=None, dt_init: float | None=None, dt_max: float | None=None, m_max: int | None=None, controller: ControllerConfig | None=None) -> AnnealingSimulator:
         """``AnnealingSimulator`` (step-wise stateful API) を生成する.
 
         ``QuantumAnnealer`` と同じ ``problem`` / ``schedule`` / ``m`` /
@@ -382,13 +397,15 @@ class QuantumAnnealer:
             ``cfm4_adaptive_richardson_krylov`` /
             ``cfm4_adaptive_richardson_chebyshev``). default は ``run`` と同じ
             ``"cfm4_adaptive_richardson_chebyshev"`` (issue #124).
-        atol, dt_init, dt_max, m_max
+        atol, dt_init, dt_max, m_max, controller
             adaptive method (``cfm4_adaptive_richardson_krylov`` /
             ``cfm4_adaptive_richardson_chebyshev``) 専用パラメータ.
             固定 dt method で指定すると ``ValueError``. ``m_max`` は
             Chebyshev variant では追加で ``ValueError`` (K_used 動的決定の
-            ため Krylov 部分空間次元の概念がない). 詳細は
-            ``AnnealingSimulator.__init__`` の docstring.
+            ため Krylov 部分空間次元の概念がない). ``controller`` は
+            :class:`~maqina.ControllerConfig` (issue #149, PI controller の
+            数値挙動 knob 集約). 詳細は ``AnnealingSimulator.__init__`` の
+            docstring.
 
         Returns
         -------

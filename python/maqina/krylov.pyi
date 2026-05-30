@@ -258,7 +258,7 @@ def evolve_schedule_cfm4(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndar
     """
     ...
 
-def evolve_schedule_adaptive_m2(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, save_tlist: np.ndarray | None=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+def evolve_schedule_adaptive_m2(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, reject_shrink_min: float=0.2, reject_shrink_max: float=0.9, save_tlist: np.ndarray | None=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """CFM4:2 + M2 embedded 推定子による adaptive dt ドライバ (Phase 4 C3).
 
     PI controller (``docs/design/05-3-propagator.md`` §5.3) で local error を ``tol_step``
@@ -305,6 +305,14 @@ def evolve_schedule_adaptive_m2(h_p_diag: np.ndarray, schedule: Schedule, psi0: 
     max_rejects
         同一 step での連続 reject 上限. 超過で ``RuntimeError``
         (既定 ``50``).
+    reject_shrink_min, reject_shrink_max
+        reject 時の dt 縮小 factor のクランプ範囲 ``[reject_shrink_min,
+        reject_shrink_max]`` (issue #149, 既定 ``[0.2, 0.9]``). reject 時も
+        accept と同じ予測式 ``safety · (tol_step / err)^{1/(p+1)}`` で factor を
+        出し, この範囲にクランプして ``dt = max(dt_try · factor, dt_min)``
+        とする. ``reject_shrink_min = reject_shrink_max = 0.5`` で旧挙動
+        (固定半減) を厳密再現. M2 経路は誤差源分離がないため ``err`` を
+        そのまま PI 駆動量に使う (p=2).
     save_tlist
         Phase 5 拡張対象外 (issue #47 では adaptive Richardson のみ有効化).
         adaptive M2 driver は ``annealer.py`` の facade からは呼ばれない
@@ -333,7 +341,7 @@ def evolve_schedule_adaptive_m2(h_p_diag: np.ndarray, schedule: Schedule, psi0: 
     """
     ...
 
-def evolve_schedule_adaptive_richardson(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
+def evolve_schedule_adaptive_richardson(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, reject_shrink_min: float=0.2, reject_shrink_max: float=0.9, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
     """CFM4:2 + step-doubling Richardson 推定子による adaptive dt ドライバ.
 
     PI controller (``docs/design/05-3-propagator.md`` §5.3) で local error を ``tol_step``
@@ -359,6 +367,13 @@ def evolve_schedule_adaptive_richardson(h_p_diag: np.ndarray, schedule: Schedule
         ``evolve_schedule_adaptive_m2`` と同じ.
     m, krylov_tol, tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects
         PI controller の既定パラメータ (``docs/design/05-3-propagator.md`` §5.3).
+    reject_shrink_min, reject_shrink_max
+        reject 時の dt 縮小 factor のクランプ範囲 (issue #149, 既定
+        ``[0.2, 0.9]``). reject 時も accept と同じ予測式で factor を出し
+        ``[reject_shrink_min, reject_shrink_max]`` にクランプする. 駆動量は
+        accept 経路と整合し ``err_magnus = max(0, err - err_{lanczos/cheb}_total)``
+        (p=4). ``reject_shrink_min = reject_shrink_max = 0.5`` で旧挙動
+        (固定半減) を厳密再現.
     richardson_extrapolate
         ``True`` で外挿後の ``ψ_acc`` を accept 時の状態とする
         (実効 6 次精度; 既定 ``False``).
@@ -425,7 +440,7 @@ def evolve_schedule_adaptive_richardson(h_p_diag: np.ndarray, schedule: Schedule
     """
     ...
 
-def evolve_schedule_adaptive_richardson_chebyshev(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, h_p_min: float, h_p_max: float, chebyshev_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
+def evolve_schedule_adaptive_richardson_chebyshev(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, h_p_min: float, h_p_max: float, chebyshev_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, reject_shrink_min: float=0.2, reject_shrink_max: float=0.9, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
     """CFM4:2 + step-doubling Richardson + Chebyshev propagator (issue #122).
 
     既存 :func:`evolve_schedule_adaptive_richardson` (Lanczos 経路) と
@@ -459,6 +474,7 @@ def evolve_schedule_adaptive_richardson_chebyshev(h_p_diag: np.ndarray, schedule
         新パラメータは導入せず本 driver 内では ``chebyshev_tol`` 命名のみ
         使う. 既定 ``1e-12``.
     tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects,
+    reject_shrink_min, reject_shrink_max,
     richardson_extrapolate, observables, save_tlist, store_states
         :func:`evolve_schedule_adaptive_richardson` と同じ.
 
