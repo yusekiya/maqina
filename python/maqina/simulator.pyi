@@ -125,15 +125,18 @@ class AnnealingSimulator:
         :class:`~maqina.ControllerConfig` (issue #149). ``None`` (default)
         で全 default. ``safety`` / ``growth_max`` / ``max_rejects`` /
         ``dt_min`` / ``reject_shrink_min`` / ``reject_shrink_max`` /
-        ``freeze_growth_after_reject`` / ``growth_freeze_steps`` を driver
-        に渡す. 固定 dt method で指定すると ``ValueError`` (``QuantumAnnealer.run``
-        と違い Simulator は strict). reject 時の dt 縮小が固定 0.5 倍から
-        予測式 + クランプに変わり (issue #149), さらに reject 直後の accept で
-        dt 拡大を凍結する (issue #150, Gustafsson ヒステリシス, 既定有効) ため
-        既定挙動が変わる (破壊的変更). #149 のみ適用は
+        ``freeze_growth_after_reject`` / ``growth_freeze_steps`` / ``pi_alpha`` /
+        ``pi_beta`` を driver に渡す. 固定 dt method で指定すると ``ValueError``
+        (``QuantumAnnealer.run`` と違い Simulator は strict). reject 時の dt 縮小が
+        固定 0.5 倍から予測式 + クランプに変わり (issue #149), reject 直後の accept
+        で dt 拡大を凍結し (issue #150, Gustafsson ヒステリシス, 既定有効), さらに
+        accept 時の dt 予測式に真の PI 比例項が入る (issue #151, 既定
+        ``pi_alpha=0.7`` / ``pi_beta=0.4``) ため既定挙動が変わる (破壊的変更).
+        #149 のみ適用は
         ``ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)``,
         成長凍結のみ無効化は
-        ``ControllerConfig(freeze_growth_after_reject=False)``.
+        ``ControllerConfig(freeze_growth_after_reject=False)``, 純 I 制御は
+        ``ControllerConfig(pi_alpha=1.0, pi_beta=0.0)``.
 
     Raises
     ------

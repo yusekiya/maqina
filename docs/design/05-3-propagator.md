@@ -580,16 +580,26 @@ CFM4:2 を使う。
 #### PI controller / adaptive ドライバ
 
 両 estimator を共通仕様の PI controller (Python 側ループ) が駆動する。
-RK45 / Dormand-Prince 系の embedded estimator と同型の式・既定値を採用:
+RK45 / Dormand-Prince 系の embedded estimator + Gustafsson / Hairer-Wanner II
+§IV.2 の predictive PI 比例項と同型の式・既定値を採用:
 
 ```
-dt_next = dt · safety · (tol_step / err)^(1/(p+1))
+dt_next = dt · safety · (tol_step / err)^(pi_alpha/(p+1)) · (err_prev / err)^(pi_beta/(p+1))
 ```
 
-| 推定子 | p | 指数 `1/(p+1)` | 該当 estimator |
+- 第 1 因子 = **積分 (I) 項** (`pi_alpha`, 既定 `0.7`)。
+- 第 2 因子 = **比例 (P) 項** (`pi_beta`, 既定 `0.4`)。`err_prev` は直前に
+  **accept** した step の駆動量 (M2 = `err`, Richardson / Chebyshev =
+  `err_magnus`)。誤差の増加傾向 (Magnus 4 次係数 C₄ の上昇) を `err_prev / err`
+  で先読みして dt 拡大を抑制する (issue #151, 下記ノート参照)。最初の accept や
+  `err` / `err_prev` が 0 近傍 (`<= 1e-30`) のときは比例項を `1.0` に落とす。
+- `pi_alpha=1.0, pi_beta=0.0` で従来の純 I (積分) 制御
+  `dt · safety · (tol_step / err)^(1/(p+1))` をビット一致再現する (回帰アンカー)。
+
+| 推定子 | p | 指数分母 `p+1` | 該当 estimator |
 |---|---|---|---|
-| M2 embedded | 2 | 1/3 | `cfm4_step_with_m2_estimate` |
-| Richardson  | 4 | 1/5 | `cfm4_step_with_richardson_estimate` |
+| M2 embedded | 2 | 3 | `cfm4_step_with_m2_estimate` |
+| Richardson  | 4 | 5 | `cfm4_step_with_richardson_estimate` |
 
 既定パラメータ (`evolve_schedule_adaptive_*` の `*` パラメータ):
 
@@ -607,12 +617,14 @@ reject_shrink_min = 0.2      # reject factor の下限 (= fac_min, issue #149)
 reject_shrink_max = 0.9      # reject factor の上限 (= fac_reject_max < 1, issue #149)
 freeze_growth_after_reject = True  # reject 直後の dt 拡大を凍結 (issue #150)
 growth_freeze_steps = 1      # 凍結解除までの連続 accept 数 (issue #150)
+pi_alpha     = 0.7           # PI 積分 (I) 項の指数係数 (issue #151)
+pi_beta      = 0.4           # PI 比例 (P) 項の指数係数 (issue #151, Gustafsson 標準)
 ```
 
-> **`ControllerConfig` (issue #149 / #150 / umbrella #148 方針 B)**: 上記 controller
+> **`ControllerConfig` (issue #149 / #150 / #151 / umbrella #148 方針 B)**: 上記 controller
 > knob (`safety` / `growth_max` / `max_rejects` / `dt_min` /
 > `reject_shrink_min` / `reject_shrink_max` / `freeze_growth_after_reject` /
-> `growth_freeze_steps`) は `maqina.ControllerConfig`
+> `growth_freeze_steps` / `pi_alpha` / `pi_beta`) は `maqina.ControllerConfig`
 > (frozen dataclass) に集約され、facade
 > (`QuantumAnnealer.run(controller=...)` / `create_simulator(controller=...)`
 > / `AnnealingSimulator(controller=...)`) から指定できる。`atol` / `dt_init`
@@ -704,6 +716,28 @@ while t < t1:
 > 安全網** として効く。既定有効 (破壊的変更)。``freeze_growth_after_reject=False``
 > で #149 完了時点の挙動とビット一致する (回帰アンカー)。
 
+> **真の PI 比例項 (issue #151, I 制御 → PI 制御化)**: #150 までの ``_pi_dt_next`` は
+> 比例項を持たない純粋な **I (積分) 制御** ``dt · safety · (tol_step / err)^{1/(p+1)}``
+> であり、本節および docstring の "PI controller" 表記と実体が **不整合** だった。
+> #151 で Gustafsson / Hairer-Wanner II §IV.2 の predictive PI 比例項
+> ``(err_prev / err)^{pi_beta/(p+1)}`` を加え、名称と実体を一致させる。比例項は
+> 誤差の増加傾向 (臨界領域で C₄ が急上昇する物理) を ``err_prev / err`` で先読み
+> し、誤差が増えている局面 (``err_prev < err``) では dt 拡大を I 制御より抑える。
+> これにより「I 制御が楽観的に dt を拡大 → オーバーシュート → reject」の **再
+> オーバーシュートを reject に至る前に** 抑え、ノコギリ波を平坦化する (#150 の
+> 成長凍結が reject **後** の再拡大を断つのと相補的)。``err_prev`` は直前に
+> **accept** した step の駆動量 (M2 = ``err``、Richardson / Chebyshev =
+> ``err_for_pi = err_magnus``; accept 判定に使う量と一致させる)。最初の accept は
+> ``err_prev = None`` で純 I に縮退し、reject を挟んでも「最後に accept した step」
+> の値を使う (Hairer の ``errold`` 規約)。0 近傍 (``err`` / ``err_prev`` ``<= 1e-30``)
+> や ``pi_beta = 0`` では比例項を ``1.0`` に落として発散回避。既定
+> ``pi_alpha = 0.7`` / ``pi_beta = 0.4`` は Gustafsson predictive PI controller
+> 標準で、合成誤差ハーネス (#152) のノコギリ波シナリオで sweet spot を確認した
+> (``pi_beta = 0.4`` で reject 削減 + lag-1 自己相関改善、``pi_beta = 0.6`` は
+> 過補正で振動再発)。既定挙動が I → PI に変わるため破壊的変更。純 I 制御 (旧挙動)
+> は ``ControllerConfig(pi_alpha=1.0, pi_beta=0.0)`` でビット一致再現できる
+> (回帰アンカー)。
+
 Reject 時に schedule node `t + c_i · dt` は新しい dt で再評価する
 (dt 依存ノードのため)。`save_tlist` が指定された場合は次の観測時刻
 `t_obs` でも step 境界が揃うよう `dt_try` をクランプし、accept 後の `ψ`
@@ -721,6 +755,8 @@ def evolve_schedule_adaptive_m2(
     dt0=0.5, dt_min=1e-4, dt_max=None,
     safety=0.9, growth_max=4.0, max_rejects=50,
     reject_shrink_min=0.2, reject_shrink_max=0.9,   # issue #149
+    freeze_growth_after_reject=True, growth_freeze_steps=1,  # issue #150
+    pi_alpha=0.7, pi_beta=0.4,                       # issue #151
     save_tlist=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, list[np.ndarray]]:
     """(psi_final, t_history, dt_history, n_rejects, states_at_save)"""
@@ -731,6 +767,8 @@ def evolve_schedule_adaptive_richardson(
     dt0=0.5, dt_min=1e-4, dt_max=None,
     safety=0.9, growth_max=4.0, max_rejects=50,
     reject_shrink_min=0.2, reject_shrink_max=0.9,   # issue #149
+    freeze_growth_after_reject=True, growth_freeze_steps=1,  # issue #150
+    pi_alpha=0.7, pi_beta=0.4,                       # issue #151
     richardson_extrapolate=False,
     save_tlist=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, list[np.ndarray]]: ...

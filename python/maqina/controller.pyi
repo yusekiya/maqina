@@ -21,6 +21,14 @@
   reject factor をクランプする (``reject_shrink_max < 1`` で必ず縮小)。
   ``reject_shrink_min = reject_shrink_max = 0.5`` を渡すと旧挙動 (固定
   半減) を厳密に再現できる (回帰アンカー)。
+* ``pi_alpha`` / ``pi_beta``: accept 時の dt 予測式に **真の PI 比例項**
+  ``(err_prev / err)^{pi_beta/(p+1)}`` を加えるための新規 field (issue #151)。
+  ``pi_alpha`` は積分項 ``(tol_step / err)^{pi_alpha/(p+1)}`` の係数。これまでの
+  ``_pi_dt_next`` は比例項を持たない純粋な I (積分) 制御で、docstring / 設計書
+  の "PI controller" 表記と実体が不整合だった (issue #151 で解消)。既定値は
+  Gustafsson / Hairer-Wanner II §IV.2 の predictive PI controller 標準域
+  (``pi_alpha = 0.7`` / ``pi_beta = 0.4``)。``pi_alpha = 1.0, pi_beta = 0.0``
+  を渡すと旧挙動 (純 I 制御) を厳密に再現できる (回帰アンカー)。
 
 **scope 外** (facade kwarg のまま据置): ``atol`` / ``dt_init`` / ``dt_max`` /
 ``m_max`` は精度要求・auto-resolve ロジックを持つため ``ControllerConfig``
@@ -76,6 +84,21 @@ class ControllerConfig:
         facmax=1、成功で復帰」)。reject のたびに再武装し、凍結中の各 accept は
         拡大のみ禁止 (縮小は許可) となる。``growth_freeze_steps >= 1``。
         ``freeze_growth_after_reject=False`` のとき本 field は無視される。
+    pi_alpha
+        accept 時 dt 予測式の **積分 (I) 項** 指数の係数 (issue #151)。
+        ``dt_next = dt · safety · (tol_step / err)^{pi_alpha/(p+1)} ·
+        (err_prev / err)^{pi_beta/(p+1)}`` の第 1 因子。``pi_alpha > 0``。
+        既定 ``0.7`` (Gustafsson predictive PI controller 標準)。
+        ``pi_alpha = 1.0`` で従来の I 制御の積分項に一致する。
+    pi_beta
+        accept 時 dt 予測式の **比例 (P) 項** 指数の係数 (issue #151)。誤差の
+        増加傾向 (Magnus 4 次係数 C₄ の上昇) を ``err_prev / err`` で先読みして
+        dt 拡大を抑制する。``pi_beta >= 0``。既定 ``0.4`` (Gustafsson 標準)。
+        ``pi_beta = 0.0`` で比例項が無効化され純 I 制御に戻る (``pi_alpha = 1.0``
+        と合わせて旧挙動の回帰アンカー)。``err_prev`` は直前に **accept** した
+        step の駆動量 (M2 = ``err``, Richardson / Chebyshev = ``err_magnus``);
+        最初の accept や ``err`` / ``err_prev`` が 0 近傍 (``<= 1e-30``) のときは
+        比例項を ``1.0`` に落として発散を回避する。
 
     Raises
     ------
@@ -90,3 +113,5 @@ class ControllerConfig:
     reject_shrink_max: float = 0.9
     freeze_growth_after_reject: bool = True
     growth_freeze_steps: int = 1
+    pi_alpha: float = 0.7
+    pi_beta: float = 0.4

@@ -109,6 +109,12 @@ def test_reject_clamp_improves_end_to_end_richardson():
     reject-clamp 効果の分離) では両 config で ``freeze=False`` を明示し変数を
     reject 縮小のみに絞る。成長凍結単体の end-to-end 効果は
     ``benchmarks/bench_stepsize_controller.py --compare`` (層 B) が測る。
+
+    **issue #151 注**: 既定が真の PI (``pi_alpha=0.7, pi_beta=0.4``) になり、PI
+    比例項も reject 数に影響する。本テストは #149 reject-clamp **単独** の効果を
+    測るので、両 config を ``pi_alpha=1.0, pi_beta=0.0`` (純 I 制御) に pin して
+    PI 比例項を排除する (PI 比例項の効果は ``tests/test_controller_pi.py`` で別途
+    検証する)。
     """
     diff = bsc.compare_configs(
         "richardson",
@@ -117,11 +123,15 @@ def test_reject_clamp_improves_end_to_end_richardson():
             "reject_shrink_min": 0.5,
             "reject_shrink_max": 0.5,
             "freeze_growth_after_reject": False,
+            "pi_alpha": 1.0,
+            "pi_beta": 0.0,
         },
-        {  # #149 新既定クランプ (成長凍結は分離のため off)
+        {  # #149 新既定クランプ (成長凍結 / PI 比例項は分離のため off)
             "reject_shrink_min": 0.2,
             "reject_shrink_max": 0.9,
             "freeze_growth_after_reject": False,
+            "pi_alpha": 1.0,
+            "pi_beta": 0.0,
         },
         T=4.0,
         beta=16.0,

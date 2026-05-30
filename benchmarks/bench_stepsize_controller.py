@@ -142,6 +142,8 @@ def _drive(
     reject_shrink_max: float,
     freeze_growth_after_reject: bool,
     growth_freeze_steps: int,
+    pi_alpha: float,
+    pi_beta: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """実 driver を 1 回駆動して ``(psi, t_hist, dt_hist, n_rejects)`` を返す."""
     if method == "richardson":
@@ -162,6 +164,8 @@ def _drive(
             reject_shrink_max=reject_shrink_max,
             freeze_growth_after_reject=freeze_growth_after_reject,
             growth_freeze_steps=growth_freeze_steps,
+            pi_alpha=pi_alpha,
+            pi_beta=pi_beta,
         )
         return out[0], out[1], out[2], int(out[3])
     if method == "chebyshev":
@@ -184,6 +188,8 @@ def _drive(
             reject_shrink_max=reject_shrink_max,
             freeze_growth_after_reject=freeze_growth_after_reject,
             growth_freeze_steps=growth_freeze_steps,
+            pi_alpha=pi_alpha,
+            pi_beta=pi_beta,
         )
         return out[0], out[1], out[2], int(out[3])
     raise ValueError(f"method must be one of {_VALID_METHODS}, got {method!r}")
@@ -238,6 +244,8 @@ def run_scenario(
     reject_shrink_max: float = 0.9,
     freeze_growth_after_reject: bool = True,
     growth_freeze_steps: int = 1,
+    pi_alpha: float = 0.7,
+    pi_beta: float = 0.4,
     window_frac: float = 0.15,
     seed: int = 20260530,
     ref_psi: np.ndarray | None = None,
@@ -268,6 +276,8 @@ def run_scenario(
         reject_shrink_max=reject_shrink_max,
         freeze_growth_after_reject=freeze_growth_after_reject,
         growth_freeze_steps=growth_freeze_steps,
+        pi_alpha=pi_alpha,
+        pi_beta=pi_beta,
     )
 
     if ref_psi is None:
