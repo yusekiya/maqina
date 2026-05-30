@@ -62,6 +62,20 @@ class ControllerConfig:
         ``tol_step`` をわずかに超えただけのとき ``factor ≈ reject_shrink_max``
         程度で済み、order-5 推定子での過剰縮小 (誤差 32× 削減) を断つ。
         ``reject_shrink_min <= reject_shrink_max < 1`` (``< 1`` で必ず縮小)。
+    freeze_growth_after_reject
+        reject 後の accept で dt 拡大を一時凍結するか (issue #150,
+        Gustafsson ヒステリシス)。``True`` (既定, 新挙動) のとき reject 直後の
+        accept では ``eff_growth_max = 1.0`` として **拡大のみ禁止** する
+        (縮小方向は許可)。過剰縮小 → 楽々 accept → 即 dt 再上昇 → 再
+        オーバーシュートというノコギリ波の「再上昇」側を断つ。``False`` で
+        #149 のみ適用した挙動 (reject 直後でも ``growth_max`` まで拡大可) に
+        戻せる。
+    growth_freeze_steps
+        reject 後の成長凍結を解除するまでの **連続 accept 回数** (issue #150,
+        既定 ``1`` = DOPRI/Hairer-Wanner 標準の「reject 直後の 1 step だけ
+        facmax=1、成功で復帰」)。reject のたびに再武装し、凍結中の各 accept は
+        拡大のみ禁止 (縮小は許可) となる。``growth_freeze_steps >= 1``。
+        ``freeze_growth_after_reject=False`` のとき本 field は無視される。
 
     Raises
     ------
@@ -75,6 +89,8 @@ class ControllerConfig:
     dt_min: float = 1e-4
     reject_shrink_min: float = 0.2
     reject_shrink_max: float = 0.9
+    freeze_growth_after_reject: bool = True
+    growth_freeze_steps: int = 1
 
     def __post_init__(self) -> None:
         if not (self.safety > 0.0):
@@ -93,4 +109,11 @@ class ControllerConfig:
                 "0 < reject_shrink_min <= reject_shrink_max < 1, got "
                 f"reject_shrink_min={self.reject_shrink_min!r}, "
                 f"reject_shrink_max={self.reject_shrink_max!r}"
+            )
+        if not (
+            isinstance(self.growth_freeze_steps, int) and self.growth_freeze_steps >= 1
+        ):
+            raise ValueError(
+                "growth_freeze_steps must be an int >= 1, got "
+                f"{self.growth_freeze_steps!r}"
             )

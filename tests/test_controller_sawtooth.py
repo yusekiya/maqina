@@ -48,13 +48,20 @@ from _controller_metrics import (
 # 閾値 (umbrella #148 の解析) から選定。dt_min / t1 は臨界帯を捉えつつ dt_min
 # プラトーを短く保って高速化するための値 (数百 step で完了)。
 #
-# **issue #149 以後の重要事項**: 本ファイルは *旧挙動 (固定 0.5 半減)* を
-# baseline として固定し続ける characterization。issue #149 で reject 縮小の
-# 既定が予測式 + クランプ ``[0.2, 0.9]`` に変わったため、各シナリオに明示的に
-# ``reject_shrink_min=reject_shrink_max=0.5`` を渡して旧挙動を再現する。新既定
-# での改善 (ノコギリ波解消) は ``test_controller_reject_clamp.py`` が検証する。
+# **issue #149 / #150 以後の重要事項**: 本ファイルは *umbrella #148 着手前の
+# 旧挙動* (固定 0.5 半減 + 成長凍結なし) を baseline として固定し続ける
+# characterization。issue #149 で reject 縮小の既定が予測式 + クランプ
+# ``[0.2, 0.9]`` に、issue #150 で成長凍結の既定が ``True`` に変わったため、各
+# シナリオに明示的に ``reject_shrink_min=reject_shrink_max=0.5`` と
+# ``freeze_growth_after_reject=False`` を渡して旧挙動を再現する。新既定での改善
+# (ノコギリ波解消) は ``test_controller_reject_clamp.py`` (#149) /
+# ``test_controller_growth_freeze.py`` (#150) が検証する。
 _T_STAR = 5.0
-_LEGACY_REJECT = dict(reject_shrink_min=0.5, reject_shrink_max=0.5)
+_LEGACY_REJECT = dict(
+    reject_shrink_min=0.5,
+    reject_shrink_max=0.5,
+    freeze_growth_after_reject=False,
+)
 _CRITICAL: dict[str, dict] = {
     "richardson": dict(
         k=40.0,

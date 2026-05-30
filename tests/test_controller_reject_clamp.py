@@ -86,12 +86,26 @@ _ALL_METHODS = ["m2", "richardson", "chebyshev"]
 
 
 def _old_new(method: str):
-    """同一 ``C₄`` で旧 (固定 0.5) と新 (default クランプ) の trace を返す."""
+    """同一 ``C₄`` で旧 (固定 0.5) と新 (default クランプ) の trace を返す.
+
+    本ファイルは #149 の reject-clamp 効果を検証するので、#150 で導入された
+    成長凍結 (harness default ``freeze_growth_after_reject=True``) は両者で無効化
+    して変数を 1 つに絞る (reject 縮小のみを比較対象にする)。
+    """
     cfg = dict(_SCENARIO[method])
     k = cfg.pop("k")
     c4 = exp_c4(k=k, t_star=_T_STAR)
-    old = run_synthetic(method, c4, reject_shrink_min=0.5, reject_shrink_max=0.5, **cfg)
-    new = run_synthetic(method, c4, **cfg)  # default [0.2, 0.9]
+    old = run_synthetic(
+        method,
+        c4,
+        reject_shrink_min=0.5,
+        reject_shrink_max=0.5,
+        freeze_growth_after_reject=False,
+        **cfg,
+    )
+    new = run_synthetic(  # default [0.2, 0.9] クランプ, 成長凍結は無効で分離
+        method, c4, freeze_growth_after_reject=False, **cfg
+    )
     return old, new
 
 

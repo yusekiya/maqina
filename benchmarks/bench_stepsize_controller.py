@@ -140,6 +140,8 @@ def _drive(
     max_rejects: int,
     reject_shrink_min: float,
     reject_shrink_max: float,
+    freeze_growth_after_reject: bool,
+    growth_freeze_steps: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """実 driver を 1 回駆動して ``(psi, t_hist, dt_hist, n_rejects)`` を返す."""
     if method == "richardson":
@@ -158,6 +160,8 @@ def _drive(
             max_rejects=max_rejects,
             reject_shrink_min=reject_shrink_min,
             reject_shrink_max=reject_shrink_max,
+            freeze_growth_after_reject=freeze_growth_after_reject,
+            growth_freeze_steps=growth_freeze_steps,
         )
         return out[0], out[1], out[2], int(out[3])
     if method == "chebyshev":
@@ -178,6 +182,8 @@ def _drive(
             max_rejects=max_rejects,
             reject_shrink_min=reject_shrink_min,
             reject_shrink_max=reject_shrink_max,
+            freeze_growth_after_reject=freeze_growth_after_reject,
+            growth_freeze_steps=growth_freeze_steps,
         )
         return out[0], out[1], out[2], int(out[3])
     raise ValueError(f"method must be one of {_VALID_METHODS}, got {method!r}")
@@ -230,6 +236,8 @@ def run_scenario(
     max_rejects: int = 200,
     reject_shrink_min: float = 0.2,
     reject_shrink_max: float = 0.9,
+    freeze_growth_after_reject: bool = True,
+    growth_freeze_steps: int = 1,
     window_frac: float = 0.15,
     seed: int = 20260530,
     ref_psi: np.ndarray | None = None,
@@ -258,6 +266,8 @@ def run_scenario(
         max_rejects=max_rejects,
         reject_shrink_min=reject_shrink_min,
         reject_shrink_max=reject_shrink_max,
+        freeze_growth_after_reject=freeze_growth_after_reject,
+        growth_freeze_steps=growth_freeze_steps,
     )
 
     if ref_psi is None:
@@ -502,12 +512,24 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
     if args.compare:
-        # #149: reject 縮小の old (固定 0.5 半減) vs new (予測式 + クランプ
-        # [0.2, 0.9] = driver 既定) を同一 schedule で比較し, 受理率↑ /
+        # #150: reject 後の dt 成長凍結の old (freeze=False = #149 完了時点) vs
+        # new (freeze=True = driver 既定) を同一 schedule で比較し, 受理率↑ /
         # n_rejects↓ / 終端精度非劣化を end-to-end で実測する (層 B)。
-        # (#150 / #151 は freeze / pi_beta の old/new をここに渡していく。)
-        cfg_old = {"reject_shrink_min": 0.5, "reject_shrink_max": 0.5}
-        cfg_new = {"reject_shrink_min": 0.2, "reject_shrink_max": 0.9}
+        # 成長凍結は #149 既定クランプ [0.2, 0.9] 下では発火しない (予測式 reject が
+        # 再拡大を自己抑制するため) ので, 効果を可視化するため reject 縮小を過剰に
+        # する legacy 0.5/0.5 regime で比較する (= 成長凍結が断つ limit cycle が
+        # 顕在化する設定)。#149 単体の比較は git 履歴 PR #154 を参照。
+        # (#151 は pi_beta の old/new をここに渡していく。)
+        cfg_old = {
+            "reject_shrink_min": 0.5,
+            "reject_shrink_max": 0.5,
+            "freeze_growth_after_reject": False,
+        }
+        cfg_new = {
+            "reject_shrink_min": 0.5,
+            "reject_shrink_max": 0.5,
+            "freeze_growth_after_reject": True,
+        }
         for method in args.methods:
             if method == "chebyshev" and not _rust_available():
                 print(f"[skip] {method}: Rust 拡張が未ビルド")

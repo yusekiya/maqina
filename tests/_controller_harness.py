@@ -321,6 +321,8 @@ def run_synthetic(
     max_rejects: int = 50,
     reject_shrink_min: float = 0.2,
     reject_shrink_max: float = 0.9,
+    freeze_growth_after_reject: bool = True,
+    growth_freeze_steps: int = 1,
     m: int = 24,
 ) -> ControllerTrace:
     """合成誤差 ``err = c4(t)·dt^{p+1}`` で実 adaptive driver を駆動し trace を返す.
@@ -334,13 +336,17 @@ def run_synthetic(
     c4
         ``C₄(t)`` を返す callable (例 :func:`exp_c4`)。
     t0, t1, tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects,
-    reject_shrink_min, reject_shrink_max, m
+    reject_shrink_min, reject_shrink_max, freeze_growth_after_reject,
+    growth_freeze_steps, m
         driver にそのまま渡す PI controller パラメータ。既定は production facade
         相当 (``tol_step=1e-8`` / ``safety=0.9`` / ``growth_max=4.0`` /
         ``max_rejects=50`` / ``reject_shrink_min=0.2`` /
-        ``reject_shrink_max=0.9``)。``dt_max=None`` のとき driver 既定 ``10·dt0``。
-        旧挙動 (固定 0.5 半減) を再現したいときは
+        ``reject_shrink_max=0.9`` / ``freeze_growth_after_reject=True`` /
+        ``growth_freeze_steps=1``)。``dt_max=None`` のとき driver 既定 ``10·dt0``。
+        reject 縮小の旧挙動 (固定 0.5 半減) を再現したいときは
         ``reject_shrink_min=reject_shrink_max=0.5`` を渡す (issue #149)。
+        reject 後の成長凍結 (issue #150) を無効化したいときは
+        ``freeze_growth_after_reject=False`` を渡す (= #149 完了時点の挙動)。
 
     Returns
     -------
@@ -385,6 +391,8 @@ def run_synthetic(
                 max_rejects=max_rejects,
                 reject_shrink_min=reject_shrink_min,
                 reject_shrink_max=reject_shrink_max,
+                freeze_growth_after_reject=freeze_growth_after_reject,
+                growth_freeze_steps=growth_freeze_steps,
             )
     elif method == "richardson":
         patch = {
@@ -410,6 +418,8 @@ def run_synthetic(
                 max_rejects=max_rejects,
                 reject_shrink_min=reject_shrink_min,
                 reject_shrink_max=reject_shrink_max,
+                freeze_growth_after_reject=freeze_growth_after_reject,
+                growth_freeze_steps=growth_freeze_steps,
             )
         t_hist, dt_hist, n_rej = out[1], out[2], out[3]
     else:  # method == "chebyshev" (上の _METHODS チェックで保証済)
@@ -437,6 +447,8 @@ def run_synthetic(
                 max_rejects=max_rejects,
                 reject_shrink_min=reject_shrink_min,
                 reject_shrink_max=reject_shrink_max,
+                freeze_growth_after_reject=freeze_growth_after_reject,
+                growth_freeze_steps=growth_freeze_steps,
             )
         t_hist, dt_hist, n_rej = out[1], out[2], out[3]
 
