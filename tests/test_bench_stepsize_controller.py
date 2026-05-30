@@ -103,12 +103,26 @@ def test_reject_clamp_improves_end_to_end_richardson():
     を比較し, ``new.n_rejects <= old.n_rejects`` (reject 非増加) かつ受理率非劣化,
     終端精度が同一 tight 基準に対し非劣化 (両者 ``< 1e-3``) を assert する。
     絶対閾値でなく同一実行内差分 + マージン (cv_ising 流の before/after)。
+
+    issue #150 で成長凍結 (``freeze_growth_after_reject``) の既定が ``True`` に
+    なり、これも over-shrink ノコギリ波を緩和するため、本テスト (#149 の
+    reject-clamp 効果の分離) では両 config で ``freeze=False`` を明示し変数を
+    reject 縮小のみに絞る。成長凍結単体の end-to-end 効果は
+    ``benchmarks/bench_stepsize_controller.py --compare`` (層 B) が測る。
     """
     diff = bsc.compare_configs(
         "richardson",
         4,
-        {"reject_shrink_min": 0.5, "reject_shrink_max": 0.5},  # 旧挙動
-        {"reject_shrink_min": 0.2, "reject_shrink_max": 0.9},  # 新既定
+        {  # 旧挙動 (#149 着手前)
+            "reject_shrink_min": 0.5,
+            "reject_shrink_max": 0.5,
+            "freeze_growth_after_reject": False,
+        },
+        {  # #149 新既定クランプ (成長凍結は分離のため off)
+            "reject_shrink_min": 0.2,
+            "reject_shrink_max": 0.9,
+            "freeze_growth_after_reject": False,
+        },
         T=4.0,
         beta=16.0,
         tol_step=1e-8,

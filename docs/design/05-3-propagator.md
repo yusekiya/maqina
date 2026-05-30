@@ -605,11 +605,14 @@ growth_max   = 4.0           # 1 step での dt 拡大率上限 (accept のみ)
 max_rejects  = 50            # 同一 step での連続 reject 上限 (超過で RuntimeError)
 reject_shrink_min = 0.2      # reject factor の下限 (= fac_min, issue #149)
 reject_shrink_max = 0.9      # reject factor の上限 (= fac_reject_max < 1, issue #149)
+freeze_growth_after_reject = True  # reject 直後の dt 拡大を凍結 (issue #150)
+growth_freeze_steps = 1      # 凍結解除までの連続 accept 数 (issue #150)
 ```
 
-> **`ControllerConfig` (issue #149 / umbrella #148 方針 B)**: 上記 controller
+> **`ControllerConfig` (issue #149 / #150 / umbrella #148 方針 B)**: 上記 controller
 > knob (`safety` / `growth_max` / `max_rejects` / `dt_min` /
-> `reject_shrink_min` / `reject_shrink_max`) は `maqina.ControllerConfig`
+> `reject_shrink_min` / `reject_shrink_max` / `freeze_growth_after_reject` /
+> `growth_freeze_steps`) は `maqina.ControllerConfig`
 > (frozen dataclass) に集約され、facade
 > (`QuantumAnnealer.run(controller=...)` / `create_simulator(controller=...)`
 > / `AnnealingSimulator(controller=...)`) から指定できる。`atol` / `dt_init`
@@ -634,6 +637,7 @@ reject_shrink_max = 0.9      # reject factor の上限 (= fac_reject_max < 1, is
 ループ本体 (擬似コード):
 
 ```python
+freeze_remaining = 0                           # issue #150: 残り凍結 accept 数
 while t < t1:
     dt_try = min(dt, t1 - t, next_save - t)   # 終端 / 観測時刻にクランプ
     psi_new, err = step_with_estimate(psi, dt_try, ...)
@@ -641,11 +645,17 @@ while t < t1:
     if accept:
         psi = psi_new
         t += dt_try
+        # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
+        if freeze_growth_after_reject and freeze_remaining > 0:
+            eff_growth_max = 1.0
+            freeze_remaining -= 1
+        else:
+            eff_growth_max = growth_max
         if err <= 1e-30:                       # 0 近傍ガード
-            dt_next = dt_try * growth_max
+            dt_next = dt_try * eff_growth_max
         else:
             dt_next = dt_try * safety * (tol_step / err) ** (1/(p+1))
-        dt_next = min(dt_next, dt_try * growth_max, dt_max)
+        dt_next = min(dt_next, dt_try * eff_growth_max, dt_max)
         dt_next = max(dt_next, dt_min)
         dt = dt_next
         n_consecutive_rejects = 0
@@ -659,6 +669,7 @@ while t < t1:
         factor = safety * (tol_step / err_for_pi) ** (1/(p+1))
         factor = min(max(factor, reject_shrink_min), reject_shrink_max)  # [0.2, 0.9]
         dt = max(dt_try * factor, dt_min)
+        freeze_remaining = growth_freeze_steps  # issue #150: 凍結を再武装
 ```
 
 > **reject 予測式 + クランプの動機 (issue #149)**: 旧実装は reject 時に
@@ -675,6 +686,23 @@ while t < t1:
 > (固定半減) を厳密再現できる (回帰アンカー)。これら controller knob は
 > ``ControllerConfig`` (umbrella #148 方針 B) に集約され facade
 > (``QuantumAnnealer.run(controller=...)`` 等) から指定できる。
+
+> **reject 後の dt 成長凍結 (issue #150, Gustafsson ヒステリシス)**: reject 直後の
+> accept では ``eff_growth_max = 1.0`` として **dt 拡大のみ禁止** (縮小は許可) し、
+> ``growth_freeze_steps`` 回 (既定 1 = DOPRI/Hairer-Wanner 標準) 連続 accept したら
+> 凍結を解除する (reject のたびに再武装)。狙いは「reject → 過剰縮小 → 楽々 accept
+> → I 制御が大きく再拡大 → 再オーバーシュート」という limit cycle の **再拡大側**
+> を断つこと。臨界領域を抜けるまで dt を不用意に伸ばさないことでノコギリ波を
+> 平坦化する。``n_consecutive_rejects`` (RuntimeError 用の連続 reject カウント) とは
+> 別概念で、本機構は「直前 step が reject だったか」だけを見る。
+> なお #149 の予測式 reject (既定 ``[0.2, 0.9]``) は reject 縮小量を「次 accept が
+> ``err ≈ tol`` に着地し PI 成長率 ≈ 1.0」になるよう自己整合的に選ぶため、**既定
+> クランプ下では over-shrink 起因の再拡大がそもそも起きず成長凍結は発火しない**
+> (合成ハーネスで ``freeze`` on/off がビット一致)。成長凍結は user が
+> ``reject_shrink`` を攻めた値にしたり、誤差が 1 step で ``tol`` を桁違いに超えて
+> 縮小 factor が ``reject_shrink_min`` 床にクランプ → 過剰縮小する場面での **二重の
+> 安全網** として効く。既定有効 (破壊的変更)。``freeze_growth_after_reject=False``
+> で #149 完了時点の挙動とビット一致する (回帰アンカー)。
 
 Reject 時に schedule node `t + c_i · dt` は新しい dt で再評価する
 (dt 依存ノードのため)。`save_tlist` が指定された場合は次の観測時刻

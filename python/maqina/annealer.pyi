@@ -280,13 +280,17 @@ class QuantumAnnealer:
             (``cfm4_adaptive_richardson_krylov`` /
             ``cfm4_adaptive_richardson_chebyshev``) でのみ参照され, ``safety`` /
             ``growth_max`` / ``max_rejects`` / ``dt_min`` / ``reject_shrink_min``
-            / ``reject_shrink_max`` を driver に渡す. 固定 dt 経路では無視される
+            / ``reject_shrink_max`` / ``freeze_growth_after_reject`` /
+            ``growth_freeze_steps`` を driver に渡す. 固定 dt 経路では無視される
             (``atol`` 等と同じ寛容な扱い; strict に弾くのは
             ``AnnealingSimulator`` のみ). reject 時の dt 縮小が固定 0.5 倍から
             予測式 + クランプ ``[reject_shrink_min, reject_shrink_max]`` に
-            変わるため, 既定挙動が従来と異なる (破壊的変更). 旧挙動は
-            ``ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)``
-            で再現できる.
+            変わり (issue #149), さらに reject 直後の accept で dt 拡大を凍結する
+            (issue #150, Gustafsson ヒステリシス, 既定有効) ため, 既定挙動が
+            従来と異なる (破壊的変更). #149 のみ適用した挙動は
+            ``ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)``,
+            成長凍結のみ無効化は
+            ``ControllerConfig(freeze_growth_after_reject=False)`` で再現できる.
         observables
             Phase 5 (issue #47) で有効化. ``{name: Observable}`` dict もしくは
             ``None``. ``save_tlist`` 非 None かつ非空 dict のとき, 各

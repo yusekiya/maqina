@@ -124,11 +124,16 @@ class AnnealingSimulator:
         adaptive 経路専用. PI controller の数値挙動 knob を集約した
         :class:`~maqina.ControllerConfig` (issue #149). ``None`` (default)
         で全 default. ``safety`` / ``growth_max`` / ``max_rejects`` /
-        ``dt_min`` / ``reject_shrink_min`` / ``reject_shrink_max`` を driver
+        ``dt_min`` / ``reject_shrink_min`` / ``reject_shrink_max`` /
+        ``freeze_growth_after_reject`` / ``growth_freeze_steps`` を driver
         に渡す. 固定 dt method で指定すると ``ValueError`` (``QuantumAnnealer.run``
         と違い Simulator は strict). reject 時の dt 縮小が固定 0.5 倍から
-        予測式 + クランプに変わるため既定挙動が変わる (破壊的変更). 旧挙動は
-        ``ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)``.
+        予測式 + クランプに変わり (issue #149), さらに reject 直後の accept で
+        dt 拡大を凍結する (issue #150, Gustafsson ヒステリシス, 既定有効) ため
+        既定挙動が変わる (破壊的変更). #149 のみ適用は
+        ``ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)``,
+        成長凍結のみ無効化は
+        ``ControllerConfig(freeze_growth_after_reject=False)``.
 
     Raises
     ------

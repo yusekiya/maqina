@@ -2055,6 +2055,8 @@ def evolve_schedule_adaptive_m2(
     max_rejects: int = 50,
     reject_shrink_min: float = 0.2,
     reject_shrink_max: float = 0.9,
+    freeze_growth_after_reject: bool = True,
+    growth_freeze_steps: int = 1,
     save_tlist: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """CFM4:2 + M2 embedded 推定子による adaptive dt ドライバ (Phase 4 C3).
@@ -2111,6 +2113,14 @@ def evolve_schedule_adaptive_m2(
         とする. ``reject_shrink_min = reject_shrink_max = 0.5`` で旧挙動
         (固定半減) を厳密再現. M2 経路は誤差源分離がないため ``err`` を
         そのまま PI 駆動量に使う (p=2).
+    freeze_growth_after_reject, growth_freeze_steps
+        reject 後の dt 成長凍結 (issue #150, Gustafsson ヒステリシス). ``True``
+        (既定) のとき reject 直後から ``growth_freeze_steps`` 回 (既定 ``1``)
+        連続 accept するまで, accept 経路の dt 拡大を ``eff_growth_max = 1.0``
+        に凍結する (拡大のみ禁止, 縮小は許可). 過剰縮小 → 楽々 accept → 即
+        dt 再上昇 → 再 reject のノコギリ波の「再上昇」側を断つ. ``False`` で
+        #149 のみ適用した挙動 (reject 直後でも ``growth_max`` まで拡大可) と
+        ビット一致. ``growth_freeze_steps >= 1``.
     save_tlist
         Phase 5 拡張対象外 (issue #47 では adaptive Richardson のみ有効化).
         adaptive M2 driver は ``annealer.py`` の facade からは呼ばれない
@@ -2154,6 +2164,10 @@ def evolve_schedule_adaptive_m2(
         raise ValueError(f"growth_max must be > 1, got {growth_max!r}")
     if max_rejects < 1:
         raise ValueError(f"max_rejects must be >= 1, got {max_rejects!r}")
+    if not (isinstance(growth_freeze_steps, int) and growth_freeze_steps >= 1):
+        raise ValueError(
+            f"growth_freeze_steps must be an int >= 1, got {growth_freeze_steps!r}"
+        )
 
     dt_max_eff = float(dt_max) if dt_max is not None else 10.0 * float(dt0)
     if not (dt_max_eff >= dt0):
@@ -2180,6 +2194,10 @@ def evolve_schedule_adaptive_m2(
     dt = float(dt0)
     n_rejects = 0
     n_consecutive_rejects = 0
+    # issue #150: reject 後の成長凍結 (Gustafsson ヒステリシス) の残り凍結
+    # accept 回数. reject で ``growth_freeze_steps`` に再武装し, 凍結中の
+    # accept は dt 拡大のみ禁止 (eff_growth_max=1.0). 0 で非凍結.
+    freeze_remaining = 0
     t_hist: list[float] = [t]
     dt_hist: list[float] = []
     while t < t_end:
@@ -2216,12 +2234,18 @@ def evolve_schedule_adaptive_m2(
             t_hist.append(t)
             dt_hist.append(dt_try)
             n_consecutive_rejects = 0
+            # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
+            if freeze_growth_after_reject and freeze_remaining > 0:
+                eff_growth_max = 1.0
+                freeze_remaining -= 1
+            else:
+                eff_growth_max = growth_max
             dt = _pi_dt_next(
                 dt_try,
                 err,
                 tol_step=tol_step,
                 safety=safety,
-                growth_max=growth_max,
+                growth_max=eff_growth_max,
                 dt_max=dt_max_eff,
                 dt_min=dt_min,
                 p=2,
@@ -2237,6 +2261,10 @@ def evolve_schedule_adaptive_m2(
                 )
             # issue #149: reject 時も accept と同じ予測式 + reject 用クランプ.
             # M2 経路は誤差源分離なし (``err`` をそのまま PI 駆動量に使う, p=2).
+            # issue #150: reject のたびに成長凍結を再武装 (連続 reject でも
+            # 各回でカウンタを戻す). freeze_growth_after_reject=False のときは
+            # accept 経路で読まれないため no-op.
+            freeze_remaining = growth_freeze_steps
             dt = _pi_dt_reject(
                 dt_try,
                 err,
@@ -2274,6 +2302,8 @@ def evolve_schedule_adaptive_richardson(
     max_rejects: int = 50,
     reject_shrink_min: float = 0.2,
     reject_shrink_max: float = 0.9,
+    freeze_growth_after_reject: bool = True,
+    growth_freeze_steps: int = 1,
     richardson_extrapolate: bool = False,
     observables: "dict[str, Observable] | None" = None,
     save_tlist: np.ndarray | None = None,
@@ -2322,6 +2352,13 @@ def evolve_schedule_adaptive_richardson(
         accept 経路と整合し ``err_magnus = max(0, err - err_{lanczos/cheb}_total)``
         (p=4). ``reject_shrink_min = reject_shrink_max = 0.5`` で旧挙動
         (固定半減) を厳密再現.
+    freeze_growth_after_reject, growth_freeze_steps
+        reject 後の dt 成長凍結 (issue #150, Gustafsson ヒステリシス). ``True``
+        (既定) のとき reject 直後から ``growth_freeze_steps`` 回 (既定 ``1``)
+        連続 accept するまで, accept 経路の dt 拡大を ``eff_growth_max = 1.0``
+        に凍結する (拡大のみ禁止, 縮小は許可). 過剰縮小 → 楽々 accept → 即
+        dt 再上昇 → 再 reject のノコギリ波の「再上昇」側を断つ. ``False`` で
+        #149 のみ適用した挙動とビット一致. ``growth_freeze_steps >= 1``.
     richardson_extrapolate
         ``True`` で外挿後の ``ψ_acc`` を accept 時の状態とする
         (実効 6 次精度; 既定 ``False``).
@@ -2398,6 +2435,10 @@ def evolve_schedule_adaptive_richardson(
         raise ValueError(f"growth_max must be > 1, got {growth_max!r}")
     if max_rejects < 1:
         raise ValueError(f"max_rejects must be >= 1, got {max_rejects!r}")
+    if not (isinstance(growth_freeze_steps, int) and growth_freeze_steps >= 1):
+        raise ValueError(
+            f"growth_freeze_steps must be an int >= 1, got {growth_freeze_steps!r}"
+        )
 
     dt_max_eff = float(dt_max) if dt_max is not None else 10.0 * float(dt0)
     if not (dt_max_eff >= dt0):
@@ -2431,6 +2472,10 @@ def evolve_schedule_adaptive_richardson(
     dt = float(dt0)
     n_rejects = 0
     n_consecutive_rejects = 0
+    # issue #150: reject 後の成長凍結 (Gustafsson ヒステリシス) の残り凍結
+    # accept 回数. reject で ``growth_freeze_steps`` に再武装し, 凍結中の
+    # accept は dt 拡大のみ禁止 (eff_growth_max=1.0). 0 で非凍結.
+    freeze_remaining = 0
     t_hist: list[float] = [t]
     dt_hist: list[float] = []
     # C3 (issue #52 A): accept された step の m_eff_sum を積み上げる.
@@ -2571,12 +2616,18 @@ def evolve_schedule_adaptive_richardson(
             # 部分は dt 縮小では改善しないので除外して safe.
             # err_magnus = 0 の場合は最大成長 (Krylov 充分 + Magnus 誤差なし).
             err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+            # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
+            if freeze_growth_after_reject and freeze_remaining > 0:
+                eff_growth_max = 1.0
+                freeze_remaining -= 1
+            else:
+                eff_growth_max = growth_max
             dt = _pi_dt_next(
                 dt_try,
                 err_for_pi,
                 tol_step=tol_step,
                 safety=safety,
-                growth_max=growth_max,
+                growth_max=eff_growth_max,
                 dt_max=dt_max_eff,
                 dt_min=dt_min,
                 p=4,
@@ -2598,6 +2649,10 @@ def evolve_schedule_adaptive_richardson(
             # フォールバック (reject では err_magnus > tol_step なので通常
             # 発火しないが accept 経路と式を揃える).
             err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+            # issue #150: reject のたびに成長凍結を再武装 (連続 reject でも
+            # 各回でカウンタを戻す). freeze_growth_after_reject=False のときは
+            # accept 経路で読まれないため no-op.
+            freeze_remaining = growth_freeze_steps
             dt = _pi_dt_reject(
                 dt_try,
                 err_for_pi,
@@ -2731,6 +2786,8 @@ def evolve_schedule_adaptive_richardson_chebyshev(
     max_rejects: int = 50,
     reject_shrink_min: float = 0.2,
     reject_shrink_max: float = 0.9,
+    freeze_growth_after_reject: bool = True,
+    growth_freeze_steps: int = 1,
     richardson_extrapolate: bool = False,
     observables: "dict[str, Observable] | None" = None,
     save_tlist: np.ndarray | None = None,
@@ -2780,7 +2837,8 @@ def evolve_schedule_adaptive_richardson_chebyshev(
         新パラメータは導入せず本 driver 内では ``chebyshev_tol`` 命名のみ
         使う. 既定 ``1e-12``.
     tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects,
-    reject_shrink_min, reject_shrink_max,
+    reject_shrink_min, reject_shrink_max, freeze_growth_after_reject,
+    growth_freeze_steps,
     richardson_extrapolate, observables, save_tlist, store_states
         :func:`evolve_schedule_adaptive_richardson` と同じ.
 
@@ -2830,6 +2888,10 @@ def evolve_schedule_adaptive_richardson_chebyshev(
         raise ValueError(f"growth_max must be > 1, got {growth_max!r}")
     if max_rejects < 1:
         raise ValueError(f"max_rejects must be >= 1, got {max_rejects!r}")
+    if not (isinstance(growth_freeze_steps, int) and growth_freeze_steps >= 1):
+        raise ValueError(
+            f"growth_freeze_steps must be an int >= 1, got {growth_freeze_steps!r}"
+        )
 
     dt_max_eff = float(dt_max) if dt_max is not None else 10.0 * float(dt0)
     if not (dt_max_eff >= dt0):
@@ -2875,6 +2937,10 @@ def evolve_schedule_adaptive_richardson_chebyshev(
     dt = float(dt0)
     n_rejects = 0
     n_consecutive_rejects = 0
+    # issue #150: reject 後の成長凍結 (Gustafsson ヒステリシス) の残り凍結
+    # accept 回数. reject で ``growth_freeze_steps`` に再武装し, 凍結中の
+    # accept は dt 拡大のみ禁止 (eff_growth_max=1.0). 0 で非凍結.
+    freeze_remaining = 0
     t_hist: list[float] = [t]
     dt_hist: list[float] = []
     k_used_hist: list[int] = []
@@ -2978,12 +3044,18 @@ def evolve_schedule_adaptive_richardson_chebyshev(
                     ):
                         next_save_idx += 1
             err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+            # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
+            if freeze_growth_after_reject and freeze_remaining > 0:
+                eff_growth_max = 1.0
+                freeze_remaining -= 1
+            else:
+                eff_growth_max = growth_max
             dt = _pi_dt_next(
                 dt_try,
                 err_for_pi,
                 tol_step=tol_step,
                 safety=safety,
-                growth_max=growth_max,
+                growth_max=eff_growth_max,
                 dt_max=dt_max_eff,
                 dt_min=dt_min,
                 p=4,
@@ -3004,6 +3076,10 @@ def evolve_schedule_adaptive_richardson_chebyshev(
             # err_magnus が 0 近傍のときは accept 経路と同じ tol_step·1e-3
             # フォールバック.
             err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+            # issue #150: reject のたびに成長凍結を再武装 (連続 reject でも
+            # 各回でカウンタを戻す). freeze_growth_after_reject=False のときは
+            # accept 経路で読まれないため no-op.
+            freeze_remaining = growth_freeze_steps
             dt = _pi_dt_reject(
                 dt_try,
                 err_for_pi,

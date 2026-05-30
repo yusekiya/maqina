@@ -29,6 +29,20 @@
   Chebyshev は `err_magnus = max(0, err - err_propagator_total)`、M2 は `err`
   を駆動量に使う。
 
+- **reject 後の dt 成長凍結 (Gustafsson ヒステリシス)** (issue #150,
+  umbrella #148): 3 つの adaptive ドライバの accept 経路で、reject 直後から
+  `growth_freeze_steps` 回 (既定 1 = DOPRI/Hairer-Wanner 標準) 連続 accept する
+  まで dt 拡大を `eff_growth_max = 1.0` に凍結する (拡大のみ禁止、縮小は許可)。
+  「reject → 過剰縮小 → 楽々 accept → I 制御が大きく再拡大 → 再オーバーシュート」
+  という limit cycle の **再拡大側** を断つ。`ControllerConfig` に
+  `freeze_growth_after_reject` (既定 `True`) / `growth_freeze_steps` (既定 1) を
+  追加。既定有効のため破壊的変更。#149 完了時点の挙動は
+  `ControllerConfig(freeze_growth_after_reject=False)` でビット一致再現可能
+  (回帰アンカー)。なお #149 の予測式 reject は既定クランプ `[0.2, 0.9]` 下では
+  reject 直後の accept を PI 成長率 ≈ 1.0 に着地させるため成長凍結は発火せず、
+  本機構は user が `reject_shrink` を攻めた値にした場合や縮小 factor が
+  `reject_shrink_min` 床にクランプ → 過剰縮小する場面での二重の安全網として効く。
+
 ### Added
 
 - **`ControllerConfig` (frozen dataclass) 新設 + facade 配線** (issue #149,
@@ -42,9 +56,13 @@
   / `dt_max` / `m_max` は精度要求・auto-resolve ロジックを持つため
   `ControllerConfig` には入れず既存 kwarg 維持。固定 dt 経路への明示
   `controller` は `AnnealingSimulator` のみ `ValueError` (run は寛容)。
-  後続 #150 / #151 はこの dataclass に field を追加していく。
+  後続 #151 (真の PI 化) はこの dataclass に field を追加していく。
   `tests/test_controller_reject_clamp.py` に層 A 合成比較 / 回帰アンカー /
   入力検証 / facade 配線テストを追加。
+  issue #150 で `freeze_growth_after_reject` / `growth_freeze_steps` の 2 field を
+  追加 (上記 Breaking 参照)。`tests/test_controller_growth_freeze.py` に層 A
+  (over-shrink ノコギリ波緩和) / 非劣化 (既定クランプ) / 解除基準 (凍結ステップ数
+  単調性) / 回帰アンカー / 入力検証 / facade 全 8 field 配線テストを追加。
 
 - **`Schedule.reverse(..., pause_duration=0.0)`** (PR #147): `s_target` に到達
   後一定時間 `s = s_target` を保ってから `s_init` に戻る reverse + pause
