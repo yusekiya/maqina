@@ -49,9 +49,12 @@
 #   (別サーバー + 0.12.0 が default で取得済) には適用しない.
 #
 # 所要時間の目安 (0.8.0 / 0.12.0 実測; 0.14.0 controller で増減しうる):
-#   stiff krylov adapt atol=1e-7 単体で ~14h, stiff cfm4 dt=0.2 で ~3.4h 等,
-#   全体で数日規模. 中断耐性あり (cell 完了ごとに CSV/state を atomic 保存,
-#   同じ引数で再起動すれば残り cell から再開).
+#   Phase 1 (maqina, 順次): stiff krylov adapt atol=1e-7 単体で ~14h, stiff cfm4
+#     dt=0.2 で ~3.4h 等, 全体で数日規模.
+#   Phase 2 (QuTiP, 2 scenario 並列): max(non-stiff ~17h, stiff ~48h) ≈ 48h
+#     (直列なら ~65h を並列で短縮).
+#   中断耐性あり (cell 完了ごとに CSV/state を atomic 保存, 同じ引数で再起動すれば
+#   残り cell から再開. Phase 2 並列 QuTiP も skip-existing で再開可).
 #
 # 起動 (repo root から; 別 shell から監視・停止できるよう nohup + setsid):
 #   nohup bash scripts/run_bench_readme_0_14_0.sh \
@@ -60,7 +63,9 @@
 #   disown
 #
 # 進捗確認:
-#   tail -f run_bench_readme_0_14_0.log
+#   tail -f run_bench_readme_0_14_0.log          # Phase 1 (maqina) + Phase 2 起動状況
+#   tail -f run_bench_qutip_non-stiff.log        # Phase 2 QuTiP non-stiff (並列)
+#   tail -f run_bench_qutip_stiff.log            # Phase 2 QuTiP stiff (並列)
 #
 # 停止 (子プロセスごと):
 #   PID=$(cat run_bench_readme_0_14_0.pid)
@@ -205,8 +210,10 @@ run_method() {
 # ----------------------------------------------------------------------------
 # 内部ヘルパ: QuTiP cell sweep を 1 scenario 起動する (両 scenario 再計算 + 状態保存).
 #   $1 = scenario
-# QuTiP sparse matvec は BLAS をほぼ使わないので --blas-threads は指定しない
-# (単一プロセス serial 実行のため競合もない).
+# 2 scenario を並列実行する前提なので --blas-threads 1 を渡し, numpy bundled
+# OpenBLAS が 2 プロセス分 104-thread ずつ spin-wait して競合するのを防ぐ
+# (QuTiP sesolve は sparse matvec で BLAS 非依存なので thread 数は wall に影響しない;
+# bench_readme_figure.py --blas-threads docstring の strategy B 参照).
 # ----------------------------------------------------------------------------
 run_qutip() {
     local scenario=$1
@@ -232,6 +239,7 @@ run_qutip() {
     uv run python -u -m benchmarks.bench_readme_figure \
         --solver qutip \
         --qutip-tols "$QUTIP_TOLS" \
+        --blas-threads 1 \
         --problem-file   "$problem_npz" \
         --reference-file "$reference_npz" \
         --output-dir     "$QUTIP_OUTPUT_DIR" \
@@ -241,13 +249,11 @@ run_qutip() {
 }
 
 # ============================================================================
-# scenario 順次実行 (maqina multi-thread が DRAM 帯域を使い切るため並列化しない).
-#   non-stiff: adaptive, chebyshev, qutip         (QuTiP は状態保存目的で再計算)
-#   stiff:     adaptive, chebyshev, cfm4, qutip   (QuTiP は新 BDF 参照で再計算)
-# QuTiP は両 scenario とも再計算し --save-states-dir で ψ を保存する. これにより
-# 今後 (問題 npz を変えない限り) 参照解が差し替わっても保存済 ψ から infidelity を
-# 再計算でき, QuTiP cell は version 横断で再利用可能になる (results/qutip/ の旧 cell は
-# 状態未保存だったため再現に再実行が必要だった反省を踏まえた運用; #158 再発防止).
+# Phase 1: maqina cells を scenario 順次実行.
+#   maqina の multi-thread (rayon matvec + 並列 BLAS) が DRAM 帯域を使い切るため
+#   scenario 間 / method 間は並列化せず, 1 つずつ単独実行して wall_sec を正確に保つ.
+#   non-stiff: adaptive, chebyshev
+#   stiff:     adaptive, chebyshev, cfm4
 # ============================================================================
 for scenario in "${scenarios[@]}"; do
     run_method "$scenario" adaptive
@@ -255,8 +261,47 @@ for scenario in "${scenarios[@]}"; do
     if [ "$scenario" = "stiff" ]; then
         run_method "$scenario" cfm4
     fi
-    run_qutip "$scenario"
 done
+
+# ============================================================================
+# Phase 2: QuTiP cells を 2 scenario 並列実行 (strategy B).
+#   QuTiP sesolve (Adams, sparse) は単一コアで走り DRAM 帯域もわずかなので 2 scenario
+#   を並列実行して wall を短縮する (max(~17h, ~48h) ≈ 48h vs 直列 ~65h). maqina 計測の
+#   後に回すことで maqina の wall_sec を単独実行のまま正確に保つ. 各 process は内部で
+#   --blas-threads 1 を設定 (run_qutip 参照). 出力は scenario 別 log に分け interleave 回避.
+#   両 scenario とも再計算 + --save-states-dir で ψ を保存し, 問題 npz を変えない限り
+#   参照解差し替えを横断して QuTiP cell を再利用可能にする (#158 再発防止).
+# ============================================================================
+echo ""
+echo "################################################################"
+echo "### Phase 2: QuTiP cells (2 scenario 並列) ###"
+echo "################################################################"
+qutip_pids=()
+qutip_scenarios_started=()
+for scenario in "${scenarios[@]}"; do
+    run_qutip "$scenario" > "run_bench_qutip_${scenario}.log" 2>&1 &
+    qutip_pids+=($!)
+    qutip_scenarios_started+=("$scenario")
+    echo "[parallel] qutip $scenario started (pid $!) → run_bench_qutip_${scenario}.log"
+done
+echo "[parallel] waiting for ${#qutip_pids[@]} QuTiP processes ..."
+# 各 PID を個別に wait して非ゼロ終了を取りこぼさない (wait 複数 PID は最後の
+# exit status しか返さないため). set -e 下でも `if !` で受けるので abort しない.
+qutip_fail=0
+for i in "${!qutip_pids[@]}"; do
+    pid=${qutip_pids[$i]}
+    sc=${qutip_scenarios_started[$i]}
+    if wait "$pid"; then
+        echo "[parallel] qutip $sc (pid $pid) OK"
+    else
+        echo "[parallel] WARNING: qutip $sc (pid $pid) 非ゼロ終了. run_bench_qutip_${sc}.log を確認 (skip-existing で再開可)" >&2
+        qutip_fail=1
+    fi
+done
+if [ "$qutip_fail" -ne 0 ]; then
+    echo "[parallel] 一部 QuTiP が失敗. 同じスクリプトを再実行すれば残り cell から再開する." >&2
+fi
+echo "[parallel] all QuTiP processes finished."
 
 echo ""
 echo "================================================================"
