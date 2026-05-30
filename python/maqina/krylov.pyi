@@ -258,7 +258,7 @@ def evolve_schedule_cfm4(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndar
     """
     ...
 
-def evolve_schedule_adaptive_m2(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, reject_shrink_min: float=0.2, reject_shrink_max: float=0.9, freeze_growth_after_reject: bool=True, growth_freeze_steps: int=1, save_tlist: np.ndarray | None=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+def evolve_schedule_adaptive_m2(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, reject_shrink_min: float=0.2, reject_shrink_max: float=0.9, freeze_growth_after_reject: bool=True, growth_freeze_steps: int=1, pi_alpha: float=0.7, pi_beta: float=0.4, save_tlist: np.ndarray | None=None) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """CFM4:2 + M2 embedded 推定子による adaptive dt ドライバ (Phase 4 C3).
 
     PI controller (``docs/design/05-3-propagator.md`` §5.3) で local error を ``tol_step``
@@ -321,6 +321,13 @@ def evolve_schedule_adaptive_m2(h_p_diag: np.ndarray, schedule: Schedule, psi0: 
         dt 再上昇 → 再 reject のノコギリ波の「再上昇」側を断つ. ``False`` で
         #149 のみ適用した挙動 (reject 直後でも ``growth_max`` まで拡大可) と
         ビット一致. ``growth_freeze_steps >= 1``.
+    pi_alpha, pi_beta
+        accept 時 dt 予測式の積分項 / 比例項の指数係数 (issue #151, 真の PI 化).
+        ``dt_next = dt · safety · (tol_step / err)^{pi_alpha/(p+1)} ·
+        (err_prev / err)^{pi_beta/(p+1)}`` (p=2). 既定 ``pi_alpha=0.7`` /
+        ``pi_beta=0.4`` (Gustafsson predictive PI 標準). ``pi_alpha=1.0,
+        pi_beta=0.0`` で旧 I 制御をビット一致再現 (回帰アンカー). M2 経路は
+        誤差源分離がないため ``err_prev`` は直前に accept した step の ``err``.
     save_tlist
         Phase 5 拡張対象外 (issue #47 では adaptive Richardson のみ有効化).
         adaptive M2 driver は ``annealer.py`` の facade からは呼ばれない
@@ -349,7 +356,7 @@ def evolve_schedule_adaptive_m2(h_p_diag: np.ndarray, schedule: Schedule, psi0: 
     """
     ...
 
-def evolve_schedule_adaptive_richardson(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, reject_shrink_min: float=0.2, reject_shrink_max: float=0.9, freeze_growth_after_reject: bool=True, growth_freeze_steps: int=1, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
+def evolve_schedule_adaptive_richardson(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, m: int=24, krylov_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, reject_shrink_min: float=0.2, reject_shrink_max: float=0.9, freeze_growth_after_reject: bool=True, growth_freeze_steps: int=1, pi_alpha: float=0.7, pi_beta: float=0.4, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
     """CFM4:2 + step-doubling Richardson 推定子による adaptive dt ドライバ.
 
     PI controller (``docs/design/05-3-propagator.md`` §5.3) で local error を ``tol_step``
@@ -389,6 +396,15 @@ def evolve_schedule_adaptive_richardson(h_p_diag: np.ndarray, schedule: Schedule
         に凍結する (拡大のみ禁止, 縮小は許可). 過剰縮小 → 楽々 accept → 即
         dt 再上昇 → 再 reject のノコギリ波の「再上昇」側を断つ. ``False`` で
         #149 のみ適用した挙動とビット一致. ``growth_freeze_steps >= 1``.
+    pi_alpha, pi_beta
+        accept 時 dt 予測式の積分項 / 比例項の指数係数 (issue #151, 真の PI 化).
+        ``dt_next = dt · safety · (tol_step / err)^{pi_alpha/(p+1)} ·
+        (err_prev / err)^{pi_beta/(p+1)}`` (p=4). 既定 ``pi_alpha=0.7`` /
+        ``pi_beta=0.4`` (Gustafsson predictive PI 標準). ``pi_alpha=1.0,
+        pi_beta=0.0`` で旧 I 制御をビット一致再現 (回帰アンカー). ``err_prev`` は
+        直前に accept した step の駆動量 ``err_for_pi`` (= ``err_magnus`` ベース)
+        で, accept 判定に使う量と一致させる. reject を挟んでも最後に accept した
+        値を保持する (Hairer の errold 規約).
     richardson_extrapolate
         ``True`` で外挿後の ``ψ_acc`` を accept 時の状態とする
         (実効 6 次精度; 既定 ``False``).
@@ -455,7 +471,7 @@ def evolve_schedule_adaptive_richardson(h_p_diag: np.ndarray, schedule: Schedule
     """
     ...
 
-def evolve_schedule_adaptive_richardson_chebyshev(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, h_p_min: float, h_p_max: float, chebyshev_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, reject_shrink_min: float=0.2, reject_shrink_max: float=0.9, freeze_growth_after_reject: bool=True, growth_freeze_steps: int=1, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
+def evolve_schedule_adaptive_richardson_chebyshev(h_p_diag: np.ndarray, schedule: Schedule, psi0: np.ndarray, t0: float, t1: float, *, h_p_min: float, h_p_max: float, chebyshev_tol: float=1e-12, tol_step: float=1e-08, dt0: float=0.5, dt_min: float=0.0001, dt_max: float | None=None, safety: float=0.9, growth_max: float=4.0, max_rejects: int=50, reject_shrink_min: float=0.2, reject_shrink_max: float=0.9, freeze_growth_after_reject: bool=True, growth_freeze_steps: int=1, pi_alpha: float=0.7, pi_beta: float=0.4, richardson_extrapolate: bool=False, observables: 'dict[str, Observable] | None'=None, save_tlist: np.ndarray | None=None, store_states: bool=False) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, SnapshotData | None]:
     """CFM4:2 + step-doubling Richardson + Chebyshev propagator (issue #122).
 
     既存 :func:`evolve_schedule_adaptive_richardson` (Lanczos 経路) と
@@ -490,7 +506,7 @@ def evolve_schedule_adaptive_richardson_chebyshev(h_p_diag: np.ndarray, schedule
         使う. 既定 ``1e-12``.
     tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects,
     reject_shrink_min, reject_shrink_max, freeze_growth_after_reject,
-    growth_freeze_steps,
+    growth_freeze_steps, pi_alpha, pi_beta,
     richardson_extrapolate, observables, save_tlist, store_states
         :func:`evolve_schedule_adaptive_richardson` と同じ.
 

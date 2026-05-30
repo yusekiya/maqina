@@ -1971,24 +1971,51 @@ def _pi_dt_next(
     dt_max: float,
     dt_min: float,
     p: int,
+    err_prev: float | None = None,
+    pi_alpha: float = 1.0,
+    pi_beta: float = 0.0,
 ) -> float:
-    """PI controller の accept 時 ``dt_next`` を計算する.
+    """PI controller の accept 時 ``dt_next`` を計算する (issue #151).
 
     .. code-block:: text
 
-        dt_next = dt · safety · (tol_step / err)^{1/(p+1)}
+        i_term  = (tol_step / err)^{pi_alpha/(p+1)}      # 積分 (I) 項
+        p_term  = (err_prev / err)^{pi_beta/(p+1)}       # 比例 (P) 項
+        dt_next = dt · safety · i_term · p_term
         dt_next = min(dt_next, dt_try · growth_max, dt_max)
         dt_next = max(dt_next, dt_min)
 
-    ``err <= 1e-30`` のときは PI 式が発散するので
-    ``dt_next = dt_try · growth_max`` に折り返す (0 近傍ガード).
-    ``p`` は推定子の order (M2 embedded = 2, Richardson = 4).
-    詳細は ``docs/design/05-3-propagator.md`` §5.3 PI controller サブセクション.
+    Gustafsson / Hairer-Wanner II §IV.2 の predictive PI controller。比例項
+    ``(err_prev / err)^{pi_beta/(p+1)}`` が誤差の増加傾向 (Magnus 4 次係数 C₄ の
+    上昇) を先読みして dt 拡大を抑制し、臨界領域でのノコギリ波を平坦化する。
+    ``pi_alpha = 1.0, pi_beta = 0.0`` で従来の純 I (積分) 制御
+    ``dt · safety · (tol_step / err)^{1/(p+1)}`` を **ビット一致** で再現する
+    (回帰アンカー)。
+
+    ``err_prev`` は直前に **accept** した step の駆動量 (M2 = ``err``,
+    Richardson / Chebyshev = ``err_magnus`` ベース)。最初の accept では
+    ``err_prev = None``、reject を挟んでも「最後に accept した step」の値を使う
+    (Hairer の ``errold`` 規約)。
+
+    0 近傍ガード:
+
+    * ``err <= 1e-30`` のときは I 項 / P 項とも発散するので
+      ``dt_next = dt_try · growth_max`` に折り返す。
+    * ``err_prev`` が ``None`` または ``<= 1e-30``、もしくは ``pi_beta == 0`` の
+      ときは比例項 ``p_term = 1.0`` に落とす (純 I 制御に縮退)。
+
+    ``p`` は推定子の order (M2 embedded = 2, Richardson = 4)。詳細は
+    ``docs/design/05-3-propagator.md`` "PI controller / adaptive ドライバ" 節。
     """
     if err <= 1.0e-30:
         dt_next = dt_try * growth_max
     else:
-        dt_next = dt_try * safety * (tol_step / err) ** (1.0 / (p + 1))
+        i_term = (tol_step / err) ** (pi_alpha / (p + 1))
+        if pi_beta != 0.0 and err_prev is not None and err_prev > 1.0e-30:
+            p_term = (err_prev / err) ** (pi_beta / (p + 1))
+        else:
+            p_term = 1.0
+        dt_next = dt_try * safety * i_term * p_term
     dt_next = min(dt_next, dt_try * growth_max, dt_max)
     dt_next = max(dt_next, dt_min)
     return float(dt_next)
@@ -2057,6 +2084,8 @@ def evolve_schedule_adaptive_m2(
     reject_shrink_max: float = 0.9,
     freeze_growth_after_reject: bool = True,
     growth_freeze_steps: int = 1,
+    pi_alpha: float = 0.7,
+    pi_beta: float = 0.4,
     save_tlist: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """CFM4:2 + M2 embedded 推定子による adaptive dt ドライバ (Phase 4 C3).
@@ -2121,6 +2150,13 @@ def evolve_schedule_adaptive_m2(
         dt 再上昇 → 再 reject のノコギリ波の「再上昇」側を断つ. ``False`` で
         #149 のみ適用した挙動 (reject 直後でも ``growth_max`` まで拡大可) と
         ビット一致. ``growth_freeze_steps >= 1``.
+    pi_alpha, pi_beta
+        accept 時 dt 予測式の積分項 / 比例項の指数係数 (issue #151, 真の PI 化).
+        ``dt_next = dt · safety · (tol_step / err)^{pi_alpha/(p+1)} ·
+        (err_prev / err)^{pi_beta/(p+1)}`` (p=2). 既定 ``pi_alpha=0.7`` /
+        ``pi_beta=0.4`` (Gustafsson predictive PI 標準). ``pi_alpha=1.0,
+        pi_beta=0.0`` で旧 I 制御をビット一致再現 (回帰アンカー). M2 経路は
+        誤差源分離がないため ``err_prev`` は直前に accept した step の ``err``.
     save_tlist
         Phase 5 拡張対象外 (issue #47 では adaptive Richardson のみ有効化).
         adaptive M2 driver は ``annealer.py`` の facade からは呼ばれない
@@ -2168,6 +2204,10 @@ def evolve_schedule_adaptive_m2(
         raise ValueError(
             f"growth_freeze_steps must be an int >= 1, got {growth_freeze_steps!r}"
         )
+    if not (pi_alpha > 0.0):
+        raise ValueError(f"pi_alpha must be > 0, got {pi_alpha!r}")
+    if not (pi_beta >= 0.0):
+        raise ValueError(f"pi_beta must be >= 0, got {pi_beta!r}")
 
     dt_max_eff = float(dt_max) if dt_max is not None else 10.0 * float(dt0)
     if not (dt_max_eff >= dt0):
@@ -2198,6 +2238,10 @@ def evolve_schedule_adaptive_m2(
     # accept 回数. reject で ``growth_freeze_steps`` に再武装し, 凍結中の
     # accept は dt 拡大のみ禁止 (eff_growth_max=1.0). 0 で非凍結.
     freeze_remaining = 0
+    # issue #151: 真の PI 比例項用の「直前に accept した step の駆動量」.
+    # 最初の accept では None (純 I). reject を挟んでも最後に accept した値を
+    # 保持する (Hairer の errold 規約). M2 経路は err をそのまま駆動量に使う.
+    err_prev_pi: float | None = None
     t_hist: list[float] = [t]
     dt_hist: list[float] = []
     while t < t_end:
@@ -2249,7 +2293,12 @@ def evolve_schedule_adaptive_m2(
                 dt_max=dt_max_eff,
                 dt_min=dt_min,
                 p=2,
+                err_prev=err_prev_pi,
+                pi_alpha=pi_alpha,
+                pi_beta=pi_beta,
             )
+            # issue #151: 次 accept の比例項用に駆動量 (M2 = err) を保持.
+            err_prev_pi = float(err)
         else:
             n_rejects += 1
             n_consecutive_rejects += 1
@@ -2304,6 +2353,8 @@ def evolve_schedule_adaptive_richardson(
     reject_shrink_max: float = 0.9,
     freeze_growth_after_reject: bool = True,
     growth_freeze_steps: int = 1,
+    pi_alpha: float = 0.7,
+    pi_beta: float = 0.4,
     richardson_extrapolate: bool = False,
     observables: "dict[str, Observable] | None" = None,
     save_tlist: np.ndarray | None = None,
@@ -2359,6 +2410,15 @@ def evolve_schedule_adaptive_richardson(
         に凍結する (拡大のみ禁止, 縮小は許可). 過剰縮小 → 楽々 accept → 即
         dt 再上昇 → 再 reject のノコギリ波の「再上昇」側を断つ. ``False`` で
         #149 のみ適用した挙動とビット一致. ``growth_freeze_steps >= 1``.
+    pi_alpha, pi_beta
+        accept 時 dt 予測式の積分項 / 比例項の指数係数 (issue #151, 真の PI 化).
+        ``dt_next = dt · safety · (tol_step / err)^{pi_alpha/(p+1)} ·
+        (err_prev / err)^{pi_beta/(p+1)}`` (p=4). 既定 ``pi_alpha=0.7`` /
+        ``pi_beta=0.4`` (Gustafsson predictive PI 標準). ``pi_alpha=1.0,
+        pi_beta=0.0`` で旧 I 制御をビット一致再現 (回帰アンカー). ``err_prev`` は
+        直前に accept した step の駆動量 ``err_for_pi`` (= ``err_magnus`` ベース)
+        で, accept 判定に使う量と一致させる. reject を挟んでも最後に accept した
+        値を保持する (Hairer の errold 規約).
     richardson_extrapolate
         ``True`` で外挿後の ``ψ_acc`` を accept 時の状態とする
         (実効 6 次精度; 既定 ``False``).
@@ -2439,6 +2499,10 @@ def evolve_schedule_adaptive_richardson(
         raise ValueError(
             f"growth_freeze_steps must be an int >= 1, got {growth_freeze_steps!r}"
         )
+    if not (pi_alpha > 0.0):
+        raise ValueError(f"pi_alpha must be > 0, got {pi_alpha!r}")
+    if not (pi_beta >= 0.0):
+        raise ValueError(f"pi_beta must be >= 0, got {pi_beta!r}")
 
     dt_max_eff = float(dt_max) if dt_max is not None else 10.0 * float(dt0)
     if not (dt_max_eff >= dt0):
@@ -2476,6 +2540,11 @@ def evolve_schedule_adaptive_richardson(
     # accept 回数. reject で ``growth_freeze_steps`` に再武装し, 凍結中の
     # accept は dt 拡大のみ禁止 (eff_growth_max=1.0). 0 で非凍結.
     freeze_remaining = 0
+    # issue #151: 真の PI 比例項用の「直前に accept した step の駆動量」
+    # (= err_for_pi, err_magnus ベース; accept 判定に使う量と一致). 最初の
+    # accept では None (純 I). reject を挟んでも最後に accept した値を保持する
+    # (Hairer の errold 規約).
+    err_prev_pi: float | None = None
     t_hist: list[float] = [t]
     dt_hist: list[float] = []
     # C3 (issue #52 A): accept された step の m_eff_sum を積み上げる.
@@ -2631,7 +2700,12 @@ def evolve_schedule_adaptive_richardson(
                 dt_max=dt_max_eff,
                 dt_min=dt_min,
                 p=4,
+                err_prev=err_prev_pi,
+                pi_alpha=pi_alpha,
+                pi_beta=pi_beta,
             )
+            # issue #151: 次 accept の比例項用に駆動量 (= err_for_pi) を保持.
+            err_prev_pi = float(err_for_pi)
         else:
             n_rejects += 1
             n_consecutive_rejects += 1
@@ -2788,6 +2862,8 @@ def evolve_schedule_adaptive_richardson_chebyshev(
     reject_shrink_max: float = 0.9,
     freeze_growth_after_reject: bool = True,
     growth_freeze_steps: int = 1,
+    pi_alpha: float = 0.7,
+    pi_beta: float = 0.4,
     richardson_extrapolate: bool = False,
     observables: "dict[str, Observable] | None" = None,
     save_tlist: np.ndarray | None = None,
@@ -2838,7 +2914,7 @@ def evolve_schedule_adaptive_richardson_chebyshev(
         使う. 既定 ``1e-12``.
     tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects,
     reject_shrink_min, reject_shrink_max, freeze_growth_after_reject,
-    growth_freeze_steps,
+    growth_freeze_steps, pi_alpha, pi_beta,
     richardson_extrapolate, observables, save_tlist, store_states
         :func:`evolve_schedule_adaptive_richardson` と同じ.
 
@@ -2892,6 +2968,10 @@ def evolve_schedule_adaptive_richardson_chebyshev(
         raise ValueError(
             f"growth_freeze_steps must be an int >= 1, got {growth_freeze_steps!r}"
         )
+    if not (pi_alpha > 0.0):
+        raise ValueError(f"pi_alpha must be > 0, got {pi_alpha!r}")
+    if not (pi_beta >= 0.0):
+        raise ValueError(f"pi_beta must be >= 0, got {pi_beta!r}")
 
     dt_max_eff = float(dt_max) if dt_max is not None else 10.0 * float(dt0)
     if not (dt_max_eff >= dt0):
@@ -2941,6 +3021,11 @@ def evolve_schedule_adaptive_richardson_chebyshev(
     # accept 回数. reject で ``growth_freeze_steps`` に再武装し, 凍結中の
     # accept は dt 拡大のみ禁止 (eff_growth_max=1.0). 0 で非凍結.
     freeze_remaining = 0
+    # issue #151: 真の PI 比例項用の「直前に accept した step の駆動量」
+    # (= err_for_pi, err_magnus ベース; accept 判定に使う量と一致). 最初の
+    # accept では None (純 I). reject を挟んでも最後に accept した値を保持する
+    # (Hairer の errold 規約).
+    err_prev_pi: float | None = None
     t_hist: list[float] = [t]
     dt_hist: list[float] = []
     k_used_hist: list[int] = []
@@ -3059,7 +3144,12 @@ def evolve_schedule_adaptive_richardson_chebyshev(
                 dt_max=dt_max_eff,
                 dt_min=dt_min,
                 p=4,
+                err_prev=err_prev_pi,
+                pi_alpha=pi_alpha,
+                pi_beta=pi_beta,
             )
+            # issue #151: 次 accept の比例項用に駆動量 (= err_for_pi) を保持.
+            err_prev_pi = float(err_for_pi)
         else:
             n_rejects += 1
             n_consecutive_rejects += 1

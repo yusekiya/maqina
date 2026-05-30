@@ -323,6 +323,8 @@ def run_synthetic(
     reject_shrink_max: float = 0.9,
     freeze_growth_after_reject: bool = True,
     growth_freeze_steps: int = 1,
+    pi_alpha: float = 1.0,
+    pi_beta: float = 0.0,
     m: int = 24,
 ) -> ControllerTrace:
     """合成誤差 ``err = c4(t)·dt^{p+1}`` で実 adaptive driver を駆動し trace を返す.
@@ -337,16 +339,24 @@ def run_synthetic(
         ``C₄(t)`` を返す callable (例 :func:`exp_c4`)。
     t0, t1, tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects,
     reject_shrink_min, reject_shrink_max, freeze_growth_after_reject,
-    growth_freeze_steps, m
-        driver にそのまま渡す PI controller パラメータ。既定は production facade
-        相当 (``tol_step=1e-8`` / ``safety=0.9`` / ``growth_max=4.0`` /
-        ``max_rejects=50`` / ``reject_shrink_min=0.2`` /
-        ``reject_shrink_max=0.9`` / ``freeze_growth_after_reject=True`` /
-        ``growth_freeze_steps=1``)。``dt_max=None`` のとき driver 既定 ``10·dt0``。
+    growth_freeze_steps, pi_alpha, pi_beta, m
+        driver にそのまま渡す PI controller パラメータ。``tol_step=1e-8`` /
+        ``safety=0.9`` / ``growth_max=4.0`` / ``max_rejects=50`` /
+        ``reject_shrink_min=0.2`` / ``reject_shrink_max=0.9`` /
+        ``freeze_growth_after_reject=True`` / ``growth_freeze_steps=1`` は
+        production facade 相当の既定。``dt_max=None`` のとき driver 既定
+        ``10·dt0``。
         reject 縮小の旧挙動 (固定 0.5 半減) を再現したいときは
         ``reject_shrink_min=reject_shrink_max=0.5`` を渡す (issue #149)。
         reject 後の成長凍結 (issue #150) を無効化したいときは
         ``freeze_growth_after_reject=False`` を渡す (= #149 完了時点の挙動)。
+
+        ``pi_alpha`` / ``pi_beta`` (issue #151) **だけは harness 既定を純 I 制御
+        (``pi_alpha=1.0, pi_beta=0.0``) に固定** する (production facade 既定の
+        ``0.7`` / ``0.4`` とは敢えて変える)。これにより各 sub-issue (#149 /
+        #150) のメトリクステストが「elementary (I) controller を baseline」と
+        した設計通りに不変で走る。真の PI 比例項の効果を測る #151 のテストは
+        ``pi_alpha=0.7, pi_beta=0.4`` を明示的に渡してオプトインする。
 
     Returns
     -------
@@ -393,6 +403,8 @@ def run_synthetic(
                 reject_shrink_max=reject_shrink_max,
                 freeze_growth_after_reject=freeze_growth_after_reject,
                 growth_freeze_steps=growth_freeze_steps,
+                pi_alpha=pi_alpha,
+                pi_beta=pi_beta,
             )
     elif method == "richardson":
         patch = {
@@ -420,6 +432,8 @@ def run_synthetic(
                 reject_shrink_max=reject_shrink_max,
                 freeze_growth_after_reject=freeze_growth_after_reject,
                 growth_freeze_steps=growth_freeze_steps,
+                pi_alpha=pi_alpha,
+                pi_beta=pi_beta,
             )
         t_hist, dt_hist, n_rej = out[1], out[2], out[3]
     else:  # method == "chebyshev" (上の _METHODS チェックで保証済)
@@ -449,6 +463,8 @@ def run_synthetic(
                 reject_shrink_max=reject_shrink_max,
                 freeze_growth_after_reject=freeze_growth_after_reject,
                 growth_freeze_steps=growth_freeze_steps,
+                pi_alpha=pi_alpha,
+                pi_beta=pi_beta,
             )
         t_hist, dt_hist, n_rej = out[1], out[2], out[3]
 

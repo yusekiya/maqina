@@ -43,6 +43,24 @@
   本機構は user が `reject_shrink` を攻めた値にした場合や縮小 factor が
   `reject_shrink_min` 床にクランプ → 過剰縮小する場面での二重の安全網として効く。
 
+- **真の PI 比例項を導入し I 制御 → PI 制御化** (issue #151, umbrella #148):
+  3 つの adaptive ドライバの accept 時 dt 予測式に Gustafsson / Hairer-Wanner
+  II §IV.2 の predictive PI 比例項を追加し、
+  `dt_next = dt · safety · (tol_step / err)^{pi_alpha/(p+1)} · (err_prev / err)^{pi_beta/(p+1)}`
+  とした。比例項が誤差の増加傾向 (Magnus 4 次係数 C₄ の上昇) を `err_prev / err`
+  で先読みして dt 拡大を抑制し、臨界領域のノコギリ波を「再オーバーシュート前に」
+  平坦化する (#150 の reject 後成長凍結と相補的)。`err_prev` は直前に **accept**
+  した step の駆動量 (M2 = `err`, Richardson / Chebyshev = `err_magnus`; Hairer の
+  `errold` 規約で reject を挟んでも最後に accept した値を保持)。これまでの実装は
+  比例項の無い純 I (積分) 制御で docstring / 設計書の "PI controller" 表記と実体が
+  不整合だったのを解消する。`ControllerConfig` に `pi_alpha` (既定 `0.7`) /
+  `pi_beta` (既定 `0.4`, Gustafsson 標準) を追加し、`__post_init__` で
+  `pi_alpha > 0` / `pi_beta >= 0` を検証。既定挙動が I → PI に変わるため破壊的
+  変更。純 I 制御 (旧挙動) は `ControllerConfig(pi_alpha=1.0, pi_beta=0.0)` で
+  ビット一致再現可能 (回帰アンカー)。既定値は合成誤差ハーネス (#152) のノコギリ波
+  シナリオで確認 (`pi_beta=0.4` が reject 削減と autocorr 改善の sweet spot、
+  `pi_beta=0.6` は過補正で振動再発)。
+
 ### Added
 
 - **`ControllerConfig` (frozen dataclass) 新設 + facade 配線** (issue #149,
