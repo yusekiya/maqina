@@ -359,11 +359,22 @@ def run_bench(
             flush=True,
         )
     if not solver_independent:
-        print(
-            "WARNING: 参照解の Adams vs BDF 一致 flag が False です. "
-            "infidelity の解釈には注意.",
-            flush=True,
-        )
+        if primary_solver == "bdf":
+            # BDF primary: 参照解の信頼性は BDF tol-sweep 自己収束で担保される.
+            # Adams cross-check の不一致は stiff で Adams が tol を詰めきれない既知の
+            # 限界 (= BDF を primary にした理由) であり, reference の不備ではない.
+            # よって警告ではなく情報メッセージに留める.
+            print(
+                "INFO: 参照解は BDF tol-sweep 収束を primary とする (信頼性は BDF 自己収束で担保). "
+                "Adams cross-check は不一致だが stiff での既知の Adams 限界によるもの.",
+                flush=True,
+            )
+        else:
+            print(
+                "WARNING: 参照解の Adams vs BDF 一致 flag が False です. "
+                "infidelity の解釈には注意.",
+                flush=True,
+            )
 
     # 問題セットアップ
     prob = IsingProblem(n=n, H_p_diag=h_p_diag)
