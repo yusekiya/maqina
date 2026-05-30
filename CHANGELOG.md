@@ -11,7 +11,7 @@
   (`0.N.0` → `0.N+1.0`) で破壊的変更を吸収する (`docs/conventions.md`
   §2 参照).
 
-## Unreleased — Phase C follow-up
+## 0.14.0 - 2026-05-30 — Phase C follow-up: adaptive step-size controller 追従性改善 (真の PI 化 / reject 過剰縮小解消 / `ControllerConfig` 公開, umbrella #148)
 
 ### Breaking
 
