@@ -256,6 +256,11 @@ def run_bench(
     ref_seed = int(rdata["seed"])
     converged = bool(rdata["converged"])
     solver_independent = bool(rdata["solver_independent"])
+    # primary_solver は BDF sweep mode で追加された新フィールド. legacy npz には
+    # 存在しないので Adams を default にする (legacy mode = primary が Adams).
+    primary_solver = (
+        str(rdata["primary_solver"]) if "primary_solver" in rdata.files else "adams"
+    )
 
     # consistency check: problem と reference が同じ問題を指していること
     if (scenario, n, seed) != (ref_scenario, ref_n, ref_seed):
@@ -269,14 +274,17 @@ def run_bench(
             f"psi_ref shape {psi_ref.shape} does not match n={n} (expected {1 << n})"
         )
 
+    primary_label = "BDF" if primary_solver == "bdf" else "Adams"
     if not converged:
         print(
-            "WARNING: 参照解の Adams 収束 flag が False です. infidelity の解釈には注意.",
+            f"WARNING: 参照解の {primary_label} 収束 flag が False です. "
+            "infidelity の解釈には注意.",
             flush=True,
         )
     if not solver_independent:
         print(
-            "WARNING: 参照解の Adams vs BDF 一致 flag が False です. infidelity の解釈には注意.",
+            "WARNING: 参照解の Adams vs BDF 一致 flag が False です. "
+            "infidelity の解釈には注意.",
             flush=True,
         )
 
