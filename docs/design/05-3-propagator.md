@@ -600,10 +600,23 @@ tol_step     = 1e-8          # accept 判定の局所誤差閾値
 dt0          = 0.5           # 初期 dt
 dt_min       = 1e-4          # 最小 dt (ここまで縮めると err 無視で accept)
 dt_max       = 10 · dt0      # 既定値 (None 渡し時に解決)
-safety       = 0.9           # PI 安全係数
-growth_max   = 4.0           # 1 step での dt 拡大率上限
+safety       = 0.9           # PI 安全係数 (accept / reject 共通)
+growth_max   = 4.0           # 1 step での dt 拡大率上限 (accept のみ)
 max_rejects  = 50            # 同一 step での連続 reject 上限 (超過で RuntimeError)
+reject_shrink_min = 0.2      # reject factor の下限 (= fac_min, issue #149)
+reject_shrink_max = 0.9      # reject factor の上限 (= fac_reject_max < 1, issue #149)
 ```
+
+> **`ControllerConfig` (issue #149 / umbrella #148 方針 B)**: 上記 controller
+> knob (`safety` / `growth_max` / `max_rejects` / `dt_min` /
+> `reject_shrink_min` / `reject_shrink_max`) は `maqina.ControllerConfig`
+> (frozen dataclass) に集約され、facade
+> (`QuantumAnnealer.run(controller=...)` / `create_simulator(controller=...)`
+> / `AnnealingSimulator(controller=...)`) から指定できる。`atol` / `dt_init`
+> / `dt_max` / `m_max` は精度要求・auto-resolve ロジックを持つため
+> `ControllerConfig` には入れず facade kwarg のまま据置 (純粋な数値挙動 knob
+> のみ集約)。固定 dt 経路への明示 `controller` は `AnnealingSimulator` のみ
+> `ValueError` で弾く (run は `atol` 等と同じく寛容)。
 
 > **`tol_step = 1e-8` の選定根拠 (保守寄り)**: 1 step あたりの局所誤差
 > ``1e-8`` を区間 ``[0, T]`` で蓄積すると, worst case (Lady Windermere's
@@ -640,8 +653,28 @@ while t < t1:
         n_consecutive_rejects += 1
         if n_consecutive_rejects > max_rejects:
             raise RuntimeError(...)
-        dt = max(dt_try * 0.5, dt_min)         # reject 時は半減
+        # issue #149: reject 時も accept と同じ予測式 + reject 用クランプ.
+        # err_for_pi は accept 経路と整合 (M2 = err, Richardson/Chebyshev =
+        # err_magnus; 0 近傍は tol_step·1e-3 フォールバック).
+        factor = safety * (tol_step / err_for_pi) ** (1/(p+1))
+        factor = min(max(factor, reject_shrink_min), reject_shrink_max)  # [0.2, 0.9]
+        dt = max(dt_try * factor, dt_min)
 ```
+
+> **reject 予測式 + クランプの動機 (issue #149)**: 旧実装は reject 時に
+> **固定 0.5 倍** (= order-5 推定子で誤差を 32× 削減) していた。``err`` が
+> ``tol_step`` をわずかに超えただけでも半減するため、直後の step が楽々
+> accept → 制御器が ``(tol/err)^{1/(p+1)}`` で dt を再上昇 → 再 reject という
+> **ノコギリ波** (dt 振動 / 受理率 ≈ 50%) の主因になっていた。reject 時も
+> accept と同じ予測式を使い reject 用クランプ ``[reject_shrink_min,
+> reject_shrink_max]`` (``reject_shrink_max < 1`` で必ず縮小) を掛けることで、
+> ``err`` が tol をわずかに超えただけなら ``factor ≈ reject_shrink_max`` 程度で
+> 済み過剰縮小が消える。大きく超えたときだけ ``reject_shrink_min`` まで落ちる。
+> ``growth_max`` / ``dt_max`` は reject 経路では適用不要 (定義上拡大しない)、
+> ``dt_min`` 床は維持。``reject_shrink_min = reject_shrink_max = 0.5`` で旧挙動
+> (固定半減) を厳密再現できる (回帰アンカー)。これら controller knob は
+> ``ControllerConfig`` (umbrella #148 方針 B) に集約され facade
+> (``QuantumAnnealer.run(controller=...)`` 等) から指定できる。
 
 Reject 時に schedule node `t + c_i · dt` は新しい dt で再評価する
 (dt 依存ノードのため)。`save_tlist` が指定された場合は次の観測時刻
@@ -659,6 +692,7 @@ def evolve_schedule_adaptive_m2(
     m=24, krylov_tol=1e-12, tol_step=1e-8,
     dt0=0.5, dt_min=1e-4, dt_max=None,
     safety=0.9, growth_max=4.0, max_rejects=50,
+    reject_shrink_min=0.2, reject_shrink_max=0.9,   # issue #149
     save_tlist=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, list[np.ndarray]]:
     """(psi_final, t_history, dt_history, n_rejects, states_at_save)"""
@@ -668,10 +702,16 @@ def evolve_schedule_adaptive_richardson(
     m=24, krylov_tol=1e-12, tol_step=1e-8,
     dt0=0.5, dt_min=1e-4, dt_max=None,
     safety=0.9, growth_max=4.0, max_rejects=50,
+    reject_shrink_min=0.2, reject_shrink_max=0.9,   # issue #149
     richardson_extrapolate=False,
     save_tlist=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int, list[np.ndarray]]: ...
 ```
+
+`reject_shrink_min` / `reject_shrink_max` は reject 時の dt 縮小 factor を
+クランプする範囲 (issue #149)。`cfm4_adaptive_richardson_chebyshev` 経路の
+`evolve_schedule_adaptive_richardson_chebyshev` も同じ 2 引数を持つ。facade
+からは `ControllerConfig` 経由で渡す (上記 PI controller defaults 表のノート)。
 
 `QuantumAnnealer.run(method="cfm4_adaptive_richardson_krylov", ...)` はこれを
 内部で呼ぶ薄いラッパ。

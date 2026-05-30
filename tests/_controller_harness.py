@@ -319,6 +319,8 @@ def run_synthetic(
     safety: float = 0.9,
     growth_max: float = 4.0,
     max_rejects: int = 50,
+    reject_shrink_min: float = 0.2,
+    reject_shrink_max: float = 0.9,
     m: int = 24,
 ) -> ControllerTrace:
     """合成誤差 ``err = c4(t)·dt^{p+1}`` で実 adaptive driver を駆動し trace を返す.
@@ -331,10 +333,14 @@ def run_synthetic(
         ``_richardson_chebyshev``) を駆動する。
     c4
         ``C₄(t)`` を返す callable (例 :func:`exp_c4`)。
-    t0, t1, tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects, m
+    t0, t1, tol_step, dt0, dt_min, dt_max, safety, growth_max, max_rejects,
+    reject_shrink_min, reject_shrink_max, m
         driver にそのまま渡す PI controller パラメータ。既定は production facade
         相当 (``tol_step=1e-8`` / ``safety=0.9`` / ``growth_max=4.0`` /
-        ``max_rejects=50``)。``dt_max=None`` のとき driver 既定 ``10·dt0``。
+        ``max_rejects=50`` / ``reject_shrink_min=0.2`` /
+        ``reject_shrink_max=0.9``)。``dt_max=None`` のとき driver 既定 ``10·dt0``。
+        旧挙動 (固定 0.5 半減) を再現したいときは
+        ``reject_shrink_min=reject_shrink_max=0.5`` を渡す (issue #149)。
 
     Returns
     -------
@@ -377,6 +383,8 @@ def run_synthetic(
                 safety=safety,
                 growth_max=growth_max,
                 max_rejects=max_rejects,
+                reject_shrink_min=reject_shrink_min,
+                reject_shrink_max=reject_shrink_max,
             )
     elif method == "richardson":
         patch = {
@@ -400,6 +408,8 @@ def run_synthetic(
                 safety=safety,
                 growth_max=growth_max,
                 max_rejects=max_rejects,
+                reject_shrink_min=reject_shrink_min,
+                reject_shrink_max=reject_shrink_max,
             )
         t_hist, dt_hist, n_rej = out[1], out[2], out[3]
     else:  # method == "chebyshev" (上の _METHODS チェックで保証済)
@@ -425,6 +435,8 @@ def run_synthetic(
                 safety=safety,
                 growth_max=growth_max,
                 max_rejects=max_rejects,
+                reject_shrink_min=reject_shrink_min,
+                reject_shrink_max=reject_shrink_max,
             )
         t_hist, dt_hist, n_rej = out[1], out[2], out[3]
 

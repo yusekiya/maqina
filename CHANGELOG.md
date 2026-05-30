@@ -13,7 +13,38 @@
 
 ## Unreleased — Phase C follow-up
 
+### Breaking
+
+- **adaptive reject 時の dt 縮小を固定 0.5 から予測式 + クランプに変更**
+  (issue #149, umbrella #148): 3 つの adaptive ドライバ
+  (`evolve_schedule_adaptive_{m2,richardson,richardson_chebyshev}`) の reject
+  時の dt 更新を **固定 0.5 倍** から **accept と同じ予測式
+  `safety · (tol_step / err)^{1/(p+1)}` + reject 用クランプ
+  `[reject_shrink_min, reject_shrink_max]` (既定 `[0.2, 0.9]`)** に変更。
+  order-5 推定子で `err` が tol をわずかに超えただけでも誤差を 32× 削る過剰
+  縮小がノコギリ波 (dt 振動 / 受理率 ≈ 50%) の主因だったのを断つ。既定挙動が
+  変わるため破壊的変更。旧挙動 (固定半減) は
+  `ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)` で厳密再現
+  可能 (回帰アンカー)。誤差源分離は accept 経路と整合させ Richardson /
+  Chebyshev は `err_magnus = max(0, err - err_propagator_total)`、M2 は `err`
+  を駆動量に使う。
+
 ### Added
+
+- **`ControllerConfig` (frozen dataclass) 新設 + facade 配線** (issue #149,
+  umbrella #148 方針 B): adaptive PI controller の純粋な数値挙動 knob
+  (`safety` / `growth_max` / `max_rejects` / `dt_min` / `reject_shrink_min` /
+  `reject_shrink_max`) を 1 つの dataclass に集約し `maqina` から export。
+  `QuantumAnnealer.run(controller=...)` / `create_simulator(controller=...)` /
+  `AnnealingSimulator(controller=...)` に配線し、**これまで facade から指定
+  できなかった** `safety` / `growth_max` (= facmax) / `max_rejects` / `dt_min`
+  をまとめて公開 (取りこぼし解消)。`None` 既定で全 default。`atol` / `dt_init`
+  / `dt_max` / `m_max` は精度要求・auto-resolve ロジックを持つため
+  `ControllerConfig` には入れず既存 kwarg 維持。固定 dt 経路への明示
+  `controller` は `AnnealingSimulator` のみ `ValueError` (run は寛容)。
+  後続 #150 / #151 はこの dataclass に field を追加していく。
+  `tests/test_controller_reject_clamp.py` に層 A 合成比較 / 回帰アンカー /
+  入力検証 / facade 配線テストを追加。
 
 - **`Schedule.reverse(..., pause_duration=0.0)`** (PR #147): `s_target` に到達
   後一定時間 `s = s_target` を保ってから `s_init` に戻る reverse + pause

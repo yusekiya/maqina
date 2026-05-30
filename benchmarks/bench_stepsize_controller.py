@@ -138,6 +138,8 @@ def _drive(
     safety: float,
     growth_max: float,
     max_rejects: int,
+    reject_shrink_min: float,
+    reject_shrink_max: float,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     """実 driver を 1 回駆動して ``(psi, t_hist, dt_hist, n_rejects)`` を返す."""
     if method == "richardson":
@@ -154,6 +156,8 @@ def _drive(
             safety=safety,
             growth_max=growth_max,
             max_rejects=max_rejects,
+            reject_shrink_min=reject_shrink_min,
+            reject_shrink_max=reject_shrink_max,
         )
         return out[0], out[1], out[2], int(out[3])
     if method == "chebyshev":
@@ -172,6 +176,8 @@ def _drive(
             safety=safety,
             growth_max=growth_max,
             max_rejects=max_rejects,
+            reject_shrink_min=reject_shrink_min,
+            reject_shrink_max=reject_shrink_max,
         )
         return out[0], out[1], out[2], int(out[3])
     raise ValueError(f"method must be one of {_VALID_METHODS}, got {method!r}")
@@ -222,6 +228,8 @@ def run_scenario(
     safety: float = 0.9,
     growth_max: float = 4.0,
     max_rejects: int = 200,
+    reject_shrink_min: float = 0.2,
+    reject_shrink_max: float = 0.9,
     window_frac: float = 0.15,
     seed: int = 20260530,
     ref_psi: np.ndarray | None = None,
@@ -248,6 +256,8 @@ def run_scenario(
         safety=safety,
         growth_max=growth_max,
         max_rejects=max_rejects,
+        reject_shrink_min=reject_shrink_min,
+        reject_shrink_max=reject_shrink_max,
     )
 
     if ref_psi is None:
@@ -492,11 +502,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
     if args.compare:
-        # #152 デモ: 既存 knob ``growth_max`` の old (4.0) vs new (2.0) を比較し
-        # 比較機構が動くことを示す。sub-issue #149-151 はここに各 issue の旧/新
-        # knob を渡す。
-        cfg_old = {"growth_max": 4.0}
-        cfg_new = {"growth_max": 2.0}
+        # #149: reject 縮小の old (固定 0.5 半減) vs new (予測式 + クランプ
+        # [0.2, 0.9] = driver 既定) を同一 schedule で比較し, 受理率↑ /
+        # n_rejects↓ / 終端精度非劣化を end-to-end で実測する (層 B)。
+        # (#150 / #151 は freeze / pi_beta の old/new をここに渡していく。)
+        cfg_old = {"reject_shrink_min": 0.5, "reject_shrink_max": 0.5}
+        cfg_new = {"reject_shrink_min": 0.2, "reject_shrink_max": 0.9}
         for method in args.methods:
             if method == "chebyshev" and not _rust_available():
                 print(f"[skip] {method}: Rust 拡張が未ビルド")

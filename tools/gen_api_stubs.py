@@ -44,6 +44,7 @@ MODULES = [
     "_helpers",
     "problem",
     "schedule",
+    "controller",
     "annealer",
     "krylov",
     "eigenstates",

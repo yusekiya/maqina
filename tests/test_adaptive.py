@@ -305,12 +305,20 @@ def test_adaptive_rejects_oversized_dt0() -> None:
 
 
 def test_adaptive_max_rejects_raises_runtime_error() -> None:
-    """``max_rejects`` を超える連続 reject で ``RuntimeError``.
+    """``max_rejects`` を超える *連続* reject で ``RuntimeError``.
 
     ``tol_step = 1e-30`` (機械精度より厳しい), ``dt_min = 1e-20``
-    (実用上, halving で到達できない小ささ) にすると, PI は dt を半減し
+    (実用上, 縮小で到達できない小ささ) にすると, PI は dt を縮小し
     続けるが dt_min に届かないため accept しない. ``max_rejects = 3``
     で 3 連続 reject 後に RuntimeError が出る.
+
+    **issue #149 注**: 本テストは ``max_rejects`` (連続 reject 上限) 機構の
+    検証で, reject 縮小率そのものとは直交する. 新既定の予測式 + クランプ
+    ``[0.2, 0.9]`` だと controller が数 step で適正 dt を見つけて accept し,
+    accept のたびに ``n_consecutive_rejects`` がリセットされるため (振動は
+    するが) 3 *連続* reject に到達しない. そこで旧挙動 (固定 0.5 半減) を
+    明示 pin (``reject_shrink_min=reject_shrink_max=0.5``) して「縮小しても
+    tol に届かず連続 reject が積み上がる」前提を保つ.
     """
     n = 3
     prob, h_x = _make_random_problem(n, seed=11)
@@ -328,6 +336,8 @@ def test_adaptive_max_rejects_raises_runtime_error() -> None:
             dt0=0.5,
             dt_min=1e-20,
             max_rejects=3,
+            reject_shrink_min=0.5,
+            reject_shrink_max=0.5,
         )
 
 

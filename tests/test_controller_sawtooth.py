@@ -47,7 +47,14 @@ from _controller_metrics import (
 # 臨界点 t*=5 近傍で C₄ を急上昇させる per-driver シナリオ。``k`` は各 order の
 # 閾値 (umbrella #148 の解析) から選定。dt_min / t1 は臨界帯を捉えつつ dt_min
 # プラトーを短く保って高速化するための値 (数百 step で完了)。
+#
+# **issue #149 以後の重要事項**: 本ファイルは *旧挙動 (固定 0.5 半減)* を
+# baseline として固定し続ける characterization。issue #149 で reject 縮小の
+# 既定が予測式 + クランプ ``[0.2, 0.9]`` に変わったため、各シナリオに明示的に
+# ``reject_shrink_min=reject_shrink_max=0.5`` を渡して旧挙動を再現する。新既定
+# での改善 (ノコギリ波解消) は ``test_controller_reject_clamp.py`` が検証する。
 _T_STAR = 5.0
+_LEGACY_REJECT = dict(reject_shrink_min=0.5, reject_shrink_max=0.5)
 _CRITICAL: dict[str, dict] = {
     "richardson": dict(
         k=40.0,
@@ -58,6 +65,7 @@ _CRITICAL: dict[str, dict] = {
         dt_min=1e-3,
         dt_max=0.5,
         max_rejects=500,
+        **_LEGACY_REJECT,
     ),
     "chebyshev": dict(
         k=40.0,
@@ -68,6 +76,7 @@ _CRITICAL: dict[str, dict] = {
         dt_min=1e-3,
         dt_max=0.5,
         max_rejects=500,
+        **_LEGACY_REJECT,
     ),
     "m2": dict(
         k=250.0,
@@ -78,6 +87,7 @@ _CRITICAL: dict[str, dict] = {
         dt_min=5e-4,
         dt_max=0.5,
         max_rejects=2000,
+        **_LEGACY_REJECT,
     ),
 }
 

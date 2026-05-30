@@ -44,6 +44,7 @@ Usage
 """
 import warnings
 from maqina.annealer import QuantumAnnealer as QuantumAnnealer
+from maqina.controller import ControllerConfig as ControllerConfig
 from maqina.eigenstates import instantaneous_eigenstates as instantaneous_eigenstates
 from maqina.observable import Observable as Observable
 from maqina.problem import IsingProblem as IsingProblem
@@ -51,7 +52,7 @@ from maqina.result import QuantumResult as QuantumResult, Trajectory as Trajecto
 from maqina.schedule import Schedule as Schedule
 from maqina.simulator import AnnealingSimulator as AnnealingSimulator
 from typing import Any
-__all__ = ['AnnealingSimulator', 'IsingProblem', 'Observable', 'QuantumAnnealer', 'QuantumResult', 'Schedule', 'Trajectory', 'available_blas_threads', 'instantaneous_eigenstates', 'set_blas_threads', 'set_blas_threads_auto', 'show_config']
+__all__ = ['AnnealingSimulator', 'ControllerConfig', 'IsingProblem', 'Observable', 'QuantumAnnealer', 'QuantumResult', 'Schedule', 'Trajectory', 'available_blas_threads', 'instantaneous_eigenstates', 'set_blas_threads', 'set_blas_threads_auto', 'show_config']
 
 def set_blas_threads(n: int) -> None:
     """ロード済みの全 OpenBLAS pool のスレッド上限を ``n`` に統一する.

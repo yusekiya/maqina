@@ -96,6 +96,33 @@ def test_compare_configs_returns_deltas():
     assert diff["new"]["terminal_infidelity"] < 1e-3
 
 
+def test_reject_clamp_improves_end_to_end_richardson():
+    """層 B (issue #149): reject 予測式 + クランプ既定が end-to-end で改善.
+
+    同一急峻 schedule で旧 (固定 0.5 半減) vs 新 (driver 既定 ``[0.2, 0.9]``)
+    を比較し, ``new.n_rejects <= old.n_rejects`` (reject 非増加) かつ受理率非劣化,
+    終端精度が同一 tight 基準に対し非劣化 (両者 ``< 1e-3``) を assert する。
+    絶対閾値でなく同一実行内差分 + マージン (cv_ising 流の before/after)。
+    """
+    diff = bsc.compare_configs(
+        "richardson",
+        4,
+        {"reject_shrink_min": 0.5, "reject_shrink_max": 0.5},  # 旧挙動
+        {"reject_shrink_min": 0.2, "reject_shrink_max": 0.9},  # 新既定
+        T=4.0,
+        beta=16.0,
+        tol_step=1e-8,
+        seed=1,
+    )
+    # reject は増えない (典型的には減る). 同一窓・同一 schedule の決定論比較.
+    assert diff["new"]["n_rejects"] <= diff["old"]["n_rejects"]
+    # 受理率は下がらない.
+    assert diff["d_acceptance"] >= 0.0
+    # 精度は両 config とも非劣化 (同一 tight 基準).
+    assert diff["old"]["terminal_infidelity"] < 1e-3
+    assert diff["new"]["terminal_infidelity"] < 1e-3
+
+
 @pytest.mark.skipif(
     not bsc._rust_available(), reason="Chebyshev 経路は Rust 拡張が必要"
 )
