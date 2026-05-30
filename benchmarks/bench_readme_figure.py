@@ -225,6 +225,82 @@ def _save_csv_atomic(csv_path: Path, rows: list[dict[str, object]]) -> None:
     os.replace(tmp_path, csv_path)
 
 
+def _save_state_npz(
+    save_dir: Path,
+    *,
+    scenario: str,
+    n: int,
+    T: float,
+    seed: int,
+    solver: str,
+    variant: str,
+    knob_name: str,
+    knob_value: float,
+    wall_sec: float,
+    infidelity_val: float,
+    n_steps_eff: object,
+    problem_file: Path,
+    reference_file: Path,
+    propagator_tol: float | None,
+    psi: np.ndarray,
+) -> Path:
+    """1 cell の最終状態ベクトル ``ψ(T)`` を self-describing な圧縮 npz に保存する.
+
+    参照解 (``reference_file``) が後から差し替わっても保存済 ``ψ`` から
+    infidelity を **再計算できる** よう, problem / reference のパスと sweep
+    メタデータ + maqina version を同梱する. これは issue #158 で wide dynamic
+    range 参照解が Adams → BDF に差し替わったときのように, 参照解だけが更新
+    されて solver の再実行が高コストな状況での再解析を可能にする目的
+    (`benchmarks/README.md` 参照).
+
+    ファイル名は ``(scenario, solver, variant, knob)`` で一意. 既存ファイルは
+    上書きしない (resume 時の冪等性; CSV の skip-existing と整合). tmp +
+    ``os.replace`` で atomic に書く. ``np.savez_compressed`` には file handle を
+    渡す (path 文字列を渡すと ``.npz`` を二重付加するため).
+    """
+    save_dir.mkdir(parents=True, exist_ok=True)
+    fname = (
+        f"state_{scenario}_{solver}_{variant}_{knob_name}_"
+        f"{_KNOB_FMT.format(float(knob_value))}.npz"
+    )
+    out_path = save_dir / fname
+    if out_path.exists():
+        print(f"[state skip] {out_path} 既存 (上書きしない)", flush=True)
+        return out_path
+    try:
+        from importlib.metadata import version as _pkg_version  # noqa: PLC0415
+
+        maqina_version = _pkg_version("maqina")
+    except Exception:  # pragma: no cover - metadata 取得失敗は致命的でない
+        maqina_version = "unknown"
+    tmp_path = save_dir / (fname + ".tmp")
+    with tmp_path.open("wb") as f:
+        np.savez_compressed(
+            f,
+            psi=np.ascontiguousarray(psi, dtype=np.complex128),
+            scenario=scenario,
+            n=n,
+            T=T,
+            seed=seed,
+            solver=solver,
+            variant=variant,
+            knob_name=knob_name,
+            knob_value=float(knob_value),
+            wall_sec=float(wall_sec),
+            infidelity=float(infidelity_val),
+            n_steps_eff=str(n_steps_eff),
+            problem_file=str(problem_file),
+            reference_file=str(reference_file),
+            propagator_tol=(
+                np.nan if propagator_tol is None else float(propagator_tol)
+            ),
+            maqina_version=maqina_version,
+        )
+    os.replace(tmp_path, out_path)
+    print(f"[state saved] {out_path}", flush=True)
+    return out_path
+
+
 def run_bench(
     *,
     problem_file: Path,
@@ -238,6 +314,7 @@ def run_bench(
     method: Literal["adaptive", "cfm4", "chebyshev"] = "adaptive",
     variant_tag: str | None = None,
     chebyshev_propagator_tol: float | None = None,
+    save_states_dir: Path | None = None,
 ) -> Path:
     # 問題ファイル
     pdata = np.load(problem_file)
@@ -269,9 +346,9 @@ def run_bench(
             f"  problem:   ({scenario}, {n}, {seed})\n"
             f"  reference: ({ref_scenario}, {ref_n}, {ref_seed})"
         )
-    if psi_ref.shape != (1 << n):
+    if psi_ref.shape != (1 << n,):
         raise ValueError(
-            f"psi_ref shape {psi_ref.shape} does not match n={n} (expected {1 << n})"
+            f"psi_ref shape {psi_ref.shape} does not match n={n} (expected {(1 << n,)})"
         )
 
     primary_label = "BDF" if primary_solver == "bdf" else "Adams"
@@ -388,6 +465,27 @@ def run_bench(
             done_cells.add(knob_key)
             _save_csv_atomic(csv_path, rows)
             print(f"[saved] {csv_path} ({len(rows)} cells total)", flush=True)
+            if save_states_dir is not None:
+                _save_state_npz(
+                    save_states_dir,
+                    scenario=scenario,
+                    n=n,
+                    T=T,
+                    seed=seed,
+                    solver="maqina",
+                    variant=maqina_variant,
+                    knob_name=knob_name,
+                    knob_value=knob,
+                    wall_sec=wall,
+                    infidelity_val=inf,
+                    n_steps_eff=n_steps,
+                    problem_file=problem_file,
+                    reference_file=reference_file,
+                    propagator_tol=(
+                        chebyshev_propagator_tol if method == "chebyshev" else None
+                    ),
+                    psi=psi,
+                )
 
     # ---- QuTiP cells ----
     if solver in ("both", "qutip"):
@@ -424,6 +522,25 @@ def run_bench(
             done_cells.add(knob_key)
             _save_csv_atomic(csv_path, rows)
             print(f"[saved] {csv_path} ({len(rows)} cells total)", flush=True)
+            if save_states_dir is not None:
+                _save_state_npz(
+                    save_states_dir,
+                    scenario=scenario,
+                    n=n,
+                    T=T,
+                    seed=seed,
+                    solver="qutip",
+                    variant="qutip",
+                    knob_name="tol",
+                    knob_value=tol,
+                    wall_sec=wall,
+                    infidelity_val=inf,
+                    n_steps_eff="",
+                    problem_file=problem_file,
+                    reference_file=reference_file,
+                    propagator_tol=None,
+                    psi=psi,
+                )
 
     print(f"\n[done] {csv_path} (solver={solver}, {len(rows)} cells)", flush=True)
     return csv_path
@@ -510,6 +627,18 @@ def main() -> None:
         "conventions.md §2.3 規約準拠).",
     )
     parser.add_argument(
+        "--save-states-dir",
+        type=Path,
+        default=None,
+        help="指定すると各 cell の最終状態ベクトル ψ(T) を self-describing な "
+        "圧縮 npz (problem/reference パス + sweep メタデータ + maqina version 同梱) "
+        "として保存する. 参照解が後から差し替わっても保存済 ψ から infidelity を "
+        "再計算できる (issue #158 で wide dynamic range 参照解が Adams→BDF に "
+        "差し替わったような状況の再解析用). ファイルは (scenario, solver, variant, "
+        "knob) で一意, 既存は上書きしない (resume 冪等). 1 状態 ≒ 2^n·16 byte "
+        "(n=18 で 4 MiB raw / ~3.84 MiB 圧縮). None (default) で保存しない.",
+    )
+    parser.add_argument(
         "--solver",
         choices=["both", "maqina", "qutip"],
         default="both",
@@ -566,6 +695,7 @@ def main() -> None:
         method=args.method,
         variant_tag=args.variant_tag,
         chebyshev_propagator_tol=args.propagator_tol,
+        save_states_dir=args.save_states_dir,
     )
 
 

@@ -40,9 +40,21 @@ python/maqina/_rust*.dylib
 /benchmarks/results/*.*.*/*
 !/benchmarks/results/*.*.*/*.md
 !/benchmarks/results/*.*.*/bench_*.csv
+# README figure pipeline: 各 cell の最終状態ベクトル ψ(T)
+# (bench_readme_figure.py --save-states-dir). 参照解が後から差し替わっても
+# (issue #158 の wide dynamic range Adams→BDF など) 保存済 ψ から infidelity を
+# 再計算できるよう `states/` に置き track する (.npz のみ; 書き込み途中の .tmp 等は
+# ignore のまま). maqina (version 依存) は version dir 配下, QuTiP (version 非依存) は
+# 共有 results/qutip/states/ 配下.
+!/benchmarks/results/*.*.*/states/
+/benchmarks/results/*.*.*/states/*
+!/benchmarks/results/*.*.*/states/*.npz
 !/benchmarks/results/qutip/
 /benchmarks/results/qutip/*
 !/benchmarks/results/qutip/bench_*.csv
+!/benchmarks/results/qutip/states/
+/benchmarks/results/qutip/states/*
+!/benchmarks/results/qutip/states/*.npz
 
 # tools/ 配下の検証スクリプト出力 (timestamped CSV / markdown)
 /tools/results/

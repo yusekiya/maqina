@@ -120,3 +120,105 @@ Phase 完了 bump 時の本番 bench sweep 結果は **`benchmarks/results/<X.Y.
    再現できる相対比較).
 3. それ以外の改善 (アルゴリズム差し替え等) は `git stash` / `git switch`
    で実装を切替え, `bench_per_step.py` を 2 回回して per-cell 比較する.
+
+## README figure pipeline (fidelity-vs-runtime 散布図)
+
+README に埋め込む Pareto 図 (`docs/figures/<version>_pareto_<scenario>.png`)
+を生成する 3 script の連携:
+
+| script | 役割 |
+|---|---|
+| `compute_readme_reference.py` | 高精度参照解 `ψ_ref(T)` を QuTiP `sesolve` で生成し npz 化 (Adams 自己収束 + BDF 解法独立性を検証). `--bdf-tols` を指定すると BDF を primary にした sweep mode. |
+| `bench_readme_figure.py` | 事前生成済 npz (問題 + 参照解) を読み, maqina 3 method (`cfm4_adaptive_richardson_krylov` / 固定 `cfm4` / `cfm4_adaptive_richardson_chebyshev`) と QuTiP の精度つまみ sweep を回し per-cell の `wall_sec` + `infidelity` を CSV に dump. |
+| `plot_readme_figure.py` | 複数 CSV を結合して scenario 別散布図 PNG を生成. 系列 key は `(solver, variant)`. |
+
+scenario 名と図タイトルの対応 (`plot_readme_figure.py::SCENARIO_TITLE`):
+
+- `non-stiff` = **narrow dynamic range** (SK random, `h_p_scale=1`). 参照解は
+  Adams primary。
+- `stiff` = **wide dynamic range** (SK + penalty, `h_p_scale=10`). Schrödinger
+  方程式は ODE 的には stiff にならない (H Hermitian) ので "stiff" は legacy ID,
+  実体は `H_p` の dynamic range の広さ。issue #158 で参照解を **BDF sweep
+  primary** に差し替え済 (Adams adaptive step が 1e-9 で頭打ちになる問題を回避)。
+
+### 状態ベクトル保存 (`--save-states-dir`, issue #158 再発防止)
+
+`bench_readme_figure.py --save-states-dir DIR` で各 cell の最終状態 `ψ(T)` を
+self-describing 圧縮 npz (`state_<scenario>_<solver>_<variant>_<knob>_<value>.npz`)
+として保存する。npz には `psi` 本体に加え problem/reference パス・sweep メタ
+データ・`maqina` version を同梱するので、**参照解が後から差し替わっても保存済
+`ψ` から infidelity を再計算できる** (`infidelity(psi, new_ref)`)。容量は
+`2^n·16 byte` (n=18 で 4.0 MiB raw / ~3.84 MiB 圧縮)。`benchmarks/results/<X.Y.Z>/states/`
+配下に置けば `.gitignore` 例外で `.npz` のみ track される。既存ファイルは上書き
+しない (resume 冪等)。
+
+> ⚠️ 過去 (≤0.12.0) の QuTiP / 旧 maqina cell は状態ベクトルを保存していなかった
+> ため、参照解差し替え後に infidelity を再計算する手段が無く再実行が必要だった。
+> 0.14.0 以降はこのフラグで全 cell の `ψ` を残す運用にする。
+
+### 0.14.0 取り直し (CHANGELOG 0.14.0 / issue #148)
+
+0.14.0 の adaptive controller 変更 (真の PI 化 #151 / reject 縮小 #149 /
+成長凍結 #150) は adaptive 系 method の挙動に影響する。また stiff 参照解が
+issue #158 で BDF に差し替わった。再計算スコープ (再計算時間削減のため流用最大化):
+
+| 系列 | non-stiff (narrow) | stiff (wide) | ψ 保存 |
+|---|---|---|---|
+| Krylov adaptive | **再計算** (controller 変更) | **再計算** | ✅ |
+| Chebyshev adaptive | **再計算** (controller 変更) | **再計算** | ✅ |
+| Krylov fixed (cfm4) | 0.8.0 流用 (controller 非依存 + 参照解不変) | **再計算** (新 BDF 参照に統一) | ❌ |
+| QuTiP | **再計算** (状態保存目的) | **再計算** (新 BDF 参照 + 状態保存) | ✅ |
+
+> 固定 cfm4 の ψ を保存しない理由: cfm4 は version 依存 (伝播器実装が version で
+> 変わりうる) で更新ごとに再計算が必要なため, 今保存しても再利用価値が小さい。
+> stiff cfm4 は新 BDF 参照での infidelity を得るため CSV 行は再生成するが ψ は残さない。
+> narrow cfm4 は 0.8.0 を流用 (固定 cfm4 は 0.14.0 の adaptive controller 変更の影響を
+> 受けず, narrow 参照解も不変なので infidelity 有効; 同一マシン・同一アルゴリズムで
+> wall_sec も比較可能)。
+
+> QuTiP を **両 scenario とも再計算する理由**:
+> - stiff: 参照解が Adams → BDF (#158) に差し替わった上, 過去 run が状態ベクトルを
+>   未保存で新参照では再計算できず実行必須 (floor cell `tol=1e-9` は infidelity
+>   7.98e-12 が参照差 8.5e-12 に支配される; `tol=1e-5` も ±35% 変わる)。
+> - non-stiff: infidelity 値自体は参照解不変で変わらないが, 過去 run が状態ベクトルを
+>   未保存だったため「将来の参照解変更時に再実行が必要」な負債だった。今のうちに
+>   `--save-states-dir` 付きで再計算して ψ を残すことで, 問題 npz を変えない限り QuTiP
+>   cell は version / 参照解変更を横断して再利用可能になる (#158 再発防止)。
+>
+> **保存先**: QuTiP は maqina version 非依存 (問題 + ODE ソルバのみで決まる) なので
+> version dir ではなく共有 `benchmarks/results/qutip/` に置く (CSV + `states/`)。
+> wall_sec は version 非依存, infidelity は参照解依存 (参照変更時は保存 ψ から再生成)。
+> 既存 `results/qutip/bench_*.csv` は状態保存 + 新参照で取り直すため `.bak` に退避して
+> fresh 再生成する (QuTiP は決定的なので psi 不変, non-stiff infidelity も同値,
+> stiff infidelity のみ新 BDF 参照で更新)。
+
+再計算は `scripts/run_bench_readme_0_14_0.sh` で一括起動 (README ベンチ専用
+サーバー = 回帰/perf 用 EPYC 7713P とは別機; 0.8.0/0.12.0 README 図と同一サーバー・
+同一設定 [BLAS/RAYON とも env 未設定 = default] に揃える)。出力:
+- maqina (version 依存): `benchmarks/results/0.14.0/bench_<scenario>.csv`
+  + `states/` (adaptive 18 cell; cfm4 は ψ 非保存)
+- QuTiP (version 非依存): `benchmarks/results/qutip/bench_<scenario>.csv` + `states/` (8 cell)
+
+保存 ψ 合計 26 cell ≒ 100 MiB。所要は QuTiP だけで約 65h (stiff ~48h + non-stiff ~17h,
+既存実測ベース) 追加。
+
+**プロット (流用 cell の結合)**: `plot_readme_figure.py` は系列を `(solver,
+variant)` で判定する。流用する 0.8.0 narrow 固定 cfm4 は `solver=kinema` (旧
+package 名) なので `solver=maqina` に直した reused CSV を作ってから渡す:
+
+```bash
+# 0.8.0 narrow 固定 cfm4 (krylov_fixed) を solver=maqina に直して再利用 CSV 化
+# (ファイル名は bench_ 始まりで track 対象にする)
+awk -F, 'NR==1 || $6=="krylov_fixed"' benchmarks/results/0.8.0/bench_non-stiff.csv \
+  | sed 's/,kinema,krylov_fixed,/,maqina,krylov_fixed,/' \
+  > benchmarks/results/0.14.0/bench_reused_non-stiff.csv
+
+# plot に渡す CSV:
+#  - benchmarks/results/0.14.0/bench_*.csv : 再計算した maqina 全系列
+#                                            (+ bench_reused_non-stiff.csv = narrow 固定 cfm4)
+#  - benchmarks/results/qutip/bench_*.csv  : 再計算した QuTiP (両 scenario, version 非依存共有)
+uv run python -m benchmarks.plot_readme_figure \
+  --input-csv benchmarks/results/0.14.0/bench_*.csv \
+              benchmarks/results/qutip/bench_*.csv \
+  --version 0.14.0
+```
