@@ -77,7 +77,7 @@ result = ann.run(
     psi0,
     t0=0.0,
     t1=sched.T,
-    atol=1e-8,
+    atol=1e-6,
 )
 
 # Check the overlap with the ground state of H_p (classical Ising solution).
