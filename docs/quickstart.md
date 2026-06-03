@@ -75,7 +75,7 @@ result = ann.run(
     psi0,
     t0=0.0,
     t1=sched.T,
-    atol=1e-8,
+    atol=1e-6,
 )  # method unspecified → default "cfm4_adaptive_richardson_chebyshev"
 
 # Check the overlap with the ground state of H_p (classical Ising solution).
@@ -126,7 +126,7 @@ result = ann.run(
     psi0,
     t0=0.0,
     t1=sched.T,
-    atol=1e-8,
+    atol=1e-6,
     observables={"M_z": m_z},
     save_tlist=save_tlist,
 )  # method unspecified → default "cfm4_adaptive_richardson_chebyshev"
@@ -161,7 +161,7 @@ psi0 = uniform_superposition(n)
 m_z = Observable.magnetization(n)
 
 ann = QuantumAnnealer(prob, sched)
-sim = ann.create_simulator(psi0, t0=0.0, atol=1e-8)
+sim = ann.create_simulator(psi0, t0=0.0, atol=1e-6)
 # method unspecified → default "cfm4_adaptive_richardson_chebyshev"
 
 sim.advance_to(sched.T / 2)
@@ -209,15 +209,24 @@ results).
 ## 5. Adiabaticity check via fidelity with the instantaneous ground state
 
 In quantum annealing analysis, the overlap between the instantaneous
-ground state ``|gs(t)⟩`` of ``H(t)`` and the dynamically obtained state
-``|ψ(t)⟩``, ``F(t) = |⟨gs(t)|ψ(t)⟩|²``, is the primary indicator of
-adiabaticity. By the adiabatic theorem, if the initial state is the
-ground state of ``H(0)``, ``F(t) ≡ 1`` is required in the ``T → ∞`` limit.
-For the standard linear schedule (``A(0)=1``, ``B(0)=0``), the ground
-state of ``H(0) = -Σ h_x_i X_i`` is the uniform superposition
-``|+⟩^N = uniform_superposition(n)``, so starting from this initial state
-gives ``F(0) = 1``. Short ``T`` induces non-adiabatic transitions with
-``F(t) < 1``; large ``T`` brings ``F(t)`` asymptotically to ``1``, as
+ground state of ``H(t)`` and the dynamically obtained state ``|ψ(t)⟩`` is
+the primary indicator of adiabaticity. By the adiabatic theorem, starting
+from the ground state of ``H(0)`` keeps the state in the instantaneous
+ground manifold in the ``T → ∞`` limit. For the standard linear schedule
+(``A(0)=1``, ``B(0)=0``), the ground state of ``H(0) = -Σ h_x_i X_i`` is the
+uniform superposition ``|+⟩^N = uniform_superposition(n)``, so ``F(0) = 1``.
+
+**Note on the Ising Z2 degeneracy**: ``H_problem = -Σ J_ij Z_i Z_j``
+commutes with the global spin flip ``Π_i X_i``, so its classical ground
+state is **2-fold degenerate** (a spin configuration and its global flip).
+The symmetric initial state ``|+⟩^N`` stays in the symmetric sector
+throughout and, in the adiabatic limit, converges to the *symmetric
+superposition* of the two degenerate ground states. Therefore the overlap
+with a *single* ground-state vector saturates at ``0.5``, not ``1``. The
+physically meaningful quantity is the fidelity with the instantaneous
+ground **space**, ``F(t) = Σ_{j∈GS} |⟨φ_j(t)|ψ(t)⟩|²``, which → ``1`` in
+the adiabatic limit. Short ``T`` induces non-adiabatic transitions
+(``F(t) < 1``); large ``T`` brings ``F(t)`` asymptotically to ``1``, as
 verified below.
 
 Implementation points:
@@ -226,11 +235,12 @@ Implementation points:
   ``store_states=True`` so that ``ψ(t)`` at each time is stored in
   ``QuantumResult.states``.
 - For the same time series, call
-  ``instantaneous_eigenstates(prob, sched, t=t, k=1, ...)`` to obtain
-  the instantaneous ground state, then compute
-  ``|⟨gs(t)|ψ(t)⟩|²``. The ground state has an arbitrary global phase
-  ``e^{iφ}`` but ``|⟨gs|ψ⟩|²`` is phase-invariant, so this is not an
-  issue.
+  ``instantaneous_eigenstates(prob, sched, t=t, k=2, ...)`` to obtain the
+  (2-fold degenerate) instantaneous ground space, then sum
+  ``Σ_j |⟨φ_j(t)|ψ(t)⟩|²`` over it. Each eigenvector has an arbitrary global
+  phase ``e^{iφ}`` but ``|⟨φ_j|ψ⟩|²`` is phase-invariant, so this is not an
+  issue. (Projecting onto only ``k=1`` would plateau at ``0.5`` here — see
+  the Z2 degeneracy note above.)
 
 ```python
 import numpy as np
@@ -253,7 +263,9 @@ h_x = np.ones(n)
 psi0 = uniform_superposition(n)             # ground state of H(0)
 
 # Compare short T (non-adiabatic) vs long T (near-adiabatic limit).
-for T in (1.0, 100.0):
+# T = 3000 makes this n=6 SK instance genuinely adiabatic; T = 100 is still
+# far from the adiabatic limit for this instance.
+for T in (1.0, 3000.0):
     sched = Schedule.linear(T=T, h_x=h_x)
     save_tlist = np.linspace(0.0, sched.T, 11)
 
@@ -262,24 +274,30 @@ for T in (1.0, 100.0):
         psi0,
         t0=0.0,
         t1=sched.T,
-        atol=1e-8,
+        atol=1e-6,
         save_tlist=save_tlist,
         store_states=True,
     )  # method unspecified → default "cfm4_adaptive_richardson_chebyshev"
 
     print(f"T = {T}")
     for t, psi_t in zip(result.times, result.states, strict=True):
-        # k=1 for instantaneous ground state (n <= 12, so exact is convenient).
+        # k=2: project onto the 2-fold (Z2) degenerate instantaneous ground
+        # space and sum the overlaps (n <= 12, so exact is convenient).
         _, gs = instantaneous_eigenstates(
-            prob, sched, t=float(t), k=1, method="exact"
+            prob, sched, t=float(t), k=2, method="exact"
         )
-        fidelity = float(np.abs(np.vdot(gs[:, 0], psi_t)) ** 2)
+        fidelity = float(
+            sum(np.abs(np.vdot(gs[:, j], psi_t)) ** 2 for j in range(gs.shape[1]))
+        )
         print(f"  t/T = {t / sched.T:4.2f}: F(t) = {fidelity:.6f}")
 ```
 
 Running this, at ``T = 1`` the final ``F(T)`` deviates significantly from
-``1``, while at ``T = 100`` ``F(t) ≈ 1`` holds at all times. This is the
-numerical confirmation of "fidelity = 1 in the adiabatic limit".
+``1`` (strongly non-adiabatic; ``F(T) ≈ 0.04``), while at ``T = 3000``
+``F(t) ≈ 1`` holds at all times (``F(T) ≈ 0.9999``). This is the numerical
+confirmation of "fidelity = 1 in the adiabatic limit" — measured against the
+2-fold degenerate ground **space** (projecting onto a single ground state
+would plateau at ``0.5``).
 
 For ``n > 12`` where dense ``eigh`` is impractical, switch to
 ``method="lanczos"`` (increasing ``k`` lets you also track leakage into
@@ -336,7 +354,7 @@ result = ann.run(
     psi0,
     t0=0.0,
     t1=sched.T,
-    atol=1e-8,
+    atol=1e-6,
 )  # default method "cfm4_adaptive_richardson_chebyshev"
 print(f"n_steps = {result.n_steps_actual}")
 ```

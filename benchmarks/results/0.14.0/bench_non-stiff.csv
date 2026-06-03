@@ -1,0 +1,10 @@
+scenario,n,T,seed,solver,variant,knob_name,knob_value,wall_sec,infidelity,n_steps_eff
+non-stiff,18,10000.0,20260518,maqina,krylov_adaptive,atol,0.001,1731.6637523686513,7.979653805267883e-05,2054
+non-stiff,18,10000.0,20260518,maqina,krylov_adaptive,atol,1e-05,4371.449146928266,8.252221128657311e-11,8500
+non-stiff,18,10000.0,20260518,maqina,krylov_adaptive,atol,1e-07,9529.905030235648,0.0,21967
+non-stiff,18,10000.0,20260518,maqina,chebyshev_adaptive,atol,0.01,299.75329172518104,0.0009132557073274761,1000
+non-stiff,18,10000.0,20260518,maqina,chebyshev_adaptive,atol,0.001,397.20714071393013,9.860200994671331e-05,2050
+non-stiff,18,10000.0,20260518,maqina,chebyshev_adaptive,atol,0.0001,651.665394145064,1.776060875235963e-05,4805
+non-stiff,18,10000.0,20260518,maqina,chebyshev_adaptive,atol,1e-05,948.0778486337513,0.0,8506
+non-stiff,18,10000.0,20260518,maqina,chebyshev_adaptive,atol,1e-06,1352.1782311499119,0.0,13763
+non-stiff,18,10000.0,20260518,maqina,chebyshev_adaptive,atol,1e-07,1932.2596486080438,0.0,21986

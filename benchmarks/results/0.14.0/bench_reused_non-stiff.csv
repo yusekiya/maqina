@@ -1,0 +1,5 @@
+scenario,n,T,seed,solver,variant,knob_name,knob_value,wall_sec,infidelity,n_steps_eff
+non-stiff,18,10000.0,20260518,maqina,krylov_fixed,dt,5.0,741.0672194072977,0.0008770755212015313,2000
+non-stiff,18,10000.0,20260518,maqina,krylov_fixed,dt,2.0,1547.2092738579959,1.9371091692477194e-05,5000
+non-stiff,18,10000.0,20260518,maqina,krylov_fixed,dt,0.5,3619.5610511349514,0.0,20000
+non-stiff,18,10000.0,20260518,maqina,krylov_fixed,dt,0.2,7692.767993866466,0.0,50000
