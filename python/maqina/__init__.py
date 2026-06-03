@@ -23,17 +23,15 @@ Usage
 >>> n = 4
 >>> J = np.random.default_rng(0).normal(size=(n, n)) / np.sqrt(n)
 >>> J = (J + J.T) / 2; np.fill_diagonal(J, 0.0)
->>> h = np.zeros(n)
->>> prob = IsingProblem(
-...     n=n,
-...     H_p_diag=diag_from_J_h(J, h),
-...     h_x=np.ones(n),
-... )
->>> sched = Schedule.linear(T=30.0)
+>>> prob = IsingProblem(n=n, H_p_diag=diag_from_J_h(J))   # h_x は Schedule 側
+>>> sched = Schedule.linear(T=30.0, h_x=np.ones(n))
 >>> psi0 = uniform_superposition(n)
 >>> ann = QuantumAnnealer(prob, sched)
 >>> res = ann.run(psi0, 0.0, sched.T, method="m2", n_steps=300)
->>> print(np.abs(res.psi_final[:8]) ** 2)   # 最終状態 |ψ(T)|^2 の冒頭 8 成分
+>>> res.psi_final.shape                       # 最終状態 ψ(T) の shape
+(16,)
+>>> bool(np.isclose(np.linalg.norm(res.psi_final), 1.0))  # ユニタリ発展でノルム保存
+True
 
 設計詳細は ``docs/design/INDEX.md`` 参照. 各公開モジュールに対応する ``.pyi``
 スタブ (``python/maqina/*.pyi``) を一次 API リファレンスとして読むことを

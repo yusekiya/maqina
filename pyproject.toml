@@ -38,8 +38,15 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# --doctest-modules で python/maqina 配下の docstring 例 (>>> ブロック) を収集・
+# 実行し, Phase 跨ぎの API 変更で例が壊れたら CI で検出できるようにする (issue #163).
+# python_files = ["test_*.py"] は維持するので tests/ 側は通常のテスト関数のみ収集され,
+# python/maqina/ 側は doctest のみが収集される (二重収集なし).
+addopts = ["--doctest-modules"]
+testpaths = ["tests", "python/maqina"]
 python_files = ["test_*.py"]
+# ELLIPSIS (...) と NORMALIZE_WHITESPACE で出力例の脆さを緩和する.
+doctest_optionflags = ["NORMALIZE_WHITESPACE", "ELLIPSIS"]
 markers = [
     "slow: 重い統合テスト (Solver.run / 大規模ベンチ等). pytest -m 'not slow' で除外可",
 ]

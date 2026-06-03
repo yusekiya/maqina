@@ -158,9 +158,8 @@ class AnnealingSimulator:
     >>>
     >>> n = 4
     >>> J = np.zeros((n, n)); J[0, 1] = J[1, 0] = -1.0
-    >>> prob = IsingProblem(n=n, H_p_diag=diag_from_J_h(J, np.zeros(n)),
-    ...                     h_x=np.ones(n))
-    >>> sched = Schedule.linear(T=10.0)
+    >>> prob = IsingProblem(n=n, H_p_diag=diag_from_J_h(J))   # h_x は Schedule 側
+    >>> sched = Schedule.linear(T=10.0, h_x=np.ones(n))
     >>> psi0 = uniform_superposition(n)
     >>> # default ``method="cfm4_adaptive_richardson_chebyshev"`` を使う場合,
     >>> # ``advance_to`` には ``n_steps`` を渡さない (PI controller が dt を

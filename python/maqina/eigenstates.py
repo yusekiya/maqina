@@ -103,12 +103,8 @@ def instantaneous_eigenstates(
     >>> from maqina import IsingProblem, Schedule
     >>> from maqina.eigenstates import instantaneous_eigenstates
     >>> n = 4
-    >>> prob = IsingProblem(
-    ...     n=n,
-    ...     H_p_diag=np.arange(1 << n, dtype=np.float64),
-    ...     h_x=np.ones(n),
-    ... )
-    >>> sched = Schedule.linear(T=10.0)
+    >>> prob = IsingProblem(n=n, H_p_diag=np.arange(1 << n, dtype=np.float64))
+    >>> sched = Schedule.linear(T=10.0, h_x=np.ones(n))   # h_x は Schedule 側
     >>> eigvals, eigvecs = instantaneous_eigenstates(prob, sched, t=5.0, k=2)
     >>> eigvals.shape, eigvecs.shape
     ((2,), (16, 2))
