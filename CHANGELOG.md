@@ -11,6 +11,34 @@
   (`0.N.0` → `0.N+1.0`) で破壊的変更を吸収する (`docs/conventions.md`
   §2 参照).
 
+## Unreleased
+
+### Added
+
+- **`maqina.builders` モジュールを実装** (issue #162): 長らく空スケルトン
+  (`__all__ = []`) のまま放置されていた `builders.py` に, k-local 表現から Z
+  基底の対角ベクトル `H_p_diag: (2^N,)` を構築する純関数 2 つを実装した。
+  - `diag_from_pauli_terms(n, terms)`: Pauli-Z term の和から対角ベクトルを構築。
+    項は **`(coeff, sites)` の 2 要素タプル** で表す (演算子文字列は持たない;
+    builders は Z 演算子のみ扱うため演算子種は Z 固定, 次数は `len(sites)` で
+    決まり文字列は冗長)。同じ/順序違いのサイト集合を持つ複数 term は **係数を
+    加算** (Hamiltonian = 項の和)。空タプル `()` は単位演算子 `I` (定数項/
+    エネルギーオフセット) を表す。
+  - `diag_from_J_h(J, h)`: SK 型結合行列 `J` と局所場 `h` から
+    `H_p = -Σ_{i<j} J_ij σ_i σ_j - Σ_i h_i σ_i` の対角を構築。
+  - `ValueError` 契約: 1 項内のサイト重複 (`Z_i² = I` の簡約はしない) / 範囲外
+    インデックス / `J` の非正方・非対称・非ゼロ対角・複素 / `h` の shape 不整合・
+    複素。
+  - `python/maqina/__init__.py` / `simulator.py` の docstring 例が前提にしていた
+    `from maqina.builders import diag_from_J_h` が実際に import 可能になった
+    (例自体の Phase C ドリフト修正 + doctest CI gate は #163)。
+
+### Note
+
+- 公開 API の **追加のみ** で破壊的変更は無い。version bump は本変更単体では
+  行わず, 変更が積み重なった次回の bump PR で `Unreleased` → `0.N.0` へ確定する
+  (`docs/conventions.md` §2 の「bump は Phase/バッチ末尾の PR に同梱」運用)。
+
 ## 0.14.0 - 2026-05-30 — Phase C follow-up: adaptive step-size controller 追従性改善 (真の PI 化 / reject 過剰縮小解消 / `ControllerConfig` 公開, umbrella #148)
 
 ### Breaking

@@ -53,6 +53,7 @@ N=18, T=10000. Details are in
 ```python
 import numpy as np
 from maqina import IsingProblem, QuantumAnnealer, Schedule
+from maqina.builders import diag_from_J_h
 from maqina.initial_states import uniform_superposition
 
 n = 6
@@ -61,12 +62,9 @@ J = rng.normal(size=(n, n)) / np.sqrt(n)
 J = (J + J.T) / 2
 np.fill_diagonal(J, 0.0)
 
-# Diagonalize H_problem = -Σ_{i<j} J_ij Z_i Z_j in the Z basis.
-# bit 0 = LSB, σ_i(x) = 1 - 2·b_i (see CLAUDE.md "physical conventions").
-x = np.arange(1 << n, dtype=np.int64)
-bits = ((x[:, None] >> np.arange(n)) & 1).astype(np.int64)
-sigma = 1 - 2 * bits  # shape (2^n, n)
-H_p_diag = -np.einsum("ij,xi,xj->x", J, sigma, sigma) / 2
+# Diagonalize H_problem = -Σ_{i<j} J_ij Z_i Z_j in the Z basis with the
+# builders helper (bit 0 = LSB, σ_i = 1 - 2·b_i; see CLAUDE.md conventions).
+H_p_diag = diag_from_J_h(J, np.zeros(n))
 
 prob = IsingProblem(n=n, H_p_diag=H_p_diag)
 sched = Schedule.linear(T=20.0, h_x=np.ones(n))

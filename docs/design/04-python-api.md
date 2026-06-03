@@ -19,51 +19,37 @@ from maqina.eigenstates import instantaneous_eigenstates
 ### 4.2 `IsingProblem`
 
 ```python
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class IsingProblem:
     n: int                       # スピン数
     H_p_diag: np.ndarray         # shape (2**n,), real, contiguous
-    h_x: np.ndarray              # shape (n,), real, contiguous
 
     def __post_init__(self) -> None:
-        # shape / dtype / 非NaN チェック。h_x の長さが n か確認。
+        # shape / dtype / contiguous / 非NaN チェック。
         # n の上限ガードは入れない (numpy が allocate 段階で MemoryError を
         # 出すのに任せる)。
         ...
-
-    @classmethod
-    def from_pauli_terms(cls, n: int, terms: list[PauliTerm], h_x: np.ndarray) -> "IsingProblem":
-        """ヘルパ: PauliTerm リストから H_p_diag を構築 (内部で builders.diag_from_pauli_terms)."""
-        ...
-
-    @classmethod
-    def from_J_h(cls, J: np.ndarray, h: np.ndarray, h_x: np.ndarray) -> "IsingProblem":
-        """ヘルパ: 2-local J, h から H_p_diag を構築."""
-        ...
 ```
 
-`PauliTerm` は dataclass:
+`IsingProblem` は問題側の静的構造 (`H_p_diag`) のみ持つ pure data container。
+横磁場振幅 `h_x` は issue #142 Phase C で `Schedule` 側へ移管済み (時間発展
+係数は `Schedule` に集約)。`from_pauli_terms` / `from_J_h` の classmethod
+ファサードは提供せず, **`builders` で対角ベクトルを構築して `IsingProblem`
+に渡す** 2 段経路に統一した (pure container 設計と整合)。
 
 ```python
-@dataclass(frozen=True)
-class PauliTerm:
-    sites: tuple[int, ...]   # 作用サイト
-    ops: str                 # "Z", "ZZ", "ZZZ", ... (Z のみ許容)
-    coeff: float
+prob = IsingProblem(n=n, H_p_diag=diag_from_J_h(J, h))
 ```
 
-builders は **Z のみ**を許容 (off-diagonal Pauli を渡されたら ValueError)。
-これは「H_problem は必ず Z 基底で対角」という設計契約を API 表面で守るため。
-
-実装ステータス: `IsingProblem` 本体 (フィールド + `__post_init__` 検証) は
-Phase 1 C6 で実装済み。`from_pauli_terms` / `from_J_h` classmethod は
-`builders` モジュールの実装 (別 issue) 待ちで, Phase 1 内 (C6 以降) で
-追加予定。それまでは `builders.diag_from_pauli_terms` /
-`builders.diag_from_J_h` を直接呼んで `H_p_diag` を構築し,
-`IsingProblem(n=..., H_p_diag=..., h_x=...)` に渡す経路を使う。なお
 実装上は `numpy.ndarray` のフィールドを持つため `@dataclass(frozen=True,
 eq=False)` を採用している (既定の `__eq__` は array の真偽値変換で
 `ValueError` になるため)。
+
+`builders` (§6, 実装済み) は **Z 演算子のみ**を扱う (「H_problem は必ず Z
+基底で対角」という設計契約)。`diag_from_pauli_terms` の項は `(coeff, sites)`
+の 2 要素で表し, 演算子文字列は持たない (Z 固定・次数は `len(sites)` で決まる
+ため冗長)。`ValueError` 条件は 1 項内のサイト重複 / 範囲外インデックス /
+`diag_from_J_h` の非対称・非ゼロ対角・複素・shape 不整合。
 
 ### 4.3 `Schedule`
 
