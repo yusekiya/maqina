@@ -42,10 +42,10 @@ H_problem = a k-local polynomial in Z operators only (diagonal in the Z basis)
 
 | Narrow dynamic range problem                               | Wide dynamic range problem                           |
 | ---------------------------------------------------------- | ---------------------------------------------------- |
-| ![Pareto narrow](docs/figures/0.12.0_pareto_non_stiff.png) | ![Pareto wide](docs/figures/0.12.0_pareto_stiff.png) |
+| ![Pareto narrow](docs/figures/0.14.0_pareto_non_stiff.png) | ![Pareto wide](docs/figures/0.14.0_pareto_stiff.png) |
 
 N=18, T=10000. Details are in
-[`benchmarks/results/0.12.0/SUMMARY.md`](benchmarks/results/0.12.0/SUMMARY.md)
+[`benchmarks/results/0.14.0/SUMMARY.md`](benchmarks/results/0.14.0/SUMMARY.md)
 (Japanese only).
 
 ## Getting started
