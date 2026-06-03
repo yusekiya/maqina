@@ -3,20 +3,99 @@
 
 """``H_problem`` 対角ベクトル構築ヘルパ.
 
-ユーザが k-local 表現 (Pauli term の和 / Sherrington–Kirkpatrick 型の
-``J, h``) で問題を書きたい場合に, Z 基底での ``H_p_diag: (2^N,)`` 形に
-変換する純粋関数群を提供する.
+ユーザが k-local 表現 (Z 演算子のみからなる Pauli term の和 / Sherrington–
+Kirkpatrick 型の ``J, h``) で問題を書きたい場合に, Z 基底での
+``H_p_diag: (2^N,)`` 形に変換する純粋関数群を提供する. ``IsingProblem`` は
+対角ベクトルを **受け取る** だけのデータコンテナで, k-local 表現の展開は
+本モジュールが担う (利用は任意; ユーザが自前で対角ベクトルを構築して
+``IsingProblem`` に渡してもよい).
 
-* ``diag_from_pauli_terms(terms, n)``: Z 演算子のみからなる Pauli term の
-  リストを対角ベクトルへ.
-* ``diag_from_J_h(J, h)``: ``H = -Σ_{i<j} J_ij Z_i Z_j - Σ_i h_i Z_i`` の
+* :func:`diag_from_pauli_terms`: ``(coeff, sites)`` の Pauli-Z term リストを
+  対角ベクトルへ.
+* :func:`diag_from_J_h`: ``H = -Σ_{i<j} J_ij Z_i Z_j - Σ_i h_i Z_i`` の
   対角ベクトル化.
 
-ビット規約 (bit 0 = LSB, ``σ_i = 1 - 2·b_i``) は ``CLAUDE.md`` 「物理的
-取り決め」節と一致させる.
-
-Phase 1 で実装予定 (現状は API スケルトン).
+ビット規約 (bit 0 = LSB, ``x = Σ_i b_i · 2^i``, spin ``σ_i = 1 - 2·b_i``) は
+``CLAUDE.md`` 「物理的取り決め」節と一致させる. いずれの関数も ``2^N`` 長の
+配列を allocate するため ``N <= 28`` 程度が現実的な上限.
 """
 from __future__ import annotations as annotations
+from collections.abc import Iterable as Iterable
+import numpy as np
 from typing import Any
-__all__: list[str] = []
+__all__ = ['diag_from_J_h', 'diag_from_pauli_terms']
+
+def diag_from_pauli_terms(n: int, terms: Iterable[tuple[float, tuple[int, ...]]]) -> np.ndarray:
+    """Pauli-Z term の和から ``H_p_diag`` を構築する (Z のみ, 対角).
+
+    各 term ``(coeff, sites)`` は演算子 ``coeff · Z_{i_1} Z_{i_2} ⋯`` を表す
+    (``sites = (i_1, i_2, ⋯)``). 計算基底 ``|x⟩`` における固有値は
+    ``coeff · Π_j σ_{i_j}`` (``σ_i = 1 - 2·b_i ∈ {+1, -1}``) であり, これを
+    長さ ``2^n`` の配列に **加算で蓄積** する. Hamiltonian は項の和なので,
+    同じ (または順序違いの) サイト集合を持つ term が複数渡された場合はその
+    係数が足し合わされる (``Z_i Z_j = Z_j Z_i`` で対角・可換なため順序は不問).
+
+    演算子種は Z 固定 (本モジュールの対象は「Z 基底で対角な ``H_problem``」)
+    なので, 演算子文字列は指定しない. 何体項かは ``len(sites)`` で決まる.
+
+    Parameters
+    ----------
+    n
+        スピン数. ``n >= 1``. ``dim = 2**n`` を allocate するので ``n <= 28``
+        程度が現実的.
+    terms
+        ``(coeff, sites)`` の iterable. ``coeff`` は実数係数, ``sites`` は
+        作用サイトの ``tuple[int, ...]``. 空タプル ``()`` は単位演算子 ``I``
+        を表し, ``coeff`` を全成分に加算する (エネルギーオフセット).
+
+    Returns
+    -------
+    np.ndarray
+        shape ``(2**n,)``, dtype ``float64`` の C-contiguous な対角ベクトル.
+
+    Raises
+    ------
+    ValueError
+        以下のいずれかに該当する場合.
+
+        * ``n`` が 1 以上の整数でない
+        * いずれかの term の ``sites`` に範囲外 (``< 0`` または ``>= n``) の
+          インデックスが含まれる
+        * いずれかの term の ``sites`` 内でサイトが重複する (1 項内のサイトは
+          相異なるべき; ``Z_i² = I`` の簡約は行わない)
+    """
+    ...
+
+def diag_from_J_h(J: np.ndarray, h: np.ndarray | None=None) -> np.ndarray:
+    """``H_p = -Σ_{i<j} J_ij σ_i σ_j - Σ_i h_i σ_i`` の対角を構築する.
+
+    Sherrington–Kirkpatrick 型の結合行列 ``J`` と局所場 ``h`` から, Z 基底に
+    おける ``H_problem`` の対角ベクトル ``(2^n,)`` を作る. ``σ_i = 1 - 2·b_i``
+    (基底 ``|x⟩`` のビット ``b_i`` 由来) を 1 度だけ precompute し, 上三角
+    ``i < j`` のペア項と局所場項を蓄積する (符号は反強磁性慣習に合わせ負).
+
+    Parameters
+    ----------
+    J
+        shape ``(n, n)`` の実対称行列. 対角成分は ``J_ii = 0`` (自己結合なし).
+        ``i < j`` の上三角のみ使用する (対称性より ``J_ij = J_ji``).
+    h
+        shape ``(n,)`` の実ベクトル (局所縦磁場). ``None`` (既定) は局所場なし
+        (``h = 0``) を意味し, 内部で零ベクトルとして扱う (``h = 0`` のケースが
+        多いため省略可能).
+
+    Returns
+    -------
+    np.ndarray
+        shape ``(2**n,)``, dtype ``float64`` の C-contiguous な対角ベクトル.
+
+    Raises
+    ------
+    ValueError
+        以下のいずれかに該当する場合.
+
+        * ``J`` が 2 次元正方行列でない, または複素数を含む
+        * ``J`` が対称でない, または対角成分が 0 でない
+        * ``h`` が ``None`` でなく, shape が ``(n,)`` でない, または複素数を含む
+    """
+    ...
