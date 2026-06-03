@@ -5,9 +5,10 @@
 * ``Trajectory``: 観測量の時系列のみを切り出した補助コンテナ
   (post-processing 用途).
 
-Phase 1–5 subset
-----------------
-``docs/design/04-python-api.md`` §4.4 の ``QuantumResult`` に対応するフィールドを保持する:
+保持フィールド
+--------------
+``docs/design/04-python-api.md`` §4.4 の ``QuantumResult`` に対応するフィールドを保持する
+(各フィールドの導入 Phase は ``QuantumResult`` の Parameters を参照):
 
 * ``psi_final`` — 終端 ``ψ(T)`` (常に非 None)
 * ``t_history`` — 互換目的の deprecated 別名 (Phase 1 以来の名前を残す;
@@ -64,7 +65,7 @@ class Trajectory:
 
 @dataclass(frozen=True, eq=False)
 class QuantumResult:
-    """時間発展実行結果 (Phase 1–4 subset).
+    """時間発展実行結果 (frozen dataclass).
 
     Parameters
     ----------
@@ -82,65 +83,54 @@ class QuantumResult:
     n_matvec
         累積 matvec 呼出回数 (Lanczos 内部の ``apply_h`` 含む).
     success
-        Phase 4 追加. 駆動が ``RuntimeError`` を出さずに完走したか.
-        固定 dt 経路では常に ``True``. adaptive 経路で ``max_rejects``
-        連続超過時は ``RuntimeError`` が呼出側に伝播するため, ここまで
-        到達したら ``True`` を返す契約 (将来 ``catch`` 経路を入れる場合
-        ``False`` を返す余地を残すための signal).
+        駆動が ``RuntimeError`` を出さずに完走したか (Phase 4). 固定 dt 経路
+        では常に ``True``. adaptive 経路で ``max_rejects`` 連続超過時は
+        ``RuntimeError`` が呼出側に伝播するため, ここまで到達したら ``True``
+        を返す契約 (将来 ``catch`` 経路を入れる場合 ``False`` を返す余地を
+        残すための signal).
     method
-        Phase 4 追加. 実行された propagator 名 (``"m2"`` / ``"trotter"``
-        / ``"trotter_suzuki4"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"``
-        / ``"cfm4_adaptive_richardson_chebyshev"``). Phase B (#122) で
-        Chebyshev variant 追加. ``m_eff_stats`` のキー意味は Lanczos /
-        Chebyshev で「per-step propagator 評価コスト統計」として共用.
+        実行された propagator 名 (``"m2"`` / ``"trotter"`` /
+        ``"trotter_suzuki4"`` / ``"cfm4"`` / ``"cfm4_adaptive_richardson_krylov"``
+        / ``"cfm4_adaptive_richardson_chebyshev"``; Phase 4, Chebyshev variant
+        は Phase B #122). ``m_eff_stats`` のキー意味は Lanczos / Chebyshev で
+        「per-step propagator 評価コスト統計」として共用.
     n_steps_actual
-        Phase 4 追加. adaptive 経路で実際に accept された step 数.
-        固定 dt 経路では ``n_steps`` と一致する整数値を返し,
-        Phase 1–3 互換のために default ``None`` も許容する.
+        adaptive 経路で実際に accept された step 数 (Phase 4). 固定 dt 経路
+        では ``n_steps`` と一致する整数を返す (default ``None`` も許容).
     m_eff_stats
-        Phase 4 follow-up (issue #52 A) 追加. adaptive Richardson 経路で
-        per-step の Lanczos 部分空間次元合計 ``m_eff_sum`` (= 6 Lanczos
-        呼出の m_eff 合計, 早期打切なしで ``6m``) の累積統計. キーは
-        ``"total"`` (全 step 合算 = 実 matvec 数の見積もり), ``"mean"``
-        (per-step 平均), ``"min"`` / ``"max"`` (per-step 最小 / 最大),
-        ``"median"`` (per-step 中央値). 固定 dt 経路 (m2 / trotter /
-        cfm4 / trotter_suzuki4) では ``None`` を返す. adaptive M2 経路は
-        本 Phase では未対応のため ``None`` (将来 driver 拡張で支援する案
-        あり). 値の型は ``"total"`` のみ ``int``, それ以外は ``float``
-        (median / mean が非整数値になりうるため).
+        adaptive Richardson 経路で per-step の Lanczos 部分空間次元合計
+        ``m_eff_sum`` (= 6 Lanczos 呼出の m_eff 合計, 早期打切なしで ``6m``)
+        の累積統計 (Phase 4 follow-up, issue #52 A). キーは ``"total"``
+        (全 step 合算 = 実 matvec 数の見積もり), ``"mean"`` / ``"min"`` /
+        ``"max"`` / ``"median"`` (per-step 統計). 値の型は ``"total"`` のみ
+        ``int``, それ以外は ``float``. 固定 dt 経路と adaptive M2 経路
+        (未対応) では ``None``.
     times
-        Phase 5 (issue #47) 追加. ``QuantumAnnealer.run`` に
-        ``save_tlist`` を渡したときに記録される観測時刻軸. shape ``(K,)``
-        float64 で ``save_tlist`` と同一の値 (driver は内部で step
-        boundary に ``save_tlist`` 時刻をマージし, accept 時に当該点で
-        スナップショットを取る). ``save_tlist=None`` (デフォルト, 最節約
-        モード) では ``None``. ``observables_history`` および ``states``
-        の time index と整合する.
+        ``QuantumAnnealer.run`` に ``save_tlist`` を渡したときに記録される
+        観測時刻軸 (Phase 5, issue #47). shape ``(K,)`` float64 で
+        ``save_tlist`` と同一の値, ``observables_history`` / ``states`` の
+        time index と整合する. ``save_tlist=None`` (最節約モード) では
+        ``None``.
     states
-        Phase 5 (issue #47) 追加. ``store_states=True`` かつ
-        ``save_tlist`` 非 None の経路でのみ非 None. shape
-        ``(K, 2**n)`` complex128, ``states[i]`` が ``times[i]`` 時刻での
-        ψ スナップショット. それ以外の経路 (``save_tlist=None`` or
-        ``store_states=False``) では ``None``.
+        ``store_states=True`` かつ ``save_tlist`` 非 None の経路でのみ非 None
+        (Phase 5, issue #47). shape ``(K, 2**n)`` complex128, ``states[i]``
+        が ``times[i]`` 時刻での ψ スナップショット. それ以外では ``None``.
     probabilities
-        Phase 5 (issue #47) 追加. ``psi_final`` の振幅二乗
-        ``|psi_final|^2`` を eager 計算した shape ``(2**n,)`` float64.
-        どの経路でも常に非 None で返る (最終状態の付随情報なので
-        ``save_tlist`` の有無に依らない). 数値的には ``np.abs(psi_final)
-        ** 2`` と同値で, 呼出側で都度計算する手間を省くキャッシュ.
+        ``psi_final`` の振幅二乗 ``|psi_final|^2`` を eager 計算した shape
+        ``(2**n,)`` float64 (Phase 5, issue #47). 最終状態の付随情報なので
+        ``save_tlist`` の有無に依らずどの経路でも常に非 None で返る.
     beta_m_stats
-        Phase 7 (issue #93) 追加. adaptive Richardson 経路で per-step の
-        Lanczos a posteriori 誤差代表値 ``β_m_eff = err_lanczos_total / dt``
-        の累積統計. キーは ``"mean"`` / ``"median"`` / ``"min"`` / ``"max"``
-        / ``"p10"`` / ``"p90"`` で全て ``float``. 固定 dt 経路 (m2 /
-        trotter / cfm4 / trotter_suzuki4) では ``None``. 値が小さい (≪
-        ``tol_step``) なら Krylov 部分空間で十分閉じている, 値が大きい
-        (~ ``tol_step`` 以上) なら ``m`` を増やすことを検討すべき診断指標.
+        adaptive Richardson 経路で per-step の Lanczos a posteriori 誤差代表値
+        ``β_m_eff = err_lanczos_total / dt`` の累積統計 (Phase 7, issue #93).
+        キーは ``"mean"`` / ``"median"`` / ``"min"`` / ``"max"`` / ``"p10"``
+        / ``"p90"`` で全て ``float``. 固定 dt 経路では ``None``. 値が小さい
+        (≪ ``tol_step``) なら Krylov 部分空間で十分閉じており, 大きい
+        (~ ``tol_step`` 以上) なら ``m`` 増大を検討すべき診断指標.
     n_krylov_insufficient
-        Phase 7 (issue #93) 追加. adaptive Richardson 経路で
-        ``err_lanczos_total > tol_step`` を検出した累積 step 数. Krylov
-        充分性の集計診断指標. 0 なら全 step が Krylov 充分, 非ゼロなら
-        ``m`` 増大を検討する. 固定 dt 経路では ``None``.
+        adaptive Richardson 経路で ``err_lanczos_total > tol_step`` を検出した
+        累積 step 数 (Phase 7, issue #93). Krylov 充分性の集計診断指標で,
+        0 なら全 step が Krylov 充分, 非ゼロなら ``m`` 増大を検討する.
+        固定 dt 経路では ``None``.
     """
 
     psi_final: np.ndarray

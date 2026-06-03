@@ -10,9 +10,10 @@
 //!   row-major で返す. **`q` の row k が λ_k に対応する単位固有
 //!   ベクトル** という規約.
 //!
-//! Phase 1 では Lanczos (`src/krylov.rs`) からのみ呼ばれる. tridiag だけが
-//! landed した時点では `pub(crate)` 項目が未参照になるため, Lanczos 着地
-//! までの間 `dead_code` lint を許容する.
+//! `tridiag_eigh` は Lanczos (`src/krylov.rs`) と Python wrap
+//! (`tridiag_eigh_py`) から呼ばれる. モジュール全体で `dead_code` lint を
+//! 許容するのは, test 専用 helper や build profile によって未参照になる
+//! 項目を一括で吸収するため (`src/matvec.rs`, `src/blas.rs` と同じ運用).
 
 #![allow(dead_code)]
 

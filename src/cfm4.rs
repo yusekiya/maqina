@@ -16,8 +16,10 @@
 //! `apply_h` を呼ぶ「線形結合 callback 形式」を採用
 //! (`docs/design/05-2-lanczos.md` §5.2 末尾, §5.3). LTE ~ O(dt^5), per-step matvec は 2m.
 //!
-//! Phase 4 で `cfm4_step_with_m2_estimate` / `cfm4_step_with_
-//! richardson_estimate` を本ファイルに追加予定.
+//! Phase 4 で `cfm4_step_with_m2_estimate` / `cfm4_step_with_richardson_estimate`
+//! (step-doubling Richardson による局所誤差推定子) を追加. Phase B (issue #122)
+//! で短時間プロパゲータを Chebyshev 3 項漸化に差し替えた variant
+//! (`cfm4_step_chebyshev*`) も本ファイルに同居する.
 //!
 //! 本関数群は `lanczos_propagate` を介して Python に状態を返す **公開
 //! プロパゲータ** であり, PyO3 wrap `m2_midpoint_step_py` /
@@ -27,8 +29,8 @@
 //!
 //! PyO3 の `wrap_pyfunction!` 経由で `_rust` module に登録される関数は
 //! Rust の dead_code 解析からは「呼ばれていない」と見えるため, matvec.rs /
-//! krylov.rs と同様に module 全体で lint を抑制する (Phase 4 までは内部
-//! caller がいない関数本体にも同じ抑制が必要).
+//! krylov.rs と同様に module 全体で lint を抑制する (build profile による
+//! dispatch variant や参照実装 helper の未参照も同じ抑制で吸収する).
 
 #![allow(dead_code)]
 
