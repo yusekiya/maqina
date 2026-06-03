@@ -12,8 +12,8 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
 で生成するのが簡便 (現 instance の ``problem`` / ``schedule`` / ``m`` /
 ``propagator_tol`` を引き継ぐ).
 
-仕様 (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase B)
-------------------------------------------------------
+仕様 (Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 + Phase B)
+---------------------------------------------------------------
 * サポート ``method``: ``"m2"`` (固定 dt M2 中点則, Phase 1), ``"trotter"``
   (固定 dt Strang 2 次 Trotter, Phase 2), ``"trotter_suzuki4"`` (固定 dt
   Suzuki S_4 4 次 Trotter, Phase 2 末), ``"cfm4"`` (固定 dt CFM4:2
@@ -23,11 +23,14 @@ step-wise stateful API. 中間時刻まで進めて状態を取り出し, ``Obse
   Richardson + PI controller で短時間プロパゲータを Chebyshev 3 項漸化に
   差し替えた variant; **issue #124 で `run` の default に採用**, N=18 で
   Lanczos 比 5.49× wall 高速). それ以外は ``NotImplementedError``.
-* ``save_tlist`` 引数は **API 互換性のために予約済み** だが本リリースでは
-  ``None`` のみ受け付ける (非 ``None`` で ``NotImplementedError``).
-  Phase 5 の ``QuantumResult.times`` / ``states`` 拡張と一緒に有効化する.
-* 観測量経路 (``observables=...``) も Phase 5 で追加予定. 現状は
-  ``QuantumResult.observables_history = {}`` 固定.
+* ``save_tlist`` (shape ``(K,)`` の観測時刻軸) を渡すと, driver が step
+  boundary に各時刻をマージし accept 時にスナップショットを記録する
+  (Phase 5 / issue #47). ``None`` (デフォルト) は **最節約モード** で中間
+  記録を一切行わず, ``QuantumResult.times`` も ``None`` になる.
+* 観測量経路 (``observables={name: Observable}``) と ``store_states=True`` は
+  ``save_tlist`` 非 ``None`` が前提. ``save_tlist=None`` のまま指定すると
+  「指定したのに無視」の debug 罠を避けるため明示的に ``ValueError`` で弾く.
+  結果は ``QuantumResult.observables_history`` / ``states`` に格納される.
 * adaptive 経路では ``n_steps`` を渡さない (``None`` で良い). 代わりに
   ``atol`` (PI 局所誤差閾値; driver の ``tol_step`` に map), ``dt_init``
   (初期 dt 提案; driver の ``dt0`` に map), ``dt_max`` (dt 上限; driver の
@@ -234,137 +237,85 @@ class QuantumAnnealer:
         t0, t1
             積分区間. ``t1 > t0``.
         method
-            プロパゲータ. ``"m2"`` (固定 dt M2 中点則, Phase 1),
-            ``"trotter"`` (固定 dt Strang 2 次 Trotter, Phase 2),
-            ``"trotter_suzuki4"`` (固定 dt Suzuki S_4 4 次 Trotter, Phase 2 末),
-            ``"cfm4"`` (固定 dt CFM4:2 commutator-free Magnus, Phase 3),
-            ``"cfm4_adaptive_richardson_krylov"`` (Phase 4 C3, step-doubling
-            Richardson + PI controller, Lanczos 短時間プロパゲータ), または
-            ``"cfm4_adaptive_richardson_chebyshev"`` (**default**, Phase B /
-            issue #122, 同じ Richardson + PI controller で短時間プロパゲータ
-            を Chebyshev 3 項漸化に差し替えた variant). default を Chebyshev に
-            しているのは issue #124 の判断による (N=18 で Lanczos 比 5.49× wall
-            高速の Pareto win). Trotter 系経路は Lanczos を呼ばないため
-            ``m`` / ``propagator_tol`` は無視される. ``"cfm4"`` /
-            ``"cfm4_adaptive_richardson_krylov"`` は M2 と同じく Lanczos を
-            介すので ``m`` / ``propagator_tol`` が有効. Chebyshev variant では
-            ``m`` は使われず, ``propagator_tol`` が Chebyshev 切り捨て次数
-            ``K_used`` を決める許容誤差として機能する.
+            プロパゲータ. 固定 dt 系: ``"m2"`` (M2 中点則), ``"trotter"``
+            (Strang 2 次), ``"trotter_suzuki4"`` (Suzuki S_4 4 次), ``"cfm4"``
+            (CFM4:2 commutator-free Magnus). adaptive 系 (step-doubling
+            Richardson + PI controller): ``"cfm4_adaptive_richardson_krylov"``
+            (Lanczos 短時間プロパゲータ), ``"cfm4_adaptive_richardson_chebyshev"``
+            (**default**, 短時間プロパゲータを Chebyshev 3 項漸化に差し替えた
+            variant; issue #124 で Lanczos 比 Pareto win により default 採用).
+            Trotter 系は Lanczos を呼ばないため ``m`` / ``propagator_tol`` を
+            無視する. ``"cfm4"`` / ``..._krylov`` は ``m`` / ``propagator_tol``
+            が有効. Chebyshev variant は ``m`` を使わず, ``propagator_tol`` が
+            Chebyshev 切り捨て次数 ``K_used`` を決める許容誤差として機能する.
         n_steps
             固定 dt 経路の step 数 (``n_steps >= 1``). 等間隔 ``dt =
             (t1 - t0) / n_steps`` で進める. adaptive 経路では渡さない
             (``None`` で良い; 渡しても無視される).
         atol
-            adaptive 経路の局所誤差閾値. driver の ``tol_step`` に map
-            される. ``None`` のときは driver 既定値 ``1e-8`` を使う.
-            固定 dt 経路では無視される.
-
-            **default ``1e-8`` は保守寄りの選択**. 量子ダイナミクス標準
-            テストの fidelity ``1 - 1e-6`` 要件を安全マージン付きで満たす
-            ことを優先した値. 実用上 ``atol=1e-6`` / ``1e-5`` でも多くの
-            応用で許容範囲で, その場合 PI step 数が減るうえ
-            ``propagator_tol = None`` ならば Lanczos a posteriori 早期打切
-            (Krylov: ``atol · 1e-3``) も自動的に緩んで二重に高速化される
-            (Chebyshev variant では ``propagator_tol`` は固定 1e-12 default
-            なので連動しない, issue #135). 詳細は ``docs/design/05-3-propagator.md``
-            §5.3 PI controller defaults 表のノート.
-
-            **Note (Chebyshev variant の atol 振舞い, issue #124 / #135)**:
-            ``method="cfm4_adaptive_richardson_chebyshev"`` では ``atol`` は
-            実際の精度ではなく **upper bound** として機能する. Chebyshev は
-            切り捨て次数 ``K_used`` を ``propagator_tol`` (default
-            ``_KRYLOV_TOL_FIXED_DEFAULT = 1e-12`` 固定, issue #135) から
-            動的決定するため, ``tol_step`` より遥かに小さい per-stage 誤差
-            を生む. その結果 PI controller が見る誤差は Magnus 4 次誤差
-            (``O(dt^5)``) のみとなり, dt は ``atol`` 制約下で大きく取れる
-            一方で実際の精度は machine precision 近くを維持する (例:
-            ``atol=1e-3`` 設定で n=10 の infidelity ``< 1e-16``). これは
-            "feature" であり (atol で要求した精度を上回ることはあっても下回る
-            ことはない), 速度を取りたい場合は ``atol`` を大きくして PI step
-            数を減らすのが正しい使い方. 詳細は
-            ``docs/design/05-3-propagator.md`` "Chebyshev variant" 節.
+            adaptive 経路の局所誤差閾値 (driver の ``tol_step`` に map).
+            ``None`` で driver 既定値 ``1e-8`` (fidelity ``1 - 1e-6`` 要件を
+            安全マージン付きで満たす保守値). 固定 dt 経路では無視される.
+            Chebyshev variant では ``atol`` は実精度ではなく **upper bound**
+            として機能し, 実際の精度はより良くなりうる ("accidental 高精度",
+            例: ``atol=1e-3`` で n=10 infidelity ``< 1e-16``; 速度が欲しい
+            ときは ``atol`` を大きくして PI step 数を減らす). 既定値の根拠と
+            Chebyshev の atol 振舞いの詳細は ``docs/design/05-3-propagator.md``
+            §5.3 (PI controller defaults / "Chebyshev variant" 節, issue
+            #124 / #135).
         dt_init
-            adaptive 経路の初期 dt 提案. driver の ``dt0`` に map される.
-            ``None`` (既定) のとき
-            ``dt0 = max(min(c · T^β, T), _AUTO_DT_INIT_FLOOR)``
-            (T = ``t1 - t0``, 既定 ``c=0.1, β=0.5, floor=1e-3``) で auto
-            resolve し, PI controller の warmup step を T 依存で削減する
-            (s-space scaling invariance, ``docs/design/05-3-propagator.md`` §5.3,
-            issue #54 で None default 化, 旧 ``"auto"`` リテラル相当).
-            例えば ``T=100`` で ``dt0=1.0``, ``T=1`` で ``dt0=0.1``,
-            ``T=0.01`` で ``dt0=0.01`` (床値より大きいので formula 値).
-            float を明示すると一律に上書きする (旧 ``"auto"`` リテラルは
-            issue #54 で削除済み). 固定 dt 経路では無視される.
+            adaptive 経路の初期 dt 提案 (driver の ``dt0`` に map). ``None``
+            (既定) で問題依存の auto-resolve
+            ``dt0 = max(min(c · T^β, T), floor)`` (T = ``t1 - t0``, 既定
+            ``c=0.1, β=0.5, floor=1e-3``) により warmup step を T 依存で
+            削減する; float 明示で一律上書き. 固定 dt 経路では無視される.
+            導出は ``docs/design/05-3-propagator.md`` §5.3 (issue #54).
         dt_max
-            adaptive 経路の最大 dt 上限. driver の ``dt_max`` に map される.
-            ``None`` (既定) のとき Gershgorin 上界による Lanczos capacity
-            自動見積もり
-            ``dt_max = max(min(10·dt0, 4m / ‖H‖_est), dt0)``,
-            ``‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|`` で auto
-            resolve し, ``dt · ‖H‖ ≲ 4m`` の Lanczos safe 領域に強制
-            クランプする (issue #54 で None default 化, 旧 ``"auto"``
-            リテラル相当). 大 N で ``‖H‖ ∝ N`` が支配的になる領域で PI
-            controller が暴走しないよう守備に機能する. step-doubling
-            Richardson が breakdown を検出するので fail-safe で動作する
-            (Lanczos 容量を僅かに超えても embedded error 経由で dt が
-            縮む). float を明示すると一律に上書きする. 固定 dt 経路では
-            無視される.
+            adaptive 経路の最大 dt 上限 (driver の ``dt_max`` に map).
+            ``None`` (既定) で Gershgorin 上界による Lanczos capacity 自動
+            見積もり ``dt_max = max(min(10·dt0, 4m / ‖H‖_est), dt0)``
+            (``‖H‖_est = Σ_i |h_x_i| + max_k |H_p_diag[k]|``) にクランプし,
+            大 N で PI controller が暴走しないよう守る (容量超過は
+            step-doubling Richardson の embedded error が fail-safe で検出);
+            float 明示で一律上書き. 固定 dt 経路では無視される. 詳細は
+            ``docs/design/05-3-propagator.md`` §5.3 (issue #54).
         m_max
-            adaptive Richardson 経路の Lanczos 部分空間次元の上限。
-            ``None`` (default) のときは ``self.m`` (コンストラクタ既定 24)
-            をそのまま使う。整数を指定すると ``self.m`` を上書きして
-            driver の Lanczos 部分空間次元として用いる (issue #43 C,
-            簡略 scope)。step-doubling Richardson 推定子が Lanczos
-            breakdown も embedded error として検出する fail-safe を
-            活かし, ``m_max=16`` 等で per-step matvec を 30% 程度削減
-            する運用を許容する (Richardson が破綻を検知すれば PI
-            controller が dt を絞り精度を維持)。a posteriori 推定子
-            ``est < propagator_tol`` (Lanczos) の早期打切が既存実装で効くため,
-            実効次元は ``m_eff ≤ m_max`` になる。固定 dt 経路では無視される。
-            ``m_eff`` 累積統計の ``QuantumResult`` 露出は Rust API 拡張
-            (``lanczos_propagate`` の戻り値追加 + PyO3 plumbing) が
-            必要なため本フェーズでは保留 (``docs/design/05-3-propagator.md`` §5.3 参照)。
+            adaptive Richardson 経路の Lanczos 部分空間次元の上限. ``None``
+            (既定) で ``self.m`` (コンストラクタ既定 24). 整数指定で
+            ``self.m`` を上書きする. a posteriori 早期打切で実効次元は
+            ``m_eff ≤ m_max`` になり, ``m_max=16`` 等で per-step matvec を
+            削減できる (破綻時は Richardson が検知し PI controller が dt を
+            絞って精度維持, issue #43 C). 固定 dt 経路では無視される.
         controller
             adaptive PI controller の数値挙動 knob を集約した
-            :class:`~maqina.ControllerConfig` (issue #149). ``None`` (デフォルト)
-            のとき全 default (``ControllerConfig()``). adaptive 経路
-            (``cfm4_adaptive_richardson_krylov`` /
-            ``cfm4_adaptive_richardson_chebyshev``) でのみ参照され, ``safety`` /
-            ``growth_max`` / ``max_rejects`` / ``dt_min`` / ``reject_shrink_min``
-            / ``reject_shrink_max`` / ``freeze_growth_after_reject`` /
-            ``growth_freeze_steps`` / ``pi_alpha`` / ``pi_beta`` を driver に渡す.
-            固定 dt 経路では無視される (``atol`` 等と同じ寛容な扱い; strict に
-            弾くのは ``AnnealingSimulator`` のみ). reject 時の dt 縮小が固定 0.5
-            倍から予測式 + クランプ ``[reject_shrink_min, reject_shrink_max]`` に
-            変わり (issue #149), reject 直後の accept で dt 拡大を凍結し
-            (issue #150, Gustafsson ヒステリシス, 既定有効), さらに accept 時の
-            dt 予測式に真の PI 比例項 ``(err_prev / err)^{pi_beta/(p+1)}`` が
-            入る (issue #151, 既定 ``pi_alpha=0.7`` / ``pi_beta=0.4``) ため,
-            既定挙動が従来と異なる (破壊的変更). #149 のみ適用した挙動は
-            ``ControllerConfig(reject_shrink_min=0.5, reject_shrink_max=0.5)``,
-            成長凍結のみ無効化は
-            ``ControllerConfig(freeze_growth_after_reject=False)``, 純 I 制御
-            (PI 比例項なし) は ``ControllerConfig(pi_alpha=1.0, pi_beta=0.0)``
-            で再現できる.
+            :class:`~maqina.ControllerConfig` (issue #149). ``None`` (既定) で
+            全 default. adaptive 経路でのみ参照され, 固定 dt 経路では無視
+            される (strict に弾くのは ``AnnealingSimulator`` のみ). **既定挙動
+            は従来と異なる** (破壊的変更): reject 時の dt 縮小が予測式 +
+            クランプ (issue #149), reject 直後の dt 拡大凍結 (issue #150,
+            既定有効), accept 時の PI 比例項 (issue #151, 既定
+            ``pi_alpha=0.7`` / ``pi_beta=0.4``). 各 field の意味と旧挙動の
+            回帰アンカーは :class:`~maqina.ControllerConfig` を参照.
         observables
-            Phase 5 (issue #47) で有効化. ``{name: Observable}`` dict もしくは
-            ``None``. ``save_tlist`` 非 None かつ非空 dict のとき, 各
-            ``save_tlist[i]`` 時刻で ``obs.expectation(psi)`` を評価して
+            ``{name: Observable}`` dict もしくは ``None`` (Phase 5 / issue #47).
+            ``save_tlist`` 非 None かつ非空のとき, 各 ``save_tlist[i]`` 時刻で
+            ``obs.expectation(psi)`` を評価して
             ``QuantumResult.observables_history[name]`` に shape
-            ``(len(save_tlist),)`` の時系列を格納する. ``save_tlist=None``
-            (デフォルト) のときは silent 無視 (最節約モード).
+            ``(len(save_tlist),)`` の時系列を格納する. ``save_tlist=None`` で
+            指定すると ``ValueError`` (silent 無視を避けるため明示的に弾く).
         save_tlist
-            Phase 5 (issue #47) で有効化. shape ``(K,)`` float64 の観測時刻列.
-            monotonic increasing, ``[t0, t1]`` の範囲. 非 None のとき
-            時間発展に該当時刻を厳密に踏ませ (固定 dt: step boundary に
-            merge, adaptive: dt クランプ), ``QuantumResult.times`` に複製を
-            格納する. ``None`` (デフォルト, 最節約モード) で snapshot 記録
-            なし (``times = states = None``, ``observables_history = {}``).
+            shape ``(K,)`` float64 の観測時刻列 (Phase 5 / issue #47).
+            monotonic increasing, ``[t0, t1]`` の範囲. 非 None のとき時間発展に
+            該当時刻を厳密に踏ませ (固定 dt: step boundary に merge, adaptive:
+            dt クランプ), ``QuantumResult.times`` に複製を格納する. ``None``
+            (既定, 最節約モード) で snapshot 記録なし
+            (``times = states = None``, ``observables_history = {}``).
         store_states
-            Phase 5 (issue #47) で有効化. ``True`` かつ ``save_tlist`` 非 None
-            のとき, snapshot 時刻に ψ を保存し ``QuantumResult.states`` に
-            shape ``(K, 2**n)`` complex128 として返す. ``save_tlist=None``
-            または ``False`` で ``states = None``.
+            ``True`` かつ ``save_tlist`` 非 None で snapshot 時刻の ψ を保存し
+            ``QuantumResult.states`` に shape ``(K, 2**n)`` complex128 として
+            返す (Phase 5 / issue #47). ``save_tlist=None`` または ``False`` で
+            ``states = None`` (``save_tlist=None`` で ``store_states=True`` は
+            ``ValueError``).
 
         Returns
         -------
@@ -374,30 +325,21 @@ class QuantumAnnealer:
             ``save_tlist`` 経路でのみ ``times`` / ``states`` /
             ``observables_history`` が非 None / 非空になる. ``probabilities``
             は ``|psi_final|^2`` を eager 計算した shape ``(2**n,)`` float64
-            (どの経路でも常に返る). ``n_matvec`` は経路ごとに以下:
-
-            * ``"m2"``: ``n_steps × m`` (Lanczos の matvec 見積もり).
-            * ``"trotter"``: ``n_steps × (N + 1)`` (phase pass 1 + bit-flip
-              pass N の dim-walk 見積もり; ``docs/design/04-python-api.md`` §4.4 参照).
-            * ``"trotter_suzuki4"``: ``n_steps × 5 × (N + 1)`` (5 sub-step
-              × Strang per-step コスト).
-            * ``"cfm4"``: ``n_steps × 2m`` (CFM4:2 は 1 step あたり Lanczos
-              を 2 回呼ぶため M2 の 2 倍).
-            * ``"cfm4_adaptive_richardson_krylov"``: ``n_steps_actual × 6m``
-              (full CFM4:2 ``2m`` + half×2 CFM4:2 ``4m`` = ``6m``,
-              ``docs/design/05-3-propagator.md`` §5.3).
-
-            ``n_steps`` は固定 dt 経路では要求 step 数, adaptive 経路では
-            実 step 数 (``n_steps_actual`` と同値) を返す.
+            (どの経路でも常に返る). ``n_steps`` は固定 dt 経路では要求 step
+            数, adaptive 経路では実 step 数 (``n_steps_actual`` と同値).
+            ``n_matvec`` の経路別見積もり式 (例: ``"cfm4"`` = ``n_steps × 2m``,
+            ``..._krylov`` = ``n_steps_actual × 6m``) は
+            ``docs/design/04-python-api.md`` §4.4 /
+            ``docs/design/05-3-propagator.md`` §5.3 を参照.
 
         Raises
         ------
         ValueError
-            入力検証失敗 (``psi0`` の shape / dtype / 非正規化,
-            固定 dt 経路で ``n_steps`` 不指定 / ``n_steps < 1``,
-            ``t1 <= t0``, ``observables`` が dict[str, Observable] でない,
-            ``save_tlist`` が monotonic float64 で ``[t0, t1]`` 範囲に
-            収まらない).
+            入力検証失敗 (``psi0`` の shape / dtype / 非正規化, 固定 dt 経路で
+            ``n_steps`` 不指定 / ``n_steps < 1``, ``t1 <= t0``, ``observables``
+            が dict[str, Observable] でない, ``save_tlist`` が monotonic
+            float64 で ``[t0, t1]`` 範囲外, ``save_tlist=None`` で
+            ``observables`` / ``store_states`` を指定).
         NotImplementedError
             ``method`` がサポート対象外の場合.
         RuntimeError

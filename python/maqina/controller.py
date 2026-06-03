@@ -4,8 +4,9 @@
 ``AnnealingSimulator`` の facade から adaptive driver
 (``evolve_schedule_adaptive_{richardson,richardson_chebyshev}``) へ渡す
 **純粋な数値挙動パラメータ** を 1 つの frozen dataclass にまとめる
-(issue #149, umbrella #148 方針 B)。後続 sub-issue (#150 成長凍結 /
-#151 真の PI 化) はこの dataclass に field を追加していく。
+(issue #149, umbrella #148 方針 B)。当初は後続 sub-issue として分けていた
+#150 (成長凍結ヒステリシス) / #151 (真の PI 比例項) も本 dataclass の
+field として実装済み。
 
 集約する knob (これまで facade から指定できなかったものを含む):
 

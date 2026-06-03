@@ -38,10 +38,11 @@
 //! 落として BLAS pool を 1 thread に固定する** 運用が推奨 (詳細は `CLAUDE.md`
 //! 「Thread pool 運用」節).
 //!
-//! Phase 2 で `apply_single_mode_axis_i_py` を `#[pyfunction]` として宣言するが,
-//! `#[pymodule]` への登録は trotter 経路を整える C3 issue でまとめて行う.
-//! このため一時的に `pub(crate)` 項目が外部から未参照になる. `dead_code`
-//! lint をモジュール全体で許容する.
+//! モジュール全体で `dead_code` lint を許容する (`#![allow(dead_code)]`):
+//! dispatch variant (`apply_h_serial` / `apply_h_rayon` のように
+//! `feature = "rayon"` で一方のみ選択される経路) や cache 計算専用 primitive,
+//! `wrap_pyfunction!` で `_rust` に登録される wrap 関数が build profile に
+//! よっては Rust の dead_code 解析から未参照に見えるため.
 
 #![allow(dead_code)]
 

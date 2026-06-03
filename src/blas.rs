@@ -10,8 +10,9 @@
 //! シンボルを引かせるための `extern crate blas_src;` 相当は `src/lib.rs` 側で
 //! `use blas_src as _;` として保持する.
 //!
-//! Phase 1 の matvec primitive 単独着地時は本モジュールが未参照になるため
-//! `dead_code` lint を許容する (`src/matvec.rs`, `src/tridiag.rs` と同じ運用).
+//! BLAS feature ON/OFF や build profile によって一部ラッパが未参照になるため
+//! モジュール全体で `dead_code` lint を許容する (`src/matvec.rs`,
+//! `src/tridiag.rs` と同じ運用).
 
 #![allow(dead_code)]
 
