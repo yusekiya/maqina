@@ -99,7 +99,7 @@ def diag_from_pauli_terms(
     return diag
 
 
-def diag_from_J_h(J: np.ndarray, h: np.ndarray) -> np.ndarray:
+def diag_from_J_h(J: np.ndarray, h: np.ndarray | None = None) -> np.ndarray:
     """``H_p = -Σ_{i<j} J_ij σ_i σ_j - Σ_i h_i σ_i`` の対角を構築する.
 
     Sherrington–Kirkpatrick 型の結合行列 ``J`` と局所場 ``h`` から, Z 基底に
@@ -113,7 +113,9 @@ def diag_from_J_h(J: np.ndarray, h: np.ndarray) -> np.ndarray:
         shape ``(n, n)`` の実対称行列. 対角成分は ``J_ii = 0`` (自己結合なし).
         ``i < j`` の上三角のみ使用する (対称性より ``J_ij = J_ji``).
     h
-        shape ``(n,)`` の実ベクトル (局所縦磁場).
+        shape ``(n,)`` の実ベクトル (局所縦磁場). ``None`` (既定) は局所場なし
+        (``h = 0``) を意味し, 内部で零ベクトルとして扱う (``h = 0`` のケースが
+        多いため省略可能).
 
     Returns
     -------
@@ -127,10 +129,9 @@ def diag_from_J_h(J: np.ndarray, h: np.ndarray) -> np.ndarray:
 
         * ``J`` が 2 次元正方行列でない, または複素数を含む
         * ``J`` が対称でない, または対角成分が 0 でない
-        * ``h`` の shape が ``(n,)`` でない, または複素数を含む
+        * ``h`` が ``None`` でなく, shape が ``(n,)`` でない, または複素数を含む
     """
     J_arr = np.asarray(J)
-    h_arr = np.asarray(h)
 
     if J_arr.ndim != 2 or J_arr.shape[0] != J_arr.shape[1]:
         raise ValueError(f"J must be a square 2D array, got shape {J_arr.shape}")
@@ -139,10 +140,16 @@ def diag_from_J_h(J: np.ndarray, h: np.ndarray) -> np.ndarray:
     n = J_arr.shape[0]
     if n < 1:
         raise ValueError(f"J must be at least (1, 1), got shape {J_arr.shape}")
-    if h_arr.shape != (n,):
-        raise ValueError(f"h shape mismatch: expected ({n},), got {h_arr.shape}")
-    if np.iscomplexobj(h_arr):
-        raise ValueError("h must be real, got a complex array")
+
+    # h=None は局所場なし (h=0) を意味する.
+    if h is None:
+        h_arr = np.zeros(n, dtype=np.float64)
+    else:
+        h_arr = np.asarray(h)
+        if h_arr.shape != (n,):
+            raise ValueError(f"h shape mismatch: expected ({n},), got {h_arr.shape}")
+        if np.iscomplexobj(h_arr):
+            raise ValueError("h must be real, got a complex array")
 
     J_f = J_arr.astype(np.float64, copy=False)
     h_f = h_arr.astype(np.float64, copy=False)

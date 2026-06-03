@@ -36,8 +36,8 @@ def diag_from_pauli_terms(
 
 ```python
 def diag_from_J_h(
-    J: np.ndarray,            # (n, n) symmetric, real, J_ii = 0
-    h: np.ndarray,             # (n,) real
+    J: np.ndarray,                  # (n, n) symmetric, real, J_ii = 0
+    h: np.ndarray | None = None,    # (n,) real; None (既定) = 局所場なし (h=0)
 ) -> np.ndarray:
     """
     H_p = -Σ_{i<j} J_ij σ_i σ_j - Σ_i h_i σ_i の対角を作る (σ ∈ {±1}).

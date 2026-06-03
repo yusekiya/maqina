@@ -66,7 +66,7 @@ def diag_from_pauli_terms(n: int, terms: Iterable[tuple[float, tuple[int, ...]]]
     """
     ...
 
-def diag_from_J_h(J: np.ndarray, h: np.ndarray) -> np.ndarray:
+def diag_from_J_h(J: np.ndarray, h: np.ndarray | None=None) -> np.ndarray:
     """``H_p = -Σ_{i<j} J_ij σ_i σ_j - Σ_i h_i σ_i`` の対角を構築する.
 
     Sherrington–Kirkpatrick 型の結合行列 ``J`` と局所場 ``h`` から, Z 基底に
@@ -80,7 +80,9 @@ def diag_from_J_h(J: np.ndarray, h: np.ndarray) -> np.ndarray:
         shape ``(n, n)`` の実対称行列. 対角成分は ``J_ii = 0`` (自己結合なし).
         ``i < j`` の上三角のみ使用する (対称性より ``J_ij = J_ji``).
     h
-        shape ``(n,)`` の実ベクトル (局所縦磁場).
+        shape ``(n,)`` の実ベクトル (局所縦磁場). ``None`` (既定) は局所場なし
+        (``h = 0``) を意味し, 内部で零ベクトルとして扱う (``h = 0`` のケースが
+        多いため省略可能).
 
     Returns
     -------
@@ -94,6 +96,6 @@ def diag_from_J_h(J: np.ndarray, h: np.ndarray) -> np.ndarray:
 
         * ``J`` が 2 次元正方行列でない, または複素数を含む
         * ``J`` が対称でない, または対角成分が 0 でない
-        * ``h`` の shape が ``(n,)`` でない, または複素数を含む
+        * ``h`` が ``None`` でなく, shape が ``(n,)`` でない, または複素数を含む
     """
     ...

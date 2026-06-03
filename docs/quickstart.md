@@ -62,7 +62,8 @@ np.fill_diagonal(J, 0.0)
 
 # Diagonalize H_problem = -Σ_{i<j} J_ij Z_i Z_j in the Z basis with the
 # builders helper (bit 0 = LSB, σ_i = 1 - 2·b_i; see CLAUDE.md conventions).
-H_p_diag = diag_from_J_h(J, np.zeros(n))
+# h defaults to None (= no longitudinal field, h = 0).
+H_p_diag = diag_from_J_h(J)
 
 prob = IsingProblem(n=n, H_p_diag=H_p_diag)
 sched = Schedule.linear(T=20.0, h_x=np.ones(n))
@@ -252,7 +253,7 @@ rng = np.random.default_rng(0)
 J = rng.normal(size=(n, n)) / np.sqrt(n)
 J = (J + J.T) / 2
 np.fill_diagonal(J, 0.0)
-H_p_diag = diag_from_J_h(J, np.zeros(n))
+H_p_diag = diag_from_J_h(J)  # h defaults to None (= h = 0)
 
 prob = IsingProblem(n=n, H_p_diag=H_p_diag)
 h_x = np.ones(n)

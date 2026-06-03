@@ -169,6 +169,16 @@ def test_J_h_equivalent_to_pauli_terms() -> None:
     np.testing.assert_allclose(via_jh, via_terms, atol=1e-13)
 
 
+def test_J_h_default_h_is_zero() -> None:
+    """``h`` 未指定 (``None``) は ``h = 0`` と厳密に同じ結果を返す."""
+    n = 3
+    rng = np.random.default_rng(2)
+    J = rng.normal(size=(n, n))
+    J = (J + J.T) / 2.0
+    np.fill_diagonal(J, 0.0)
+    np.testing.assert_array_equal(diag_from_J_h(J), diag_from_J_h(J, np.zeros(n)))
+
+
 def test_J_not_square_rejected() -> None:
     with pytest.raises(ValueError, match="square 2D array"):
         diag_from_J_h(np.zeros((2, 3)), np.zeros(2))
