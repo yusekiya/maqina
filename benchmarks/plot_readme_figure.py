@@ -85,7 +85,7 @@ SOLVER_STYLE: dict[tuple[str, str], dict[str, object]] = {
         "markersize": 9,
     },
     ("qutip", "qutip"): {
-        "label": "QuTiP",
+        "label": "QuTiP (Adams)",
         "color": "#1f77b4",  # blue
         "marker": "s",
         "alpha": 0.95,
