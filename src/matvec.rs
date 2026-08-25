@@ -282,16 +282,10 @@ mod simd_kernels {
         let v_f64 = as_f64_slice(v);
         let y_f64 = as_f64_slice_mut(y);
         // 1 block = 2 Complex64 = 4 f64 = 1 × f64x4.
-        for (v_chunk, y_chunk) in v_f64
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(y_f64.as_chunks_mut::<4>().0.iter_mut())
-        {
-            // SAFETY: as_chunks{,_mut}::<4>().0 の要素型は `[f64; 4]` なので,
-            // 各 chunk 長 4 (= 32 bytes f64) が **型で** 保証される.
-            // load_f64x4_unaligned / store_f64x4_unaligned の precondition を
-            // 満たす.
+        for (v_chunk, y_chunk) in v_f64.chunks_exact(4).zip(y_f64.chunks_exact_mut(4)) {
+            // SAFETY: chunks_exact(4) は各 chunk の長さを 4 (= 32 bytes f64) と
+            // 保証する. load_f64x4_unaligned / store_f64x4_unaligned の
+            // precondition を満たす.
             unsafe {
                 // v_raw = [v[0].re, v[0].im, v[1].re, v[1].im] を 1 vmovupd で load.
                 let v_raw = load_f64x4_unaligned(v_chunk.as_ptr());
@@ -328,15 +322,9 @@ mod simd_kernels {
         let coeff_v = f64x4::splat(coeff);
         let v_f64 = as_f64_slice(v);
         let y_f64 = as_f64_slice_mut(y);
-        for (v_chunk, y_chunk) in v_f64
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .zip(y_f64.as_chunks_mut::<8>().0.iter_mut())
-        {
-            // SAFETY: as_chunks{,_mut}::<8>().0 の要素型 `[f64; 8]` が各 chunk 長
-            // 8 f64 = 2 × 32 bytes を型で保証する. 各 load/store の 4-f64 範囲は
-            // chunk 内に収まる.
+        for (v_chunk, y_chunk) in v_f64.chunks_exact(8).zip(y_f64.chunks_exact_mut(8)) {
+            // SAFETY: chunks_exact(8) で各 chunk 長 8 f64 = 2 × 32 bytes が保証
+            // される. 各 load/store の 4-f64 範囲は chunk 内に収まる.
             unsafe {
                 let v_lo = load_f64x4_unaligned(v_chunk.as_ptr());
                 let v_hi = load_f64x4_unaligned(v_chunk.as_ptr().add(4));
@@ -371,15 +359,9 @@ mod simd_kernels {
         let coeff_v = f64x4::splat(coeff);
         let v_f64 = as_f64_slice(v);
         let y_f64 = as_f64_slice_mut(y);
-        for (v_chunk, y_chunk) in v_f64
-            .as_chunks::<16>()
-            .0
-            .iter()
-            .zip(y_f64.as_chunks_mut::<16>().0.iter_mut())
-        {
-            // SAFETY: as_chunks{,_mut}::<16>().0 の要素型 `[f64; 16]` が各 chunk 長
-            // 16 f64 = 4 × 32 bytes を型で保証する. 各 load/store の 4-f64 範囲は
-            // chunk 内に収まる.
+        for (v_chunk, y_chunk) in v_f64.chunks_exact(16).zip(y_f64.chunks_exact_mut(16)) {
+            // SAFETY: chunks_exact(16) で各 chunk 長 16 f64 = 4 × 32 bytes が保証
+            // される. 各 load/store の 4-f64 範囲は chunk 内に収まる.
             unsafe {
                 // 前半 (低 4 complex = 8 f64): 2 × f64x4
                 let v_lo_a = load_f64x4_unaligned(v_chunk.as_ptr());
@@ -478,14 +460,9 @@ mod simd_kernels {
         let c_im_signed = f64x4::new([c.im, -c.im, -c.im, c.im]);
         let v_f64 = as_f64_slice(v);
         let y_f64 = as_f64_slice_mut(y);
-        for (v_chunk, y_chunk) in v_f64
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(y_f64.as_chunks_mut::<4>().0.iter_mut())
-        {
-            // SAFETY: as_chunks{,_mut}::<4>().0 の要素型 `[f64; 4]` が各 chunk 長
-            // 4 (= 32 bytes f64) を型で保証する.
+        for (v_chunk, y_chunk) in v_f64.chunks_exact(4).zip(y_f64.chunks_exact_mut(4)) {
+            // SAFETY: chunks_exact(4) は各 chunk の長さを 4 (= 32 bytes f64) と
+            // 保証する.
             unsafe {
                 // v_raw = [v_lo.re, v_lo.im, v_hi.re, v_hi.im].
                 let v_raw = load_f64x4_unaligned(v_chunk.as_ptr());
@@ -519,13 +496,8 @@ mod simd_kernels {
         let (c_re_v, c_im_lo, c_im_hi) = unpack_c_broadcast_i_ge1(c);
         let v_f64 = as_f64_slice(v);
         let y_f64 = as_f64_slice_mut(y);
-        for (v_chunk, y_chunk) in v_f64
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .zip(y_f64.as_chunks_mut::<8>().0.iter_mut())
-        {
-            // SAFETY: as_chunks{,_mut}::<8>() (要素型 `[f64; 8]`).
+        for (v_chunk, y_chunk) in v_f64.chunks_exact(8).zip(y_f64.chunks_exact_mut(8)) {
+            // SAFETY: chunks_exact(8).
             unsafe {
                 let v_lo = load_f64x4_unaligned(v_chunk.as_ptr());
                 let v_hi = load_f64x4_unaligned(v_chunk.as_ptr().add(4));
@@ -559,13 +531,8 @@ mod simd_kernels {
         let (c_re_v, c_im_lo, c_im_hi) = unpack_c_broadcast_i_ge1(c);
         let v_f64 = as_f64_slice(v);
         let y_f64 = as_f64_slice_mut(y);
-        for (v_chunk, y_chunk) in v_f64
-            .as_chunks::<16>()
-            .0
-            .iter()
-            .zip(y_f64.as_chunks_mut::<16>().0.iter_mut())
-        {
-            // SAFETY: as_chunks{,_mut}::<16>() (要素型 `[f64; 16]`).
+        for (v_chunk, y_chunk) in v_f64.chunks_exact(16).zip(y_f64.chunks_exact_mut(16)) {
+            // SAFETY: chunks_exact(16).
             unsafe {
                 let v_lo_a = load_f64x4_unaligned(v_chunk.as_ptr());
                 let v_lo_b = load_f64x4_unaligned(v_chunk.as_ptr().add(4));
@@ -618,7 +585,7 @@ mod simd_kernels {
     // bit-flip 系 (`bitflip_iN`) と違って `apply_single_mode_axis_i` は
     // **in-place** なので, 1 block 内で load → compute → store の順を守る
     // 必要がある (compute 後に書き戻した psi を同じ iteration で再 load しない).
-    // as_chunks_mut(...) の各 chunk 内では load を全て先に行い, store は
+    // chunks_exact_mut(...) の各 chunk 内では load を全て先に行い, store は
     // 最後にまとめるので問題ない.
     // ====================================================================
 
@@ -676,9 +643,8 @@ mod simd_kernels {
         let ub = unpack_u_broadcast(u);
         let psi_f64 = as_f64_slice_mut(psi);
         // 1 SIMD iter = 2 blocks = 4 Complex64 = 8 f64.
-        for psi_chunk in psi_f64.as_chunks_mut::<8>().0.iter_mut() {
-            // SAFETY: as_chunks_mut::<8>().0 の要素型 `[f64; 8]` が 8 f64 = 64 bytes
-            // を型で保証する.
+        for psi_chunk in psi_f64.chunks_exact_mut(8) {
+            // SAFETY: chunks_exact_mut(8) で 8 f64 = 64 bytes が保証される.
             unsafe {
                 // block 0 = [a0.re, a0.im, b0.re, b0.im], block 1 = [a1, b1].
                 let blk0 = load_f64x4_unaligned(psi_chunk.as_ptr());
@@ -727,8 +693,8 @@ mod simd_kernels {
         let psi_f64 = as_f64_slice_mut(psi);
         // 1 SIMD iter = 1 block = 4 Complex64 = 8 f64. lo_half / hi_half がそれぞれ
         // 1 つの f64x4 に乗る.
-        for psi_chunk in psi_f64.as_chunks_mut::<8>().0.iter_mut() {
-            // SAFETY: as_chunks_mut::<8>() (要素型 `[f64; 8]`).
+        for psi_chunk in psi_f64.chunks_exact_mut(8) {
+            // SAFETY: chunks_exact_mut(8).
             unsafe {
                 let a_v = load_f64x4_unaligned(psi_chunk.as_ptr());
                 let b_v = load_f64x4_unaligned(psi_chunk.as_ptr().add(4));
@@ -766,8 +732,8 @@ mod simd_kernels {
         // 1 SIMD iter = 1 block = 8 Complex64 = 16 f64 = 4 × f64x4.
         // lo_half [0..8 f64] = 2 × f64x4 (= a 軸), hi_half [8..16 f64] = 2 × f64x4
         // (= b 軸).
-        for psi_chunk in psi_f64.as_chunks_mut::<16>().0.iter_mut() {
-            // SAFETY: as_chunks_mut::<16>() (要素型 `[f64; 16]`).
+        for psi_chunk in psi_f64.chunks_exact_mut(16) {
+            // SAFETY: chunks_exact_mut(16).
             unsafe {
                 let a_lo = load_f64x4_unaligned(psi_chunk.as_ptr());
                 let a_hi = load_f64x4_unaligned(psi_chunk.as_ptr().add(4));
