@@ -651,25 +651,32 @@ pi_beta      = 0.4           # PI 比例 (P) 項の指数係数 (issue #151, Gus
 ```python
 freeze_remaining = 0                           # issue #150: 残り凍結 accept 数
 while t < t1:
-    dt_try = min(dt, t1 - t, next_save - t)   # 終端 / 観測時刻にクランプ
+    dt_try = min(dt, t1 - t)
+    clamped_to_target = (next_save - t) <= dt_try  # issue #167: 観測時刻クランプ
+    if clamped_to_target:
+        dt_try = next_save - t                 # 観測時刻を厳密に踏む
     psi_new, err = step_with_estimate(psi, dt_try, ...)
     accept = (err <= tol_step) or (dt_try <= dt_min)
     if accept:
         psi = psi_new
         t += dt_try
-        # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
-        if freeze_growth_after_reject and freeze_remaining > 0:
-            eff_growth_max = 1.0
-            freeze_remaining -= 1
-        else:
-            eff_growth_max = growth_max
-        if err <= 1e-30:                       # 0 近傍ガード
-            dt_next = dt_try * eff_growth_max
-        else:
-            dt_next = dt_try * safety * (tol_step / err) ** (1/(p+1))
-        dt_next = min(dt_next, dt_try * eff_growth_max, dt_max)
-        dt_next = max(dt_next, dt_min)
-        dt = dt_next
+        # issue #167: クランプ step では controller state (dt / err_prev /
+        # freeze_remaining) を据え置く. 微小 dt_try の err は推定子の誤差 floor
+        # に支配され自然 dt の予測情報を持たないため.
+        if not clamped_to_target:
+            # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
+            if freeze_growth_after_reject and freeze_remaining > 0:
+                eff_growth_max = 1.0
+                freeze_remaining -= 1
+            else:
+                eff_growth_max = growth_max
+            if err <= 1e-30:                   # 0 近傍ガード
+                dt_next = dt_try * eff_growth_max
+            else:
+                dt_next = dt_try * safety * (tol_step / err) ** (1/(p+1))
+            dt_next = min(dt_next, dt_try * eff_growth_max, dt_max)
+            dt_next = max(dt_next, dt_min)
+            dt = dt_next
         n_consecutive_rejects = 0
     else:
         n_consecutive_rejects += 1
@@ -683,6 +690,28 @@ while t < t1:
         dt = max(dt_try * factor, dt_min)
         freeze_remaining = growth_freeze_steps  # issue #150: 凍結を再武装
 ```
+
+> **観測時刻クランプ step の controller state 据え置き (issue #167)**:
+> ``save_tlist`` の観測時刻を厳密に踏むためのクランプは ``dt`` を桁で縮める
+> ことがある。この微小 step の局所誤差を controller へ流すと、成長制限
+> ``dt_next <= dt_try · growth_max`` が **クランプ後の** ``dt_try`` 基準になる
+> ため次 step の ``dt`` が ``dt_min`` 床まで潰れ、自然な ``dt`` に戻るまで
+> ``log_{growth_max}(dt_nat / dt_min)`` step (既定 ``growth_max = 4`` で 5〜7
+> step) を空費する。総 step 数が観測点数 ``K`` に比例して増える。真の PI 化
+> (issue #151) 後は ``err_prev`` も微小 step の誤差で汚染され、比例項が回復を
+> さらに遅らせる。対策は DOPRI / CVODE の tstop 処理と同じで、**クランプ step
+> が accept されたときは ``dt`` / ``err_prev`` / ``freeze_remaining`` を更新
+> しない**。微小 ``dt_try`` の ``err`` は推定子の誤差 floor (Lanczos /
+> Chebyshev) と丸めに支配され、自然 ``dt`` へ外挿すると ``(dt/dt_try)^{p+1}``
+> 倍でノイズが爆発するため controller にとって情報を持たない。据え置いた
+> ``dt`` が過大だった場合は次の非クランプ step が通常どおり reject されて縮む
+> ので精度側の契約は変わらない (reject 経路はクランプ step でも従来どおり
+> ``dt`` を更新する; reject されたなら「``dt`` が大きすぎる」は真の情報)。
+> 副作用として、観測時刻が自然 ``dt`` より密で全 step がクランプされる区間では
+> ``dt`` が accept 経路から更新されず stale になるが、区間を抜けた直後の 1
+> reject で復帰するため ``dt_min`` 床からの指数回復より桁で軽い。
+> 終端クランプ (``min(dt, t1 - t)``) は accept されればループが終わるので
+> 据え置きの対象外。
 
 > **reject 予測式 + クランプの動機 (issue #149)**: 旧実装は reject 時に
 > **固定 0.5 倍** (= order-5 推定子で誤差を 32× 削減) していた。``err`` が

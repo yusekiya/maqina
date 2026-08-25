@@ -419,6 +419,10 @@ def evolve_schedule_adaptive_richardson(h_p_diag: np.ndarray, schedule: Schedule
         の dt を ``next_save_target - t`` でクランプして当該時刻を厳密に
         踏み, snapshot 記録を有効化する. ``None`` (default, 最節約モード)
         で snapshot 無し.
+        クランプで縮めた step が accept されたときは PI controller の state
+        (``dt`` / ``err_prev`` / 成長凍結カウンタ) を **据え置く** (issue #167).
+        根拠と副作用は ``docs/design/05-3-propagator.md`` §5.3 の
+        「観測時刻クランプ step の controller state 据え置き」注記を参照.
     store_states
         Phase 5 (issue #47) 追加. ``True`` かつ ``save_tlist`` 非 None で,
         snapshot 時刻に ψ を保存する.

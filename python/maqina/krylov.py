@@ -2433,6 +2433,10 @@ def evolve_schedule_adaptive_richardson(
         の dt を ``next_save_target - t`` でクランプして当該時刻を厳密に
         踏み, snapshot 記録を有効化する. ``None`` (default, 最節約モード)
         で snapshot 無し.
+        クランプで縮めた step が accept されたときは PI controller の state
+        (``dt`` / ``err_prev`` / 成長凍結カウンタ) を **据え置く** (issue #167).
+        根拠と副作用は ``docs/design/05-3-propagator.md`` §5.3 の
+        「観測時刻クランプ step の controller state 据え置き」注記を参照.
     store_states
         Phase 5 (issue #47) 追加. ``True`` かつ ``save_tlist`` 非 None で,
         snapshot 時刻に ψ を保存する.
@@ -2681,31 +2685,44 @@ def evolve_schedule_adaptive_richardson(
                         and abs(t - float(save_targets[next_save_idx])) <= _MERGE_TOL
                     ):
                         next_save_idx += 1
-            # PI controller は err_magnus で dt を更新. err_lanczos 由来の
-            # 部分は dt 縮小では改善しないので除外して safe.
-            # err_magnus = 0 の場合は最大成長 (Krylov 充分 + Magnus 誤差なし).
-            err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
-            # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
-            if freeze_growth_after_reject and freeze_remaining > 0:
-                eff_growth_max = 1.0
-                freeze_remaining -= 1
-            else:
-                eff_growth_max = growth_max
-            dt = _pi_dt_next(
-                dt_try,
-                err_for_pi,
-                tol_step=tol_step,
-                safety=safety,
-                growth_max=eff_growth_max,
-                dt_max=dt_max_eff,
-                dt_min=dt_min,
-                p=4,
-                err_prev=err_prev_pi,
-                pi_alpha=pi_alpha,
-                pi_beta=pi_beta,
-            )
-            # issue #151: 次 accept の比例項用に駆動量 (= err_for_pi) を保持.
-            err_prev_pi = float(err_for_pi)
+            # issue #167: save_tlist target へクランプした step は controller
+            # state (dt / err_prev_pi / 成長凍結カウンタ) を **据え置く**
+            # (DOPRI / CVODE の tstop 処理と同じ扱い). 微小 dt_try の
+            # err_magnus は推定子の誤差 floor (Lanczos / Chebyshev) と丸めに
+            # 支配され, 自然 dt へ外挿すると (dt/dt_try)^5 倍でノイズが爆発
+            # するため, controller にとって情報を持たない. 据え置かずに
+            # _pi_dt_next へ流すと dt_next <= dt_try·growth_max で頭打ちになり,
+            # 観測時刻ごとに dt_min 床からの指数回復 (5〜7 step) を空費する.
+            # 据え置いた dt が過大だった場合も次の非クランプ step が通常どおり
+            # reject → _pi_dt_reject で縮むだけなので精度側は壊れない.
+            # 成長凍結 (issue #150) のカウンタも消費しない: クランプ step は
+            # 据え置きで拡大し得ないため, 消費させると凍結の保護が空振りする.
+            if not clamped_to_target:
+                # PI controller は err_magnus で dt を更新. err_lanczos 由来の
+                # 部分は dt 縮小では改善しないので除外して safe.
+                # err_magnus = 0 の場合は最大成長 (Krylov 充分 + Magnus 誤差なし).
+                err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+                # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
+                if freeze_growth_after_reject and freeze_remaining > 0:
+                    eff_growth_max = 1.0
+                    freeze_remaining -= 1
+                else:
+                    eff_growth_max = growth_max
+                dt = _pi_dt_next(
+                    dt_try,
+                    err_for_pi,
+                    tol_step=tol_step,
+                    safety=safety,
+                    growth_max=eff_growth_max,
+                    dt_max=dt_max_eff,
+                    dt_min=dt_min,
+                    p=4,
+                    err_prev=err_prev_pi,
+                    pi_alpha=pi_alpha,
+                    pi_beta=pi_beta,
+                )
+                # issue #151: 次 accept の比例項用に駆動量 (= err_for_pi) を保持.
+                err_prev_pi = float(err_for_pi)
         else:
             n_rejects += 1
             n_consecutive_rejects += 1
@@ -3128,28 +3145,41 @@ def evolve_schedule_adaptive_richardson_chebyshev(
                         and abs(t - float(save_targets[next_save_idx])) <= _MERGE_TOL
                     ):
                         next_save_idx += 1
-            err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
-            # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
-            if freeze_growth_after_reject and freeze_remaining > 0:
-                eff_growth_max = 1.0
-                freeze_remaining -= 1
-            else:
-                eff_growth_max = growth_max
-            dt = _pi_dt_next(
-                dt_try,
-                err_for_pi,
-                tol_step=tol_step,
-                safety=safety,
-                growth_max=eff_growth_max,
-                dt_max=dt_max_eff,
-                dt_min=dt_min,
-                p=4,
-                err_prev=err_prev_pi,
-                pi_alpha=pi_alpha,
-                pi_beta=pi_beta,
-            )
-            # issue #151: 次 accept の比例項用に駆動量 (= err_for_pi) を保持.
-            err_prev_pi = float(err_for_pi)
+            # issue #167: save_tlist target へクランプした step は controller
+            # state (dt / err_prev_pi / 成長凍結カウンタ) を **据え置く**
+            # (DOPRI / CVODE の tstop 処理と同じ扱い). 微小 dt_try の
+            # err_magnus は推定子の誤差 floor (Lanczos / Chebyshev) と丸めに
+            # 支配され, 自然 dt へ外挿すると (dt/dt_try)^5 倍でノイズが爆発
+            # するため, controller にとって情報を持たない. 据え置かずに
+            # _pi_dt_next へ流すと dt_next <= dt_try·growth_max で頭打ちになり,
+            # 観測時刻ごとに dt_min 床からの指数回復 (5〜7 step) を空費する.
+            # 据え置いた dt が過大だった場合も次の非クランプ step が通常どおり
+            # reject → _pi_dt_reject で縮むだけなので精度側は壊れない.
+            # 成長凍結 (issue #150) のカウンタも消費しない: クランプ step は
+            # 据え置きで拡大し得ないため, 消費させると凍結の保護が空振りする.
+            if not clamped_to_target:
+                err_for_pi = err_magnus if err_magnus > 0.0 else tol_step * 1e-3
+                # issue #150: reject 後の凍結中は拡大のみ禁止 (縮小は許可).
+                if freeze_growth_after_reject and freeze_remaining > 0:
+                    eff_growth_max = 1.0
+                    freeze_remaining -= 1
+                else:
+                    eff_growth_max = growth_max
+                dt = _pi_dt_next(
+                    dt_try,
+                    err_for_pi,
+                    tol_step=tol_step,
+                    safety=safety,
+                    growth_max=eff_growth_max,
+                    dt_max=dt_max_eff,
+                    dt_min=dt_min,
+                    p=4,
+                    err_prev=err_prev_pi,
+                    pi_alpha=pi_alpha,
+                    pi_beta=pi_beta,
+                )
+                # issue #151: 次 accept の比例項用に駆動量 (= err_for_pi) を保持.
+                err_prev_pi = float(err_for_pi)
         else:
             n_rejects += 1
             n_consecutive_rejects += 1

@@ -34,6 +34,28 @@
     `from maqina.builders import diag_from_J_h` が実際に import 可能になった
     (例自体の Phase C ドリフト修正 + doctest CI gate は #163)。
 
+### Fixed
+
+- **`save_tlist` クランプ step が PI controller の `dt` を汚染する欠陥を修正**
+  (issue #167): adaptive driver (`evolve_schedule_adaptive_richardson` /
+  `evolve_schedule_adaptive_richardson_chebyshev`) は `save_tlist` の観測時刻を
+  厳密に踏むため `dt` を `next_save_target - t` にクランプするが、この微小 step
+  の局所誤差をそのまま controller へ流していた。`_pi_dt_next` の成長制限
+  `dt_next <= dt_try · growth_max` が **クランプ後の** `dt_try` 基準になるため
+  次 step の `dt` が `dt_min` 床まで潰れ、自然な `dt` に戻るまで 5〜7 step を
+  空費していた (総 step 数が観測点数 `K` に比例して増加; 実測 `K=201` で
+  1.47x)。真の PI 化 (#151) 後は `err_prev` も微小 step の誤差で汚染され回復を
+  さらに遅らせていた。
+  - 修正: **クランプ step が accept されたときは controller state (`dt` /
+    `err_prev` / 成長凍結カウンタ) を据え置く** (DOPRI / CVODE の tstop 処理と
+    同じ扱い)。reject 経路はクランプ step でも従来どおり `dt` を更新する
+    (reject されたなら「`dt` が大きすぎる」は真の情報)。
+  - 公開 API / `ControllerConfig` の変更は無い。局所誤差制御の契約も不変だが、
+    step 列が変わるため `save_tlist` 経路の出力は修正前とビット一致しない
+    (`tol_step` オーダで一致)。
+  - `save_tlist` 非対応の adaptive M2 driver と、controller を持たない固定 dt
+    経路 (`_merge_save_tlist_with_uniform`) は影響なし。
+
 ### Note
 
 - 公開 API の **追加のみ** で破壊的変更は無い。version bump は本変更単体では
