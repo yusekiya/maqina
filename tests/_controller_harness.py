@@ -326,6 +326,7 @@ def run_synthetic(
     pi_alpha: float = 1.0,
     pi_beta: float = 0.0,
     m: int = 24,
+    save_tlist: np.ndarray | None = None,
 ) -> ControllerTrace:
     """合成誤差 ``err = c4(t)·dt^{p+1}`` で実 adaptive driver を駆動し trace を返す.
 
@@ -351,6 +352,14 @@ def run_synthetic(
         reject 後の成長凍結 (issue #150) を無効化したいときは
         ``freeze_growth_after_reject=False`` を渡す (= #149 完了時点の挙動)。
 
+    save_tlist
+        issue #167 追加. 観測時刻列 (shape ``(K,)`` float64) をそのまま driver
+        へ渡し、``next_save_target - t`` による dt クランプ経路を有効化する。
+        ``"richardson"`` / ``"chebyshev"`` でのみ有効 (``"m2"`` driver は
+        ``save_tlist`` 非対応なので ``ValueError``)。snapshot の中身 (観測量 /
+        ψ) は fake が ψ を更新しないため意味を持たない。本ハーネスで見たいのは
+        **クランプが controller state に与える影響** だけである。
+
         ``pi_alpha`` / ``pi_beta`` (issue #151) **だけは harness 既定を純 I 制御
         (``pi_alpha=1.0, pi_beta=0.0``) に固定** する (production facade 既定の
         ``0.7`` / ``0.4`` とは敢えて変える)。これにより各 sub-issue (#149 /
@@ -365,6 +374,11 @@ def run_synthetic(
     """
     if method not in _METHODS:
         raise ValueError(f"method must be one of {_METHODS}, got {method!r}")
+    if save_tlist is not None and method == "m2":
+        raise ValueError(
+            "save_tlist is not supported on the adaptive M2 driver; "
+            'use method="richardson" or "chebyshev" (issue #167).'
+        )
     schedule = _identity_schedule(t1)
     h_p_diag = np.zeros(2, dtype=np.float64)
     psi0 = np.full(2, 1.0 / math.sqrt(2.0), dtype=np.complex128)
@@ -434,6 +448,7 @@ def run_synthetic(
                 growth_freeze_steps=growth_freeze_steps,
                 pi_alpha=pi_alpha,
                 pi_beta=pi_beta,
+                save_tlist=save_tlist,
             )
         t_hist, dt_hist, n_rej = out[1], out[2], out[3]
     else:  # method == "chebyshev" (上の _METHODS チェックで保証済)
@@ -465,6 +480,7 @@ def run_synthetic(
                 growth_freeze_steps=growth_freeze_steps,
                 pi_alpha=pi_alpha,
                 pi_beta=pi_beta,
+                save_tlist=save_tlist,
             )
         t_hist, dt_hist, n_rej = out[1], out[2], out[3]
 

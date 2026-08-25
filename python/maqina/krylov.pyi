@@ -419,6 +419,19 @@ def evolve_schedule_adaptive_richardson(h_p_diag: np.ndarray, schedule: Schedule
         の dt を ``next_save_target - t`` でクランプして当該時刻を厳密に
         踏み, snapshot 記録を有効化する. ``None`` (default, 最節約モード)
         で snapshot 無し.
+
+        **クランプ step の controller state 据え置き規約** (issue #167):
+        target へクランプして縮めた step が accept されたとき, PI controller
+        の state (``dt`` / ``err_prev`` / 成長凍結カウンタ) は更新せず
+        **据え置く** (DOPRI / CVODE の tstop 処理と同じ扱い). 微小 ``dt_try``
+        の局所誤差は推定子の誤差 floor と丸めに支配され, 自然 ``dt`` へ外挿
+        すると ``(dt/dt_try)^5`` 倍でノイズが爆発するため controller にとって
+        情報を持たない. 据え置かない実装では ``dt_next <= dt_try·growth_max``
+        の頭打ちにより観測時刻ごとに ``dt_min`` 床からの指数回復 (5〜7 step)
+        を空費し, 総 step 数が観測点数 ``K`` に比例して増える. 据え置いた
+        ``dt`` が過大だった場合は次の非クランプ step が通常どおり reject
+        されて縮むため精度側の契約は変わらない (reject 経路はクランプ step
+        でも従来どおり ``dt`` を更新する).
     store_states
         Phase 5 (issue #47) 追加. ``True`` かつ ``save_tlist`` 非 None で,
         snapshot 時刻に ψ を保存する.
