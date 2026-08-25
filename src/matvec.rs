@@ -197,6 +197,32 @@ const MIN_RAYON_DIM: usize = 1 << 17;
 /// `simd_single_mode_kernels_match_scalar_fuzz_100iter`).
 #[cfg(feature = "simd")]
 mod simd_kernels {
+    // clippy 1.98 の `chunks_exact_to_as_chunks` は, 定数チャンクサイズの
+    // `chunks_exact{,_mut}(N)` を `as_chunks{,_mut}::<N>()` へ置き換えることを
+    // 勧める. 本モジュールでは **意図的に従わない**.
+    //
+    // issue #169 で実際に移行して Linux AMD EPYC 7713P (kernel 6.8, 64 threads,
+    // `-C target-cpu=native`) で perf 計測したところ, `apply_single_mode_axis_i`
+    // が i = 0/1/2 の全軸で **約 6% 劣化** した (5 ラウンド交互実行のペア比較
+    // 15/15, before/after の分布が重ならない). `apply_h_kinema` 側は改善なし.
+    //
+    // 命令数はむしろ減っており (`apply_single_mode_axis_i` で -45 命令),
+    // frontend stall も 9.5% → 2.8% に減るのに cycles が +4.6% 増え IPC が
+    // 0.31 → 0.28 に落ちる, という backend 律速のパターンだった. この kernel は
+    // IPC 0.3 のメモリレイテンシ律速域にあり, 1 反復あたりの in-flight ロード数
+    // (memory-level parallelism) が効く. `as_chunks` 化でループがタイトになった
+    // 分だけ MLP を失ったと解釈できる.
+    //
+    // 該当 3 箇所だけを `chunks_exact_mut` に戻すと劣化が完全に消えることも
+    // 確認済み (帰属確定). 得られるのは SAFETY 根拠の型レベル化のみで,
+    // 既存の手書き SAFETY コメントは元々正しいため, 6% を払う価値はないと判断
+    // した. 詳細な perf 数値は `docs/design/05-1-matvec.md` §5.1.4 に archive.
+    //
+    // なお本モジュールの `chunks_exact{,_mut}(N)` は全て
+    // `debug_assert!(len % N == 0)` の block-aligned 契約下にあり, 端数処理を
+    // 持たない. lint が指摘する remainder の扱いは元から論点にならない.
+    #![allow(clippy::chunks_exact_to_as_chunks)]
+
     use num_complex::Complex64;
     use wide::f64x4;
 
