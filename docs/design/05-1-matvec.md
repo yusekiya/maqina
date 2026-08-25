@@ -915,3 +915,114 @@ filter にしない**. 入口 API が `*_py` (allocate-and-return) か `*_inplac
 経路だった). 過去の棄却判断は **bench 実行時点での call path** を確認
 した上で再評価対象に含めるか判断する.
 
+
+##### Phase 6 audit: issue #169 `as_chunks` 移行の 6% regression (2026-08-25)
+
+clippy 1.98 で新設された `clippy::chunks_exact_to_as_chunks` が
+`simd_kernels` の定数チャンク走査 13 箇所で発火し `cargo clippy --all-targets
+-- -D warnings` が常時 fail するようになった (issue #169). lint の意図どおり
+`as_chunks::<N>()` / `as_chunks_mut::<N>()` へ移行したところ,
+**`apply_single_mode_axis_i` が約 6% 劣化**したため撤退し, モジュール単位の
+`#![allow(clippy::chunks_exact_to_as_chunks)]` で `chunks_exact` を維持する
+判断をした. 本節はその測定を archive する.
+
+計測環境: Linux AMD EPYC 7713P, kernel 6.8.0-138-generic / glibc 2.39,
+64 threads, `RUSTFLAGS="-C target-cpu=native"`, AVX2+FMA (AVX-512 なし).
+`src/bin/perf_apply_single_mode_axis_i.rs` / `src/bin/perf_apply_h.rs` を
+`--target-dir` 分離で before / after / exp の 3 build 同時保持
+(§5.1.4 で確立した方法論).
+
+- **before**: main (`d8a7899`)
+- **after**: 全 13 箇所を `as_chunks` 化 (`6fe4ac7`)
+- **exp**: after から `single_mode_i{0,1,2}` の 3 箇所だけ `chunks_exact_mut`
+  に戻したもの (`43aa9a4`, 帰属切り分け用)
+
+per-iter time (N=20, 500 iters, 5 ラウンド **交互実行**, 平均 ms):
+
+| axis | before | after | exp | after Δ | exp Δ |
+|---|---|---|---|---|---|
+| i=0 | 0.23690 | 0.25073 | 0.23488 | **+5.8%** | −0.9% |
+| i=1 | 0.23443 | 0.24977 | 0.23473 | **+6.5%** | +0.1% |
+| i=2 | 0.23545 | 0.24917 | 0.23245 | **+5.8%** | −1.3% |
+
+ペア比較 15/15 で after が遅く, before / after の分布が重ならない.
+**exp が全軸で before に復帰**しており, 劣化は `single_mode_i{0,1,2}` の
+3 箇所に完全に帰属する.
+
+hardware counter (`perf stat -r 5`, i=0 が代表; i=1 / i=2 も同傾向):
+
+| Metric | before | after | exp | 変化 (after) |
+|---|---|---|---|---|
+| cycles | 20.51G | **21.46G** | 19.73G | **+4.6%** |
+| instructions | 6.385G | 6.074G | 6.471G | **−4.9% (減っている)** |
+| IPC | 0.31 | **0.28** | 0.33 | −10% |
+| branch-misses | 36.5M | 33.8M | 38.3M | −7.4% |
+| stalled-cycles-frontend | 1.952G (9.52%) | **0.587G (2.74%)** | 1.907G (9.66%) | **−70%** |
+
+**アラインメント / アンロール仮説は棄却**: 当初は「45 命令縮んだことで
+ホットループの 32B 境界がずれた」と疑ったが, frontend stall は逆に 1/3.3
+に激減しており命令フェッチ側はむしろ改善している. branch-misses も減って
+いるためアンロール段数低下でもない.
+
+**解釈: backend (memory-level parallelism) 律速**. `stalled-cycles-backend`
+は本機で `<not supported>` だが, instructions −4.9% / branch-misses −7.4% /
+frontend stall −70% にもかかわらず cycles が +4.6% 増えることから, 消去法で
+backend stall の増加を意味する. この kernel は IPC 0.3 のメモリレイテンシ
+律速域 (64 threads × dim = 1M Complex64 = 16 MB で L3 を圧迫) にあり,
+1 反復あたりの in-flight ロード数が効く. 逆アセンブル差分でも演算命令
+(FMA / mul / add / shuffle) の本数は完全に不変で, 減ったのは `vmovapd`
+(−14) / `vmovupd` (−6) とスカラ制御系のみだった. `as_chunks` でループが
+タイトになった分だけ MLP を失ったと読むのが観測と最も整合する.
+
+`apply_h_kinema` 側 (`bitflip_i{0,1,2}`) は **改善なし**:
+
+| Metric | before | after | Δ |
+|---|---|---|---|
+| cycles | 49.016G (±0.76%) | 49.645G (±1.48%) | +1.28% (誤差内) |
+| instructions | 156.632G | 157.127G | +0.32% |
+| IPC | 3.20 | 3.17 | −0.9% |
+| elapsed | 0.39638 (±0.69%) | 0.41271 (±1.87%) | +4.12% (約 2σ) |
+
+`cycles` は誤差内だが `elapsed` が +4.1% で食い違う (64 rayon スレッドの
+負荷分散 / バリア待ち悪化と整合). IPC 3.20 は §5.1.4 冒頭が記録した
+「C1 baseline は既に compute-near-peak」(当時 IPC 2.98) の領域で,
+`single_mode` の IPC 0.3 とは別レジーム. いずれにせよ **改善は無い**.
+
+##### 判定と設計判断の論拠
+
+- **撤退を選択した理由**: `as_chunks` 移行で得られるのは SAFETY 根拠の
+  型レベル化のみ (chunk 型が `&[f64; N]` になり長さが型で保証される).
+  既存の手書き SAFETY コメントは元々正しく, 実害のある誤りを直すわけでは
+  ない. 一方の代償は 1 kernel で実測 6%. issue #169 の本来の目的は
+  「pre-commit が Rust を触らない PR でも落ちる状態の解消」であり,
+  `as_chunks` はその手段にすぎないため, `#![allow]` で目的だけ達成する.
+- **allow をモジュール単位にした理由**: crate 単位にすると
+  `simd_kernels` 以外の将来コードで lint が効かなくなる. hot kernel に
+  限って無効化し, 理由と測定結果へのポインタをコメントで残す.
+- **MSRV pin を見送った理由**: `slice::as_chunks` は Rust 1.88.0 安定化で,
+  移行しない以上 `rust-version` を上げる根拠が無い. 将来 MSRV を pin する
+  ときは別の根拠 (実際に使う std / 言語機能) を伴わせる.
+- **`chunks_exact` の remainder は元から論点にならない**: 該当 13 箇所は
+  すべて `debug_assert!(len % N == 0)` の block-aligned 契約下にあり
+  scalar tail 処理を持たない (`len < block` は呼出側が SIMD 経路をスキップ
+  して scalar 関数へ流す). lint が指摘する「端数の扱いの違い」は
+  本コードベースでは差が出ない.
+
+##### 前例との対比
+
+「命令数が減ったのに遅くなった」ケースは本節冒頭の issue #79 Phase D
+(instructions −6% で per-iter +50%) に続いて **2 例目**. ただし機序が違う:
+
+| | issue #79 Phase D | issue #169 (本節) |
+|---|---|---|
+| 対象 | `apply_h` (IPC 2.98, compute-near-peak) | `apply_single_mode_axis_i` (IPC 0.31, latency bound) |
+| 変更内容 | アクセスパターンを変更 (3-phase chunk 跨ぎ XOR) | **アクセス順序は不変**, ループ構造のみ変化 |
+| 真因 | HW prefetcher 破壊 (per-L2-miss latency 195 → 251 cycles) | MLP 低下 (backend stall 増, frontend stall はむしろ減) |
+| branch-misses | +123% | −7.4% |
+| frontend stall | — | **−70%** |
+
+教訓: **このコードベースでは「命令数が減った = 速い」は 2 度成立しなかった**.
+SIMD hot path に触る変更は, 生成コードが同一に見えても perf binary +
+hardware counter で追認する. 逆に, 逆アセンブル差分で「演算命令の本数が
+不変」であることは性能不変の保証にならない — データ移動命令の削減が
+MLP 低下として現れうる.

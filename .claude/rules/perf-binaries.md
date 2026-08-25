@@ -48,6 +48,21 @@ Python 側 API (`_rust.apply_h_kinema_py` / `_rust.trotter_step_py` /
 `chebyshev_propagate` は POC Phase A 段階では Python binding を持たず
 (`_rust` に登録しない), perf binary 経由のみで使う.
 
+**実行前提 (2026-08-25 更新)**: 本番 Linux サーバーは kernel 6.8 更新後
+`kernel.perf_event_paranoid = 4` になっており, **非 root では `perf stat` が
+一切通らない** (`Access to performance monitoring and observability operations
+is limited.`). 計測前に
+
+```bash
+sudo sysctl -w kernel.perf_event_paranoid=1   # 一時 (再起動でリセット)
+```
+
+を実行する。sudo が使えない場合は, 各 perf binary が stderr に出す
+`total` / `per-iter` の wall time だけで before/after 比較する
+(hardware counter は諦める)。wall time 比較でも **before/after を交互に
+実行して 5 ラウンド以上取り, min または平均で比較する** こと
+(issue #169 で確立; ブランチごとに連続実行するとドリフトが乗る)。
+
 計測例 (Linux, AMD EPYC で実証済み):
 
 ```bash
