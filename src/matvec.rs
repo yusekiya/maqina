@@ -665,6 +665,7 @@ mod simd_kernels {
     /// `apply_single_mode_axis_i_serial` の `n=1` (dim=2) 退化ケースは
     /// `len < 4` で SIMD 経路をスキップして scalar fallback に流れる.
     #[inline]
+    #[allow(clippy::chunks_exact_to_as_chunks)] // 実験: #169 切り分け用
     pub(super) fn single_mode_i0(psi: &mut [Complex64], u: &[Complex64; 4]) {
         debug_assert!(psi.len() >= 4, "len must be >= 4 (2 i=0 blocks)");
         debug_assert_eq!(
@@ -676,9 +677,8 @@ mod simd_kernels {
         let ub = unpack_u_broadcast(u);
         let psi_f64 = as_f64_slice_mut(psi);
         // 1 SIMD iter = 2 blocks = 4 Complex64 = 8 f64.
-        for psi_chunk in psi_f64.as_chunks_mut::<8>().0.iter_mut() {
-            // SAFETY: as_chunks_mut::<8>().0 の要素型 `[f64; 8]` が 8 f64 = 64 bytes
-            // を型で保証する.
+        for psi_chunk in psi_f64.chunks_exact_mut(8) {
+            // SAFETY: chunks_exact_mut(8) で 8 f64 = 64 bytes が保証される.
             unsafe {
                 // block 0 = [a0.re, a0.im, b0.re, b0.im], block 1 = [a1, b1].
                 let blk0 = load_f64x4_unaligned(psi_chunk.as_ptr());
@@ -719,6 +719,7 @@ mod simd_kernels {
     /// hi_half がちょうど 1 個ずつの f64x4 に乗るので **deinterleave 不要**
     /// (i=0 と違って shuffle が要らない).
     #[inline]
+    #[allow(clippy::chunks_exact_to_as_chunks)] // 実験: #169 切り分け用
     pub(super) fn single_mode_i1(psi: &mut [Complex64], u: &[Complex64; 4]) {
         debug_assert!(psi.len() >= 4, "len must be >= 4 (i=1 block)");
         debug_assert_eq!(psi.len() % 4, 0, "len must be a multiple of 4 (i=1 block)");
@@ -727,8 +728,8 @@ mod simd_kernels {
         let psi_f64 = as_f64_slice_mut(psi);
         // 1 SIMD iter = 1 block = 4 Complex64 = 8 f64. lo_half / hi_half がそれぞれ
         // 1 つの f64x4 に乗る.
-        for psi_chunk in psi_f64.as_chunks_mut::<8>().0.iter_mut() {
-            // SAFETY: as_chunks_mut::<8>() (要素型 `[f64; 8]`).
+        for psi_chunk in psi_f64.chunks_exact_mut(8) {
+            // SAFETY: chunks_exact_mut(8).
             unsafe {
                 let a_v = load_f64x4_unaligned(psi_chunk.as_ptr());
                 let b_v = load_f64x4_unaligned(psi_chunk.as_ptr().add(4));
@@ -757,6 +758,7 @@ mod simd_kernels {
     /// (4 Complex64) と hi_half (4 Complex64) がそれぞれ 2 個の f64x4 に乗る.
     /// この block サイズが `SIMD_BLOCK_MAX = 8` (Complex64 単位) に対応する.
     #[inline]
+    #[allow(clippy::chunks_exact_to_as_chunks)] // 実験: #169 切り分け用
     pub(super) fn single_mode_i2(psi: &mut [Complex64], u: &[Complex64; 4]) {
         debug_assert!(psi.len() >= 8, "len must be >= 8 (i=2 block)");
         debug_assert_eq!(psi.len() % 8, 0, "len must be a multiple of 8 (i=2 block)");
@@ -766,8 +768,8 @@ mod simd_kernels {
         // 1 SIMD iter = 1 block = 8 Complex64 = 16 f64 = 4 × f64x4.
         // lo_half [0..8 f64] = 2 × f64x4 (= a 軸), hi_half [8..16 f64] = 2 × f64x4
         // (= b 軸).
-        for psi_chunk in psi_f64.as_chunks_mut::<16>().0.iter_mut() {
-            // SAFETY: as_chunks_mut::<16>() (要素型 `[f64; 16]`).
+        for psi_chunk in psi_f64.chunks_exact_mut(16) {
+            // SAFETY: chunks_exact_mut(16).
             unsafe {
                 let a_lo = load_f64x4_unaligned(psi_chunk.as_ptr());
                 let a_hi = load_f64x4_unaligned(psi_chunk.as_ptr().add(4));
