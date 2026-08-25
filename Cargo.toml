@@ -2,6 +2,10 @@
 name = "maqina"
 version = "0.14.0"
 edition = "2021"
+# MSRV: `slice::as_chunks` / `as_chunks_mut` (SIMD カーネルの chunk 走査で
+# 使用, issue #169) の安定化バージョン. clippy も `package.rust-version` を
+# msrv 設定として読むため, MSRV 未満の機能を勧める lint は自動で抑制される.
+rust-version = "1.88"
 license = "MIT"
 publish = false
 

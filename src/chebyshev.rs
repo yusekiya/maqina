@@ -180,9 +180,10 @@ fn chebyshev_recurrence_fused_scalar(
 ///    の docstring 参照).
 ///
 /// 4 個の input slice (scratch RW / phi_curr R / phi_prev R / psi_acc RW) を
-/// `chunks_exact_mut(4 f64)` / `chunks_exact(4 f64)` のロックステップ走査で
-/// 取り出す. `scratch` と `psi_acc` は呼出側で disjoint な `Vec<Complex64>`
-/// から来ているので, 2 本の `&mut [f64]` が同時に生きていても aliasing なし.
+/// `as_chunks_mut::<4>()` / `as_chunks::<4>()` (1 chunk = 4 f64
+/// = 2 Complex64) のロックステップ走査で取り出す. `scratch` と `psi_acc` は
+/// 呼出側で disjoint な `Vec<Complex64>` から来ているので, 2 本の
+/// `&mut [f64]` が同時に生きていても aliasing なし.
 ///
 /// # 数値同一性
 ///
@@ -280,16 +281,19 @@ mod simd_kernels {
 
         // 1 chunk = 4 f64 = 2 Complex64 = 1 × f64x4.
         scratch_f64
-            .chunks_exact_mut(4)
-            .zip(psi_acc_f64.chunks_exact_mut(4))
-            .zip(phi_curr_f64.chunks_exact(4))
-            .zip(phi_prev_f64.chunks_exact(4))
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(psi_acc_f64.as_chunks_mut::<4>().0.iter_mut())
+            .zip(phi_curr_f64.as_chunks::<4>().0.iter())
+            .zip(phi_prev_f64.as_chunks::<4>().0.iter())
             .for_each(|(((s_ch, pa_ch), pc_ch), pp_ch)| {
-                // SAFETY: chunks_exact{,_mut}(4) は各 chunk 長 4 f64 = 32 bytes
-                // を保証. load_f64x4_unaligned / store_f64x4_unaligned の
-                // precondition (4 f64 readable / writable) を満たす. scratch と
-                // psi_acc は disjoint な &mut [Complex64] 由来なので, それぞれ
-                // 派生した &mut [f64] view も disjoint で aliasing なし.
+                // SAFETY: as_chunks{,_mut}::<4>().0 の要素型は `[f64; 4]` なので
+                // 各 chunk 長 4 f64 = 32 bytes が **型で** 保証される.
+                // load_f64x4_unaligned / store_f64x4_unaligned の precondition
+                // (4 f64 readable / writable) を満たす. scratch と psi_acc は
+                // disjoint な &mut [Complex64] 由来なので, それぞれ派生した
+                // &mut [f64] view も disjoint で aliasing なし.
                 unsafe {
                     let s = load_f64x4_unaligned(s_ch.as_ptr());
                     let pc = load_f64x4_unaligned(pc_ch.as_ptr());
