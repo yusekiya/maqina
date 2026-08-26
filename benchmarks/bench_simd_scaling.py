@@ -5,7 +5,7 @@ issue #63 (Phase 6 C2) の acceptance「N=18, i=0,1,2 集中時の per-pass time
 専用 bench. `bench_parallel_scaling.py` (C1) と同じ subprocess + child mode
 構造を踏襲するが, SIMD feature の切替は **build 時** に行う必要があるため
 parent/child 自動切替はせず, **操作員が異なる build で 2 回 measure を回し
-3 回目に `--mode compare` で統合する** 運用にする.
+3 回目に `compare` subcommand で統合する** 運用にする.
 
 ## 計測対象
 
@@ -26,8 +26,8 @@ parent/child 自動切替はせず, **操作員が異なる build で 2 回 meas
 
     # 1. SIMD ON (default build) で measure
     RUSTFLAGS="-C target-cpu=native" uv run maturin develop --uv --release
-    uv run python benchmarks/bench_simd_scaling.py \\
-        --mode measure --label simd-on \\
+    uv run python benchmarks/bench_simd_scaling.py measure \\
+        --label simd-on \\
         --output benchmarks/results/bench_simd/simd-on.json
 
     # 2. SIMD OFF (rayon + blas のみ, simd feature off) で measure
@@ -42,14 +42,13 @@ parent/child 自動切替はせず, **操作員が異なる build で 2 回 meas
         --no-default-features --features extension-module,blas,rayon
     # build flag 確認 (期待: __has_simd__ = False)
     uv run python -c "from maqina import _rust; print('simd:', _rust.__has_simd__)"
-    uv run python benchmarks/bench_simd_scaling.py \\
-        --mode measure --label simd-off \\
+    uv run python benchmarks/bench_simd_scaling.py measure \\
+        --label simd-off \\
         --output benchmarks/results/bench_simd/simd-off.json
 
     # 3. SIMD ON build に戻して compare → markdown + CSV 出力
     RUSTFLAGS="-C target-cpu=native" uv run maturin develop --uv --release
-    uv run python benchmarks/bench_simd_scaling.py \\
-        --mode compare \\
+    uv run python benchmarks/bench_simd_scaling.py compare \\
         --simd-on benchmarks/results/bench_simd/simd-on.json \\
         --simd-off benchmarks/results/bench_simd/simd-off.json \\
         --output-dir benchmarks/results/<YYYYMMDD-HHMMSS>/
@@ -482,7 +481,6 @@ def main(argv: list[str] | None = None) -> int:
     p_compare.add_argument("--simd-off", type=str, required=True)
     p_compare.add_argument("--output-dir", type=str, required=True)
 
-    # legacy --mode <name> も許容 (argparse subcommand を flag 互換に).
     args = p.parse_args(argv)
 
     if args.mode == "measure":
