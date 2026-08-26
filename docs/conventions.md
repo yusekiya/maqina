@@ -117,14 +117,27 @@ bump 時に本番 bench sweep を取った場合, その結果は **`benchmarks/
   同 commit で配置. ファイル名はスクリプトの default 出力名そのまま
   (`bench_per_step.md` / `bench_parallel_scaling.md` /
   `bench_block_fusion.md` / `bench_qutip_large.md` 等).
-- **生 CSV は除外**: `.csv` は引き続き gitignore (人が読まない生データで
-  diff の意味が薄く size が大きいため). 必要なら bench 実行マシン上の
-  timestamped dir に残す.
+- **README figure 用 CSV は track**: `bench_*.csv` は図の再生成に必要な
+  ため version dir 配下のみ except する (0.8.0 制定当初は「生 CSV は除外」
+  だったが, README figure pipeline 導入時に方針変更). ファイル名パターンに
+  合わない ad-hoc CSV は引き続き ignore.
+- **最終状態ベクトル `states/*.npz` は track** (issue #158 で追加): 参照解が
+  後から差し替わっても (Adams → BDF など) 保存済 ψ(T) から infidelity を
+  再計算できるようにするため. maqina 側 (version 依存) は version dir 配下,
+  QuTiP 側 (同一 hardware なら version 非依存) は共有
+  `benchmarks/results/qutip/` 配下に置く.
 
 **`.gitignore` の現運用**: `/benchmarks/results/*` で root 直下を ignore
-した上で `!/benchmarks/results/*/` + `!/benchmarks/results/*/*.md` で
-version dir 配下の markdown のみ except する. CSV は default で
-ignore のまま (`benchmarks/results/0.8.0/*.csv` も track されない).
+した上で, semver 形式のディレクトリ (`*.*.*`) と共有 `qutip/` のみを
+except し, その配下で `*.md` / `bench_*.csv` / `states/*.npz` を track する.
+timestamped dir (`20260512-153531` 等) と ad-hoc dir (`m_eff_loose_1` 等) は
+ignore のまま. 正確な pattern は `.gitignore` を一次資料とする (本節と
+二重管理しない).
+
+**サイズへの注意**: `states/*.npz` は 1 ファイル約 4 MB で, 0.14.0 時点で
+26 ファイル ≈ 101 MB が track されている. リリースごとに sweep 全 cell の ψ
+を残すと線形に増えるため, **新しい version dir を作るときは保存対象 cell を
+絞る** か, 古い version の `states/` を整理するかを都度判断する.
 
 **リリース finalize PR フロー** (#66 / 0.8.0 で確立):
 
