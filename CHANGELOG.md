@@ -11,7 +11,7 @@
   (`0.N.0` → `0.N+1.0`) で破壊的変更を吸収する (`docs/conventions.md`
   §2 参照).
 
-## Unreleased
+## 0.15.0 - 2026-08-26 — k-local builders 実装 (#162) + `save_tlist` クランプ step の controller 汚染修正 (#167) + doctest CI gate (#163)
 
 ### Added
 
@@ -56,11 +56,98 @@
   - `save_tlist` 非対応の adaptive M2 driver と、controller を持たない固定 dt
     経路 (`_merge_save_tlist_with_uniform`) は影響なし。
 
+### Documentation
+
+- **`docs/quickstart.md` の Chebyshev `atol` 例と断熱性チェックを修正**
+  (commit `5fa24e6`): `atol=1e-8` → `1e-6` (5 箇所)。Chebyshev variant は
+  `atol` が上限として機能し over-delivery するため 1e-8 は過剰で、n=6 例では
+  表示物理量 (overlap 4 桁 / fidelity 6 桁) は不変のまま `n_steps` のみ約半減
+  した (176 → 71)。あわせて §5 の断熱性チェックが **誤った結論を示していた**
+  のを修正: `H_p` の Z2 スピン反転対称性 (`Π X_i`) で古典基底状態は 2 重縮退
+  するため、対称初期状態 `|+⟩^N` との単一基底 fidelity は 0.5 で頭打ちになり
+  「F → 1」を示せていなかった (旧: k=1, T=100 で F(T)=0.205)。縮退基底 *空間*
+  への射影 (k=2 の重なりの和) に変更し、断熱的な T=3000 を採用して F → 1 を
+  正しく実証する形に直した (T=1: F≈0.04 / T=3000: F≈0.9999)。`README.md` の
+  `atol` 値も追随 (commit `7dca49b`)。
+- **公開モジュール docstring のドリフト除去と核+参照化** (PR #166): 実装と
+  乖離していた記述を除去した。特に `annealer.run` の「`observables` は
+  `save_tlist=None` のとき silent 無視」という記述が実コード (`ValueError`)
+  と矛盾していたのを修正し `Raises` を補完。`result.py` の「Phase 1-4 subset」
+  (実際は Phase 8 まで拡張済み)、`controller.py` の #150 / #151「後続
+  sub-issue」表記、Rust 側 (`matvec.rs` / `cfm4.rs` / `tridiag.rs` /
+  `blas.rs`) の「Phase N で追加予定」等も現状へ更新。`annealer.run` は
+  約 180 → 95 行に圧縮したが、ユーザー契約 (引数の意味・既定値・戻り値・
+  例外) は保持している。
+- **`docs/chebyshev-explained.md` を削除** (commit `989cfac`, 569 行):
+  未レビューのまま置かれていたため。
+- **バージョニングポリシーを Phase 依存から bump 契機ベースへ書き換え**
+  (commit `e7de1f8`): `docs/conventions.md` §2 が持っていた「時点 ↔ version
+  対応表」は本ファイルの各リリース見出しと完全重複しており、二重管理の結果
+  `0.12.0` / `0.13.0` / `0.14.0` が欠落してドリフトしていた。表を削除し、
+  **個別バージョンと変更内容の対応は `CHANGELOG.md` が唯一の情報源**である
+  ことを明記。あわせて「Phase 完了時に `0.N.0` へ bump (Phase N → v0.N の
+  一対一マッピング)」というポリシー記述自体が `0.9.0` (#116) 以降の実運用と
+  乖離していたため、(a) Phase umbrella 完了 / (b) Phase に属さない issue
+  バッチの区切り の 2 契機に整理した。
+- **リリース bench artifact 規約 (`docs/conventions.md` §2.3) を実態に追随**:
+  「生 CSV は除外」「version dir 配下の markdown のみ track」という記述が
+  `.gitignore` の現運用と乖離していた (実際には README figure 再生成のため
+  `bench_*.csv` を、参照解差し替え時の infidelity 再計算のため
+  `states/*.npz` を track している)。あわせて **bench sweep は bump ごとに
+  必須ではない** 旨 (実績は 0.8.0 / 0.12.0 / 0.14.0 のみ) と、`states/*.npz`
+  が 0.14.0 時点で 26 ファイル ≈ 101 MB に達しておりリリースごとに線形増加
+  する点を注意として明記した。
+
+### Tests
+
+- **公開モジュールの docstring 例を doctest CI gate に載せた** (issue #163,
+  PR #165): pytest に `--doctest-modules` 設定が無く、`>>>` 例が一度も実行・
+  検証されていなかった。その結果 issue #142 (Phase C, `h_x` を `IsingProblem`
+  → `Schedule` へ移管) で複数の例が壊れたまま放置されていた。
+  `[tool.pytest.ini_options]` に `--doctest-modules` +
+  `doctest_optionflags = [NORMALIZE_WHITESPACE, ELLIPSIS]` を追加し、
+  `testpaths` に `python/maqina` を加えてパッケージ全体を gate に載せる。
+  壊れていた例 (`IsingProblem(n, H_p_diag)` に `h_x` を渡す / `Schedule.linear`
+  に `h_x` を渡さない 等) を現行 API へ追従させ、期待出力が無く必ず fail する
+  脆い例も置換した。
+
+### Benchmarks
+
+- **0.14.0 のリリース bench artifact を追加** (PR #158 / #161): `0.14.0` tag
+  の後にコミットされたため本セクションに記録するが、内容は **0.14.0 の**
+  work-precision sweep である。`benchmarks/results/0.14.0/` に `SUMMARY.md`
+  + `bench_*.csv`、`docs/figures/0.14.0_pareto_{non_stiff,stiff}.png` を配置し
+  `README.md` の図リンクを追従。QuTiP 参照解は wide dynamic range で Adams が
+  不一致を起こすため **BDF を primary** に切り替え (`scripts/run_compute_references_bdf_sweep.sh`)、
+  各 cell の最終状態 ψ(T) を `states/*.npz` に保存して参照解差し替え時に
+  infidelity を再計算できるようにした。QuTiP 凡例は "QuTiP (Adams)" と明記。
+
+### Internal
+
+- `CLAUDE.md` (873 行) をトピック別の path-scoped rule (`.claude/rules/*.md`)
+  に分割 (PR #160)。本体は 182 行の核のみ残し、該当ファイルを触ったときだけ
+  ロードされる構成にした。
+- clippy `chunks_exact_to_as_chunks` を module 単位で `allow` (issue #169,
+  PR #170)。`as_chunks` への移行は一度実装したが revert し、lint 抑制で決着。
+  数値挙動・生成コードともに不変。
+- `benchmarks/bench_simd_scaling.py` の docstring / コメントが実装と
+  ドリフトしていたのを解消 (issue #171, PR #172)。`main()` は subcommand 形式
+  (`measure` / `compare`) だが docstring は存在しない `--mode` flag 前提で
+  書かれており、例をそのまま叩くと argparse が落ちていた。
+
 ### Note
 
-- 公開 API の **追加のみ** で破壊的変更は無い。version bump は本変更単体では
-  行わず, 変更が積み重なった次回の bump PR で `Unreleased` → `0.N.0` へ確定する
-  (`docs/conventions.md` §2 の「bump は Phase/バッチ末尾の PR に同梱」運用)。
+- **公開 API の追加のみで破壊的変更は無い** (`__all__` は `0.14.0` から差分
+  ゼロ)。ただし #167 により `save_tlist` 経路の出力は修正前と **ビット一致
+  しない** (`tol_step` オーダで一致) ため、PATCH ではなく MINOR bump とした。
+- bump 契機は `docs/conventions.md` §2 の (b) 「Phase に属さない issue バッチ
+  の区切り」。#162 / #163 / #167 / #169 / #171 とドキュメント整合をまとめて
+  版数化する。
+- 本リリースは性能に影響する変更を含まないため、リリース bench sweep
+  (`benchmarks/results/0.15.0/`) は取っていない (§2.3 の「毎回必須ではない」
+  運用)。#167 は adaptive `save_tlist` 経路の総 step 数を削減する方向の修正
+  だが (実測 K=201 で 1.47x の過剰を解消)、README figure の Pareto 計測は
+  `save_tlist` を使わないため図の取り直しは不要と判断した。
 
 ## 0.14.0 - 2026-05-30 — Phase C follow-up: adaptive step-size controller 追従性改善 (真の PI 化 / reject 過剰縮小解消 / `ControllerConfig` 公開, umbrella #148)
 
