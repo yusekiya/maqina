@@ -29,70 +29,61 @@
 
 ## 2. バージョニングポリシー
 
-`pyproject.toml` / `Cargo.toml` の `version` は **Phase 完了時に
-`0.N.0` へ bump** する (Phase N → v0.N の一対一マッピング, Phase 計画は
-`docs/design/12-release-plan.md` §12 参照)。
+`pyproject.toml` / `Cargo.toml` の `version` は **v0.x の範囲で SemVer の
+通常規約に従う**。公開 API の追加または破壊的変更が積み上がった時点で
+MINOR (`0.N.0` → `0.N+1.0`) を上げる (v0 段階のため, 互換性のない変更も
+MINOR で吸収する)。MAJOR (`1.0.0`) は v1.0 ロードマップを別途引いてから.
 
-| 時点 | `version` |
-|---|---|
-| 初期状態 / Phase 1 進行中 | `0.0.0` |
-| Phase 1 完了 (umbrella #1 close 時) | `0.1.0` |
-| Phase 2 完了 | `0.2.0` |
-| ... | ... |
-| Phase 6 完了 | `0.6.0` |
-| Phase 7 完了 (Lanczos β_m exposure + Richardson 誤差源分離, #93) | `0.7.0` |
-| Phase 8 完了 (Lanczos a posteriori 早期打切, #98) | `0.8.0` |
-| issue #116 (BLAS thread default 方針改訂, `set_blas_threads_auto()` 追加) | `0.9.0` |
-| Phase B (#122 Chebyshev propagator を CFM4 adaptive Richardson 経路に統合) | `0.10.0` |
-| Phase B finalize (#124 default 切替 + #126/#127 inner loop SIMD/rayon + パッケージ rename `kryanneal → kinema` + Chebyshev Gershgorin precompute) | `0.11.0` |
-| Phase 9+ | `docs/design/13-future-work.md` §13 Future work を再評価して `0.12.0+` のロードマップを引く |
+bump の契機は 2 通り:
 
-注: Phase 6 / 7 / 8 はそれぞれ完了時に `0.N.0` への bump を予定していたが,
-Phase 6 finalize (#66) で Phase 7 / 8 の変更も合わせて遡及的に版数化した
-(Phase 7 / 8 のマージ時点では `v0.5.0` のまま停止)。`CHANGELOG.md` には
-`0.6.0` / `0.7.0` / `0.8.0` を別セクションとして記録し履歴を保全する。
+- **(a) Phase umbrella issue の完了**: Phase 計画は
+  `docs/design/12-release-plan.md` §12 参照。Phase 1〜8 はこの契機で
+  bump した (当時は Phase N → v0.N の一対一マッピングだった)。
+- **(b) Phase に属さない issue バッチの区切り**: 単発 issue または関連
+  issue 群がまとまった時点で bump する。`0.9.0` (issue #116) 以降は
+  こちらが主流で, **Phase 番号と版数の対応は既に成立していない**。
 
-bump 操作は **Phase の最後の child issue を解決する PR に同梱する**
+> **個別バージョンと変更内容の対応は `CHANGELOG.md` (repo root) が唯一の
+> 情報源**。本ファイルには「どう bump するか」の手順のみを置き, 時点と
+> 版数の対応表は持たない (二重管理によるドリフトを避けるため)。
+
+bump 操作は **そのバッチの最後の issue を解決する PR に同梱する**
 (別 release commit を作る運用も可だが, ヒストリ簡潔化のため同梱を
 基本とする). bump コミットに含めるファイル:
 
 - `pyproject.toml` の `version`
 - `Cargo.toml` (workspace なら `[package].version`) の `version`
-- `docs/design/INDEX.md` L1 の "設計書 (v0.X draft)" / "(v0.X)" 表記
-  (Phase 1 完了時は "draft" を外し "v0.1" に確定)
-- `CHANGELOG.md` (repo root) の "Unreleased" セクションを `0.N.0`
-  released セクションに繰り上げる (詳細は §2.2)
-
-破壊変更がない限り MAJOR (`1.0.0`) は v1.0 ロードマップを別途引いてから.
-v0.x の範囲では SemVer の通常規約に従い MINOR (`0.N.0` → `0.N+1.0`) で
-互換性のない変更を吸収可能とする (v0 段階のため).
+- `docs/design/INDEX.md` L1 の "設計書 (v0.X)" 表記
+- `CHANGELOG.md` (repo root) の "Unreleased" セクションを
+  `## 0.N.0 - YYYY-MM-DD — <要約>` の released セクションに繰り上げる
+  (詳細は §2.2)
 
 ### 2.1 umbrella issue の Definition of Done に必ず含める項目
 
-新しい Phase N の umbrella issue を起票するときは, Definition of Done に
+新しい Phase の umbrella issue を起票するときは, Definition of Done に
 以下の 2 項目を **必ず含める** (本ポリシーへの参照リンクを貼る):
 
-- `pyproject.toml` / `Cargo.toml` の `version` を `0.N.0` に bump 済み
-- `docs/design/INDEX.md` L1 の "(v0.N draft)" → "(v0.N)" に更新済み
+- `pyproject.toml` / `Cargo.toml` の `version` を次の MINOR に bump 済み
+- `docs/design/INDEX.md` L1 の版数表記を同じ MINOR に更新済み
 
-これにより, Phase 完了タイミングで version bump を忘れて先に進む事故を
-防ぐ. 既存の Phase 1 umbrella (#1) も本ポリシー追加時に同様に更新済み.
+これにより, バッチ完了タイミングで version bump を忘れて先に進む事故を
+防ぐ. 上記の契機 (b) にあたる非 Phase バッチでも, 最後の issue を解決
+する PR で同じ 2 項目を確認する.
 
 ### 2.2 破壊的変更ログ集約先: `CHANGELOG.md`
 
-`0.N.x` 進行中に蓄積した公開 API の破壊的変更 (mid-Phase で取り込まれ,
-次の Phase 完了 bump で版数化される) と Phase 単位の差分は **すべて
+bump 前に蓄積した公開 API の破壊的変更 (次の MINOR bump でまとめて
+版数化される) とリリース単位の差分は **すべて
 `CHANGELOG.md` (repo root) に時系列で記録する**. 本ファイル
 (`docs/conventions.md`) には個別の変更内容を書かず, ポリシーのみを
 記載する.
 
 運用ルール:
 
-- mid-Phase で公開 API の破壊的変更を取り込む PR は, **同 PR の中で**
-  `CHANGELOG.md` の "Unreleased — Phase N follow-up" セクションに
-  エントリ (issue / PR 番号, シグネチャ変更, 移行手順, 根拠の参照先) を
-  追記する. PR 単独で release notes 起こしに使える粒度で記述する.
-- Phase 完了 bump PR では `CHANGELOG.md` の "Unreleased" セクションを
+- bump 前に公開 API の追加・破壊的変更を取り込む PR は, **同 PR の中で**
+  `CHANGELOG.md` の "Unreleased" セクションにエントリ (issue / PR 番号,
+  シグネチャ変更, 移行手順, 根拠の参照先) を追記する. PR 単独で release notes 起こしに使える粒度で記述する.
+- bump PR では `CHANGELOG.md` の "Unreleased" セクションを
   released バージョン (`## 0.N.0 - YYYY-MM-DD` 等) に繰り上げ, 必要に
   応じて Added / Changed / Fixed セクションも整理する.
 - フォーマットは [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
@@ -104,7 +95,7 @@ v0.x の範囲では SemVer の通常規約に従い MINOR (`0.N.0` → `0.N+1.0
 
 ### 2.3 リリース bench artifact: `benchmarks/results/<X.Y.Z>/`
 
-Phase 完了 bump 時の本番 bench sweep 結果は **`benchmarks/results/<X.Y.Z>/`**
+bump 時に本番 bench sweep を取った場合, その結果は **`benchmarks/results/<X.Y.Z>/`**
 ディレクトリにコミットして履歴を残す (例 `benchmarks/results/0.8.0/`).
 従来は `benchmarks/results/<timestamped-dir>/` 配下に gitignore で残すだけ
 だったが, リリース時の bench は累積改善の単一情報源として後から参照する
@@ -135,18 +126,20 @@ Phase 完了 bump 時の本番 bench sweep 結果は **`benchmarks/results/<X.Y.
 version dir 配下の markdown のみ except する. CSV は default で
 ignore のまま (`benchmarks/results/0.8.0/*.csv` も track されない).
 
-**Phase finalize PR フロー** (#66 / 0.8.0 で確立):
+**リリース finalize PR フロー** (#66 / 0.8.0 で確立):
 
-1. Phase finalize bench を Linux サーバーで実行
+1. finalize bench を Linux サーバーで実行
    (`benchmarks/results/<YYYYMMDD-HHMMSS>/` に出力, gitignore).
 2. Claude が結果を分析し SUMMARY.md を起草. 4 bench `.md` と合わせて
    `benchmarks/results/<X.Y.Z>/` に配置 (CSV は ignore のため除外).
-3. Phase finalize PR にコミット同梱して push.
+3. bump PR にコミット同梱して push.
 4. PR コメントには `SUMMARY.md` を `gh pr comment --body-file` で添付
    (umbrella issue にも re-post).
 5. merge 後は `benchmarks/results/<X.Y.Z>/` が永続記録として GitHub 上に
-   残る (Phase 1 → 当該 version の累積改善の参照可能アーカイブ).
+   残る (初版 → 当該 version の累積改善の参照可能アーカイブ).
 
-**遡及はしない**: 過去 Phase の bench は当該 child PR コメントで個別に
+**遡及はしない**: 過去リリースの bench は当該 child PR コメントで個別に
 記録済みのため `benchmarks/results/0.1.0/` 〜 `0.7.0/` を遡って作らない.
-本ポリシーは 0.8.0 以降の forward-looking 運用.
+本ポリシーは 0.8.0 以降の forward-looking 運用. **bench sweep 自体は毎回
+必須ではない**: 性能に影響しないリリースでは省略する (実績では 0.8.0 /
+0.12.0 / 0.14.0 のみ artifact を持つ).

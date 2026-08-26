@@ -64,8 +64,8 @@ Richardson + PI 制御) も提供。
 ニングはここを参照する:
 
 - §1 開発・ビルド基盤 (uv / maturin / ruff / ty / pre-commit / API stub 二段運用)
-- §2 バージョニングポリシー (Phase N 完了で `0.N.0` へ bump,
-  umbrella issue Definition of Done 必須項目)
+- §2 バージョニングポリシー (v0.x は SemVer 準拠で MINOR bump, その
+  契機と手順, umbrella issue Definition of Done 必須項目)
 
 ## レイアウト
 

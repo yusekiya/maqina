@@ -1,7 +1,8 @@
 # §12. 段階リリース計画
 
-バージョニングポリシー (Phase N → v0.N bump, umbrella issue DoD 必須項目)
-は `docs/conventions.md` §2 を一次資料とする.
+バージョニングポリシー (v0.x の MINOR bump 契機と手順, umbrella issue DoD
+必須項目) は `docs/conventions.md` §2 を一次資料とする. 個別バージョンと
+変更内容の対応は `CHANGELOG.md` を見る.
 
 ### Phase 1: MVP / scalar baseline (~v0.1)
 

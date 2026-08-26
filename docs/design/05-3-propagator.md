@@ -881,8 +881,8 @@ if err_lanczos_total > tol_step:
 3 つの adaptive 経路パラメータ (`krylov_tol` / `dt_init` / `dt_max`) を
 **`None` default + auto resolution + 明示 float で override** の統一
 スタイルに揃え (`"auto"` リテラル廃止) 公開 API の破壊的変更を導入した。
-版数は `docs/conventions.md` §2 ポリシー (Phase 完了時に `0.N.0` へ bump)
-に従い, **Phase 5 完了の v0.5.0 minor bump で正式に版数化済** (本変更は
+版数は当時の `docs/conventions.md` §2 ポリシー (Phase 完了時に `0.N.0` へ
+bump; 現在は Phase 非依存の MINOR bump 運用) に従い, **Phase 5 完了の v0.5.0 minor bump で正式に版数化済** (本変更は
 Phase 4 follow-up として 0.4.x 系で先行マージされ, Phase 5 umbrella PR
 (issue #45) でまとめて bump された)。
 
